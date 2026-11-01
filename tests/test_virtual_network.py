@@ -59,6 +59,13 @@ class VirtualNetworkTests(unittest.TestCase):
         self.assertEqual((bytes(b.ram),cpu_state(b)),before)
         self.assertFalse(hasattr(b,'experimental_network'))
 
+    def test_default_service_preserves_browser_profile_and_gateway(self):
+        b = self.board
+        before = bytes(b.uc.mem_read(0x0433613c,0x43b0))
+        network = self.attach()
+        self.assertEqual(bytes(b.uc.mem_read(0x0433613c,0x43b0)),before)
+        self.assertFalse(network.report()['configures_http_profile'])
+
     def request(self,valid=True):
         b = self.board
         pointer = 0x04001000
@@ -103,6 +110,7 @@ class VirtualNetworkTests(unittest.TestCase):
         b = self.board
         network = self.attach()
         network.phase = 'confirming'
+        network.pending_result = 0
         b.uc.mem_write(0x04002000,bytes(8))
         b.uc.reg_write(UC_ARM_REG_R0,0x04002000)
         network._confirm(b.uc,0x599c14,2,None)
@@ -124,6 +132,64 @@ class VirtualNetworkTests(unittest.TestCase):
                 with self.assertRaisesRegex(SnapshotError,'experimental_network'):
                     save_snapshot(b,Path(directory)/'unsupported.b220state')
                 self.assertEqual(list(Path(directory).iterdir()),[])
+
+    def test_sim_home_plmn_uses_firmware_accounts_without_forcing_http(self):
+        b = self.board
+        before = cpu_state(b),bytes(b.flash.array)
+        self.network = VirtualNetwork(b,home_plmn='25001')
+        report = self.network.report()
+        self.assertEqual(report['native_sim_provisioning']['account_count'],2)
+        self.assertEqual(report['native_sim_provisioning']['apn'],'internet.mts.ru')
+        self.assertFalse(report['configures_http_profile'])
+        self.assertEqual(cpu_state(b),before[0])
+        self.assertEqual(bytes(b.flash.array),before[1])
+
+    def test_registration_loss_rejects_pdp_through_native_reply_helper(self):
+        b = self.board
+        network = self.attach()
+        network.set_service(registered=False)
+        self.request()
+        result = b.run(100,2,entry=0x240253,until=0x53b044,report=False)
+        self.assertEqual(result['stop']['reason'],'requested end address')
+        self.assertEqual(b.uc.reg_read(UC_ARM_REG_R2),0x66)
+        b.uc.mem_write(0x04002000,(0x66).to_bytes(4,'big')+bytes(4))
+        b.uc.reg_write(UC_ARM_REG_R0,0x04002000)
+        network._confirm(b.uc,0x599c14,2,None)
+        self.assertEqual(network.phase,'ready')
+        self.assertFalse(network.registered)
+        network.set_service(sim_present=False)
+        self.assertEqual(int.from_bytes(b.uc.mem_read(0x0433287c,4),'big'),7)
+        with self.assertRaises(ValueError):
+            network.set_service(registered=True)
+        self.assertFalse(network.sim_present)
+
+    def test_unknown_sim_operator_does_not_get_a_forced_http_profile(self):
+        self.network = VirtualNetwork(self.board,home_plmn='99999')
+        self.assertEqual(self.network.provisioning['account_count'],0)
+        self.assertEqual(self.network.provisioning['connection_type'],0)
+
+    def test_sim_removal_closes_host_transport(self):
+        from emulator.host_network import InternetNetwork
+        b = self.board
+        network = self.attach()
+        network.phase = 'active'
+        backend = InternetNetwork(b,network)
+        try:
+            b.uc.reg_write(UC_ARM_REG_R0,2)
+            b.uc.reg_write(UC_ARM_REG_R1,1)
+            from unicorn.arm_const import UC_ARM_REG_R2,UC_ARM_REG_R3
+            b.uc.reg_write(UC_ARM_REG_R2,0)
+            b.uc.reg_write(UC_ARM_REG_R3,1)
+            b.uc.reg_write(UC_ARM_REG_LR,0x4000fff0)
+            result = b.run(100,2,entry=0x2cfb33,until=0x4000fff0,report=False)
+            self.assertEqual(result['stop']['reason'],'requested end address')
+            sock = next(iter(backend.sockets.values()))['socket']
+            network.set_service(sim_present=False)
+            self.assertEqual(sock.fileno(),-1)
+            self.assertEqual(backend.sockets,{})
+            self.assertEqual(network.phase,'absent')
+        finally:
+            backend.close()
 
 
 if __name__ == '__main__':
