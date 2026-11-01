@@ -1,0 +1,142 @@
+{
+  "name": "Explay B220 L7A (inferred, no physical-device measurements)",
+  "ps_sha256": "7bd1dd7b3ce3a3efa65f957eb24e4e4b3114775c8b7770121f98b39816bacbeb",
+  "chip_id": "0x66007019",
+  "unimplemented_peripherals": [],
+  "shared_memory": [
+    {
+      "address": "0x10000000",
+      "size": "0x1000",
+      "evidence": "PS 0x522dac clears 0xf9c bytes at the pointer 0x10000000 in runtime global 0x0429cf58. Shared storage with the separately modeled bootstrap mailbox; DSP instructions and runtime services are not executed."
+    }
+  ],
+  "mmio_windows": [
+    [
+      "0x08000000",
+      "0x08001000"
+    ],
+    [
+      "0x08020000",
+      "0x08021000"
+    ],
+    [
+      "0x80000000",
+      "0x90000000"
+    ],
+    [
+      "0x20000000",
+      "0x20010000"
+    ],
+    [
+      "0x20100000",
+      "0x20110000"
+    ],
+    [
+      "0x20300000",
+      "0x20310000"
+    ],
+    [
+      "0x20400000",
+      "0x20401000"
+    ],
+    [
+      "0x20500000",
+      "0x20501000"
+    ],
+    [
+      "0x20200000",
+      "0x20220000"
+    ]
+  ],
+  "chip_id_evidence": "PS 0x483978 normalizes this to 0x50009; PS 0x6c5764 names it SC6600L7A",
+  "nor": {
+    "manufacturer": "0x20",
+    "device": "0x88c0",
+    "parameter_start": "0x7f0000",
+    "parameter_size": "0x2000",
+    "evidence": "Supported ID entry in PS at 0x6c8264; physical part unknown. Guest erase trace uses main blocks 0x7b/7c/7d/7e0000 then parameter blocks 0x7f0000,7f2000,...7fe000. Logical EFS blocks remain 64 KiB, but physical erase units in the last 64 KiB are 8 KiB. Revision 2 fixes the previous uniform-64K model."
+  },
+  "nv_seed": {
+    "source": "analysis/extracted/nvitem_release.bin",
+    "sha256": "ac34377903939ff33634914f41fe242b7b16334545e97c45ef9dd942ba885388",
+    "addresses": [
+      "0x7a0000",
+      "0x7a4000"
+    ],
+    "slot_size": "0x4000",
+    "evidence": "PS geometry 0x2f8 gives the two fixed-NV addresses; NV reader 0x1816cc parses aligned BE id/length records after four header bytes, matching the supplied release NV. This is factory-template state, not a handset dump."
+  },
+  "registers": {
+    "0x20000008": "0x00000004",
+    "0x8b000024": "0x000d0078",
+    "0x8b000020": "0x00000004"
+  },
+  "models": {
+    "rtc": {
+      "evidence": "PS 0x18e5da writes seconds/minutes/hours/day shadows at 0x89000010..1c and expects completion bits8..11; alarm shadows +20..2c bits12..15. IRQ7 handler 0x18e8b8 reads raw+34 AND enable+30, clears pending RAM bits itself and W1C +38. Invalid-state recovery 0x18e712 writes 8b000020 bit19 and expects bit17 valid on the next read; inferred latch side effect. Virtual block-clock time, no periodic/alarm firing."
+    },
+    "spi_no_card": {
+      "evidence": "PS 0x649a82 polls SPI+0x34 bit7 ready and bit8 busy; 0x649ba6 starts RX with +0x18 bit9, polls +0x34 bit5 empty, reads data +0. Controllers at 0x8e000000 (SD) and 0x8e003000 (SIM switch 6302). Clocking completes immediately, MISO high; external switch register semantics are not implemented. Logical SD detect GPIO16 defaults to present without a valid table entry; absence is discovered by no CMD0 response."
+    },
+    "countdown_timers": {
+      "blocks_per_ms": 128,
+      "frequency": 32768,
+      "evidence": "PS 0x484d08 converts milliseconds to 32768 Hz ticks, programs LOAD+0/CTL+8 bit7/INT+12 bit0, clears INT bit3. GET reads VALUE+4. Timer bases 0x81000000 and 0x81000020, IRQ4/5. Bit6 periodic mode is a hardware hypothesis; timing uses the same deterministic block clock as the system counter."
+    },
+    "interrupt_controller": {
+      "evidence": "PS 0x47f92e reads masked pending at 0x80000000; 0x526e22 enables bit 13 via 0x80000008; early boot disables through 0x8000000c. Inferred raw/en-set/en-clear subset; FIQ and hardware priority are not modeled."
+    },
+    "dsp_bootstrap": {
+      "evidence": "PS 0x5267ea/0x5268f2: halfword mailbox 0x10000000, status +2, word offset +4, word count +6, payload +8. Command 1 ready, 3 stage, rising bit2 commit. Completion raises IRQ13; guest callback 0x526a26 sets RAM flag 0x0434c3dc and writes 0x8b000014 OR 3 to acknowledge. This is a protocol peer, not execution of DSP firmware."
+    },
+    "lcd_dma": {
+      "evidence": "PS 0x496638 programs channel 16 at 0x20100600; enable 0x20100010, done polled at 0x20100060, clears at 0x20100070/74. Only observed config 0x04880160, source increment 2, fixed LCD target 0x08020000 is implemented. BE RGB565 is serialized as two upper-lane bytes; immediate completion, no DMA interrupt."
+    },
+    "adc": {
+      "control": "0x8a003000",
+      "selection": "0x8a003004",
+      "result": "0x8a00300c",
+      "start_mask": "0x2",
+      "ready_mask": "0x40",
+      "samples": {
+        "5": 900
+      },
+      "evidence": "PS 0x17c16c selects channel 5 for battery (caller 0x492626), starts control bit 1, waits for bit 6 at 0x17c3a2, reads low 10 result bits. Instant conversion and sample 900 are virtual healthy-battery assumptions; other channels default to zero."
+    },
+    "lcd": {
+      "command": "0x08000000",
+      "data": "0x08020000",
+      "device_id": "0x9225",
+      "evidence": "Runtime LCM port table 0x042ccef8; PS panel table 0x72b304 accepts 0x9225. Panel is chosen for emulation, physical hardware is unknown."
+    },
+    "system_counter": {
+      "counter": "0x81003004",
+      "control": "0x81003008",
+      "enable_mask": "0x8",
+      "blocks_per_tick": 128,
+      "evidence": "PS 0x484f88 double-reads 0x81003004 until stable; 0x484c06 sets control bit 3. Tick rate is a deterministic exploration assumption, not measured timing."
+    },
+    "dma_gate": {
+      "control": "0x20100000",
+      "request_mask": "0x1",
+      "ack_mask": "0x4",
+      "evidence": "PS 0x17a694 writes request bit 0, 0x17a6ac polls bit 2; 0x17a6c0 clears request. This is a gate handshake, not DMA transfers."
+    },
+    "jpeg": {
+      "evidence": "PS 0x5e117c configures JPEG buffers; 0x2c7658 starts HUFF at 0x20210800, polls MCU progress at 0x20211808 and bit2 completion at +10. Implemented synchronous baseline 4:2:2, exact observed standard Huffman tables, programmed quantization, raw scan/header bit access, linear RGB565 output at buffer +58. Partial MCU batches complete only their destination tiles. Custom Huffman, planar/scaled output and other sampling modes stop explicitly; no JPEG IRQ delivery yet."
+    },
+    "keypad": {
+      "evidence": "PS 0x5b4154 configures KPD 0x87000000, enable +04, masked status +08, W1C +10, key slot +2c; IRQ8 handler 0x5b407a. Down bit0, up bit4; row bits0..2 and column bits4..6. Deferred callback 0x1f6cac -> T_KPDSVR -> table 0x3dd46c -> MMI callback 0x1a1236. Power/end is separate GPIO3 at 0x8a000000, enable +18, pending +20, W1C +24, IRQ6; original callback 0x3a7d68 emits 0x2002, translated to native 2. Single-slot serialized host edges; no guest RAM patches."
+    }
+  },
+  "register_evidence": {
+    "0x20000008": "Inferred idle-ready bit2: SRAM 0x400034fc (PS 0x744428) waits for it before low-power clock switching. All modeled external-memory/DMA operations complete immediately; no pending bus transaction is modeled.",
+    "0x8b000020": "Chosen startup reason 4: decoded/cached by PS 0x48a64c; follows normal POWER_PowerOn via 0x17e138 and creates APP_Task/MMI. Previous reason 1 selects a service Layer1-only branch at 0x17e120. Physical meaning of reason 4 is unknown; zero resets with the supplied release NV defaults.",
+    "0x8b000024": "Inferred boot PLL setting: PS 0x483a04 explicitly accepts 0x000d0078; not measured on a handset"
+  },
+  "notes": [
+    "External RAM aliases and 4 MiB capacity are hypotheses.",
+    "Unknown MMIO uses zero-backed storage only in explore mode; it is not a device model.",
+    "ARM926 is an approximation of ARM7TDMI. Fixed BE compatibility is enforced at translated block boundaries."
+  ]
+}

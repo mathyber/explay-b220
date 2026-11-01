@@ -1,0 +1,20 @@
+file=SC6600L_S915D_B220_L7A_64X32_M224_qcif.bin, base=0x0, ARM big-endian
+0059d96c: b53e         push     {r1, r2, r3, r4, r5, lr}
+0059d96e: 1c04         adds     r4, r0, #0
+0059d970: a039         adr      r0, #0xe4
+0059d972: 1c0d         adds     r5, r1, #0
+0059d974: f6f0fbd1     bl       #0x48e11a
+0059d978: f108f916     bl       #0x6a5ba8
+0059d97c: 2100         movs     r1, #0
+0059d97e: 220b         movs     r2, #0xb
+0059d980: 9202         str      r2, [sp, #8]
+0059d982: 9101         str      r1, [sp, #4]
+0059d984: 9000         str      r0, [sp]
+0059d986: 1c2b         adds     r3, r5, #0
+0059d988: 1c22         adds     r2, r4, #0
+0059d98a: 483d         ldr      r0, [pc, #0xf4]
+0059d98c: 493b         ldr      r1, [pc, #0xec]
+0059d98e: f10efdb7     bl       #0x6ac500
+0059d992: bc3e         pop      {r1, r2, r3, r4, r5}
+0059d994: bc08         pop      {r3}
+0059d996: 4718         bx       r3

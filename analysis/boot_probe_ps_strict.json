@@ -1,0 +1,100 @@
+{
+  "image": "PS",
+  "engine": "Unicorn ARM926 (approximation, not ARM7TDMI)",
+  "endian": "big / BE32",
+  "entry": "0x0",
+  "instruction_limit": 500000,
+  "zero_mmio_stubs": false,
+  "mmio_events": [
+    {
+      "access": 17,
+      "address": "0x8000000c",
+      "size": 4,
+      "value": "0x4ff7ffff",
+      "pc": "0x6a4238"
+    }
+  ],
+  "stubbed_pages": [],
+  "endian_adapter": "hold Unicorn CPSR.E=1 to approximate fixed-endian ARM7",
+  "endian_repairs": [],
+  "executed": 6,
+  "status": "unmodeled or protected memory access",
+  "fault": {
+    "access": 20,
+    "address": "0x8000000c",
+    "size": 4,
+    "value": "0x4ff7ffff",
+    "pc": "0x6a4238"
+  },
+  "engine_error": "Invalid memory write (UC_ERR_WRITE_UNMAPPED)",
+  "trace_tail": [
+    {
+      "pc": "0x0",
+      "thumb": false,
+      "bytes": "e59ff018",
+      "asm": "ldr pc, [pc, #0x18]"
+    },
+    {
+      "pc": "0x6a4228",
+      "thumb": false,
+      "bytes": "e51fc1d4",
+      "asm": "ldr ip, [pc, #-0x1d4]"
+    },
+    {
+      "pc": "0x6a422c",
+      "thumb": false,
+      "bytes": "e59cc000",
+      "asm": "ldr ip, [ip]"
+    },
+    {
+      "pc": "0x6a4230",
+      "thumb": false,
+      "bytes": "e51fb168",
+      "asm": "ldr fp, [pc, #-0x168]"
+    },
+    {
+      "pc": "0x6a4234",
+      "thumb": false,
+      "bytes": "e59bb000",
+      "asm": "ldr fp, [fp]"
+    },
+    {
+      "pc": "0x6a4238",
+      "thumb": false,
+      "bytes": "e58cb000",
+      "asm": "str fp, [ip]"
+    }
+  ],
+  "registers": {
+    "pc": "0x6a4238",
+    "sp": "0x0",
+    "r0": "0x0",
+    "cpsr": "0x2d3"
+  },
+  "hot_pcs": [
+    [
+      "0x0",
+      1
+    ],
+    [
+      "0x6a4228",
+      1
+    ],
+    [
+      "0x6a422c",
+      1
+    ],
+    [
+      "0x6a4230",
+      1
+    ],
+    [
+      "0x6a4234",
+      1
+    ],
+    [
+      "0x6a4238",
+      1
+    ]
+  ]
+}

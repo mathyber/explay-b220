@@ -1,0 +1,31 @@
+file=SC6600L_S915D_B220_L7A_64X32_M224_qcif.bin, base=0x0, ARM big-endian
+0059d888: b5fe         push     {r1, r2, r3, r4, r5, r6, r7, lr}
+0059d88a: 1c05         adds     r5, r0, #0
+0059d88c: a02f         adr      r0, #0xbc
+0059d88e: 1c0e         adds     r6, r1, #0
+0059d890: f6f0fc43     bl       #0x48e11a
+0059d894: 2101         movs     r1, #1
+0059d896: 4812         ldr      r0, [pc, #0x48]
+0059d898: f109fe68     bl       #0x6a756c
+0059d89c: 1c04         adds     r4, r0, #0
+0059d89e: f719fbdc     bl       #0x4b705a
+0059d8a2: 4b25         ldr      r3, [pc, #0x94]
+0059d8a4: 2c00         cmp      r4, #0
+0059d8a6: d001         beq      #0x59d8ac
+0059d8a8: 2001         movs     r0, #1
+0059d8aa: e004         b        #0x59d8b6
+0059d8ac: 2800         cmp      r0, #0
+0059d8ae: d001         beq      #0x59d8b4
+0059d8b0: 2002         movs     r0, #2
+0059d8b2: e000         b        #0x59d8b6
+0059d8b4: 2003         movs     r0, #3
+0059d8b6: 6158         str      r0, [r3, #0x14]
+0059d8b8: 2201         movs     r2, #1
+0059d8ba: 2100         movs     r1, #0
+0059d8bc: 9101         str      r1, [sp, #4]
+0059d8be: 9202         str      r2, [sp, #8]
+0059d8c0: 220e         movs     r2, #0xe
+0059d8c2: 1c31         adds     r1, r6, #0
+0059d8c4: 9000         str      r0, [sp]
+0059d8c6: 2305         movs     r3, #5
+0059d8c8: 1c28         adds     r0, r5, #0

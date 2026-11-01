@@ -1,0 +1,387 @@
+{
+  "profile": {
+    "name": "Explay B220 L7A (inferred, no physical-device measurements)",
+    "ps_sha256": "7bd1dd7b3ce3a3efa65f957eb24e4e4b3114775c8b7770121f98b39816bacbeb",
+    "chip_id": "0x66007019",
+    "shared_memory": [
+      {
+        "address": "0x10000000",
+        "size": "0x1000",
+        "evidence": "PS 0x522dac clears 0xf9c bytes at the pointer 0x10000000 in runtime global 0x0429cf58. This is storage only; no DSP execution or mailbox responses."
+      }
+    ],
+    "mmio_windows": [
+      [
+        "0x08000000",
+        "0x08001000"
+      ],
+      [
+        "0x08020000",
+        "0x08021000"
+      ],
+      [
+        "0x80000000",
+        "0x90000000"
+      ],
+      [
+        "0x20000000",
+        "0x20010000"
+      ],
+      [
+        "0x20100000",
+        "0x20110000"
+      ],
+      [
+        "0x20300000",
+        "0x20310000"
+      ],
+      [
+        "0x20400000",
+        "0x20401000"
+      ],
+      [
+        "0x20500000",
+        "0x20501000"
+      ]
+    ],
+    "chip_id_evidence": "PS 0x483978 normalizes this to 0x50009; PS 0x6c5764 names it SC6600L7A",
+    "nor": {
+      "manufacturer": "0x20",
+      "device": "0x88c0",
+      "evidence": "Supported entry in PS at 0x6c8264; chosen virtual part, not an identified physical handset component"
+    },
+    "nv_seed": {
+      "source": "analysis/extracted/nvitem_release.bin",
+      "sha256": "ac34377903939ff33634914f41fe242b7b16334545e97c45ef9dd942ba885388",
+      "addresses": [
+        "0x7a0000",
+        "0x7a4000"
+      ],
+      "slot_size": "0x4000",
+      "evidence": "PS geometry 0x2f8 gives the two fixed-NV addresses; NV reader 0x1816cc parses aligned BE id/length records after four header bytes, matching the supplied release NV. This is factory-template state, not a handset dump."
+    },
+    "registers": {
+      "0x20000008": "0x00000004",
+      "0x8b000024": "0x000d0078",
+      "0x8b000020": "0x00000004"
+    },
+    "models": {
+      "rtc": {
+        "evidence": "PS 0x18e5da writes seconds/minutes/hours/day shadows at 0x89000010..1c and expects completion bits8..11; alarm shadows +20..2c bits12..15. IRQ7 handler 0x18e8b8 reads raw+34 AND enable+30, clears pending RAM bits itself and W1C +38. Invalid-state recovery 0x18e712 writes 8b000020 bit19 and expects bit17 valid on the next read; inferred latch side effect. Virtual block-clock time, no periodic/alarm firing."
+      },
+      "spi_no_card": {
+        "evidence": "PS 0x649a82 polls SPI+0x34 bit7 ready and bit8 busy; 0x649ba6 starts RX with +0x18 bit9, polls +0x34 bit5 empty, reads data +0. Controllers at 0x8e000000 (SD) and 0x8e003000 (SIM switch 6302). Clocking completes immediately, MISO high; external switch register semantics are not implemented. Logical SD detect GPIO16 defaults to present without a valid table entry; absence is discovered by no CMD0 response."
+      },
+      "countdown_timers": {
+        "blocks_per_ms": 128,
+        "frequency": 32768,
+        "evidence": "PS 0x484d08 converts milliseconds to 32768 Hz ticks, programs LOAD+0/CTL+8 bit7/INT+12 bit0, clears INT bit3. GET reads VALUE+4. Timer bases 0x81000000 and 0x81000020, IRQ4/5. Bit6 periodic mode is a hardware hypothesis; timing uses the same deterministic block clock as the system counter."
+      },
+      "interrupt_controller": {
+        "evidence": "PS 0x47f92e reads masked pending at 0x80000000; 0x526e22 enables bit 13 via 0x80000008; early boot disables through 0x8000000c. Inferred raw/en-set/en-clear subset; FIQ and hardware priority are not modeled."
+      },
+      "dsp_bootstrap": {
+        "evidence": "PS 0x5267ea/0x5268f2: halfword mailbox 0x10000000, status +2, word offset +4, word count +6, payload +8. Command 1 ready, 3 stage, rising bit2 commit. Completion raises IRQ13; guest callback 0x526a26 sets RAM flag 0x0434c3dc and writes 0x8b000014 OR 3 to acknowledge. This is a protocol peer, not execution of DSP firmware."
+      },
+      "lcd_dma": {
+        "evidence": "PS 0x496638 programs channel 16 at 0x20100600; enable 0x20100010, done polled at 0x20100060, clears at 0x20100070/74. Only observed config 0x04880160, source increment 2, fixed LCD target 0x08020000 is implemented. BE RGB565 is serialized as two upper-lane bytes; immediate completion, no DMA interrupt."
+      },
+      "adc": {
+        "control": "0x8a003000",
+        "selection": "0x8a003004",
+        "result": "0x8a00300c",
+        "start_mask": "0x2",
+        "ready_mask": "0x40",
+        "samples": {
+          "5": 900
+        },
+        "evidence": "PS 0x17c16c selects channel 5 for battery (caller 0x492626), starts control bit 1, waits for bit 6 at 0x17c3a2, reads low 10 result bits. Instant conversion and sample 900 are virtual healthy-battery assumptions; other channels default to zero."
+      },
+      "lcd": {
+        "command": "0x08000000",
+        "data": "0x08020000",
+        "device_id": "0x9225",
+        "evidence": "Runtime LCM port table 0x042ccef8; PS panel table 0x72b304 accepts 0x9225. Panel is chosen for emulation, physical hardware is unknown."
+      },
+      "system_counter": {
+        "counter": "0x81003004",
+        "control": "0x81003008",
+        "enable_mask": "0x8",
+        "blocks_per_tick": 128,
+        "evidence": "PS 0x484f88 double-reads 0x81003004 until stable; 0x484c06 sets control bit 3. Tick rate is a deterministic exploration assumption, not measured timing."
+      },
+      "dma_gate": {
+        "control": "0x20100000",
+        "request_mask": "0x1",
+        "ack_mask": "0x4",
+        "evidence": "PS 0x17a694 writes request bit 0, 0x17a6ac polls bit 2; 0x17a6c0 clears request. This is a gate handshake, not DMA transfers."
+      }
+    },
+    "register_evidence": {
+      "0x20000008": "Inferred idle-ready bit2: SRAM 0x400034fc (PS 0x744428) waits for it before low-power clock switching. All modeled external-memory/DMA operations complete immediately; no pending bus transaction is modeled.",
+      "0x8b000020": "Chosen startup reason 4: decoded/cached by PS 0x48a64c; follows normal POWER_PowerOn via 0x17e138 and creates APP_Task/MMI. Previous reason 1 selects a service Layer1-only branch at 0x17e120. Physical meaning of reason 4 is unknown; zero resets with the supplied release NV defaults.",
+      "0x8b000024": "Inferred boot PLL setting: PS 0x483a04 explicitly accepts 0x000d0078; not measured on a handset"
+    },
+    "notes": [
+      "External RAM aliases and 4 MiB capacity are hypotheses.",
+      "Unknown MMIO uses zero-backed storage only in explore mode; it is not a device model.",
+      "ARM926 is an approximation of ARM7TDMI. Fixed BE compatibility is enforced at translated block boundaries."
+    ]
+  },
+  "image_sha256": "7bd1dd7b3ce3a3efa65f957eb24e4e4b3114775c8b7770121f98b39816bacbeb",
+  "explore": false,
+  "engine": "Unicorn 2 / ARM926 approximation, fixed BE adapter",
+  "instruction_budget": 100000000,
+  "elapsed_seconds": 0.0,
+  "translated_blocks": 3,
+  "stop": {
+    "reason": "unknown MMIO read",
+    "pc": "0x6a429c",
+    "address": "0x8b00002c",
+    "size": 4,
+    "value": "0x0"
+  },
+  "engine_error": null,
+  "registers": {
+    "pc": "0x6a429c",
+    "sp": "0x0",
+    "lr": "0x0",
+    "cpsr": "0x200002d3"
+  },
+  "general_registers": {
+    "r0": "0x8b00002c",
+    "r1": "0x0",
+    "r2": "0x0",
+    "r3": "0x0",
+    "r4": "0x0",
+    "r5": "0x0",
+    "r6": "0x0",
+    "r7": "0x0",
+    "r8": "0x0",
+    "r9": "0x0",
+    "r10": "0x0",
+    "r11": "0x4",
+    "r12": "0xff"
+  },
+  "normalized_chip": "00000000",
+  "nv_seed": {
+    "source": "analysis/extracted/nvitem_release.bin",
+    "sha256": "ac34377903939ff33634914f41fe242b7b16334545e97c45ef9dd942ba885388",
+    "size": 15644,
+    "addresses": [
+      "0x7a0000",
+      "0x7a4000"
+    ],
+    "kind": "release template, not physical-device state"
+  },
+  "loaded_flash": null,
+  "nor_mode": "array",
+  "nor_events": [],
+  "nor_event_count": 0,
+  "nor_events_truncated": false,
+  "nor_programmed_words": 0,
+  "nor_erased_blocks": 0,
+  "lcd": {
+    "device": "virtual ILI9225 (chosen supported panel)",
+    "device_id": "0x9225",
+    "width": 176,
+    "height": 220,
+    "pixel_writes": 0,
+    "register_writes": 0,
+    "registers": {
+      "0x3": "0x1030",
+      "0x20": "0x0",
+      "0x21": "0x0",
+      "0x36": "0xaf",
+      "0x37": "0x0",
+      "0x38": "0xdb",
+      "0x39": "0x0"
+    },
+    "command_counts": {},
+    "events": [],
+    "limitations": "Raw RGB565 GRAM view; no BGR/wiring validation, analog timing/gamma/scan-pin orientation"
+  },
+  "dma_transfers": [],
+  "dsp_bootstrap": {
+    "kind": "bootstrap protocol peer only; DSP code is not executed",
+    "command": "0x0",
+    "status": "0x0",
+    "received_bytes": 0,
+    "image_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "transfers": [],
+    "events": []
+  },
+  "interrupt_controller": {
+    "raw": "0x0",
+    "enabled": "0x0",
+    "pending": "0x0",
+    "events": []
+  },
+  "irq_entries": [],
+  "countdown_timers": {
+    "0x81000000": {
+      "line": 4,
+      "load": 0,
+      "value": 0,
+      "control": "0x0",
+      "irq_enabled": false,
+      "raw": false,
+      "expirations": 0
+    },
+    "0x81000020": {
+      "line": 5,
+      "load": 0,
+      "value": 0,
+      "control": "0x0",
+      "irq_enabled": false,
+      "raw": false,
+      "expirations": 0
+    }
+  },
+  "spi": {
+    "device": "unconnected SPI, no SD card",
+    "rx_words": 0,
+    "tx_words": 0,
+    "rx_remaining": 0,
+    "tx_sample": []
+  },
+  "spi_controllers": {
+    "0x8e000000": {
+      "device": "unconnected SPI, no SD card",
+      "rx_words": 0,
+      "tx_words": 0,
+      "rx_remaining": 0,
+      "tx_sample": []
+    },
+    "0x8e003000": {
+      "device": "SIM-switch SPI transport; no external switch response modeled",
+      "rx_words": 0,
+      "tx_words": 0,
+      "rx_remaining": 0,
+      "tx_sample": []
+    }
+  },
+  "rtc": {
+    "time_fields": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "enable": "0x0",
+    "raw": "0x0",
+    "updates": 0,
+    "limitations": "No wall-clock synchronization, periodic RTC IRQ, or alarm firing"
+  },
+  "rtos_tasks": [],
+  "milestones": [],
+  "guest_logs": [],
+  "endian_repairs": [],
+  "unknown_mmio_accesses": 0,
+  "mmio_summary": [
+    {
+      "op": "write",
+      "address": "0x8000000c",
+      "count": 1,
+      "profiled": true,
+      "samples": [
+        {
+          "pc": "0x6a4238",
+          "value": "0x4ff7ffff"
+        }
+      ]
+    },
+    {
+      "op": "read",
+      "address": "0x8b000020",
+      "count": 1,
+      "profiled": true,
+      "samples": [
+        {
+          "pc": "0x6a424c",
+          "value": "0x4"
+        }
+      ]
+    }
+  ],
+  "mmio_tail": [
+    {
+      "op": "write",
+      "address": "0x8000000c",
+      "pc": "0x6a4238",
+      "value": "0x4ff7ffff",
+      "size": 4,
+      "model": "inferred IRQ controller"
+    },
+    {
+      "op": "read",
+      "address": "0x8b000020",
+      "pc": "0x6a424c",
+      "value": "0x4",
+      "size": 4,
+      "model": "profile storage"
+    }
+  ],
+  "mapped_mmio_pages": [
+    "0x80000000",
+    "0x8b000000"
+  ],
+  "hot_blocks": [
+    {
+      "pc": "0x0",
+      "count": 1
+    },
+    {
+      "pc": "0x6a4228",
+      "count": 1
+    },
+    {
+      "pc": "0x6a4294",
+      "count": 1
+    }
+  ],
+  "block_tail": [
+    {
+      "address": "0x0",
+      "size": 4,
+      "thumb": false,
+      "instructions": [
+        "00000000: ldr pc, [pc, #0x18]"
+      ]
+    },
+    {
+      "address": "0x6a4228",
+      "size": 52,
+      "thumb": false,
+      "instructions": [
+        "006a4228: ldr ip, [pc, #-0x1d4]",
+        "006a422c: ldr ip, [ip]",
+        "006a4230: ldr fp, [pc, #-0x168]",
+        "006a4234: ldr fp, [fp]",
+        "006a4238: str fp, [ip]",
+        "006a423c: ldr ip, [pc, #-0x204]",
+        "006a4240: ldr ip, [ip]",
+        "006a4244: and ip, ip, #0xff",
+        "006a4248: ldr fp, [pc, #-0x20c]",
+        "006a424c: ldr fp, [fp]",
+        "006a4250: and fp, fp, #0xff",
+        "006a4254: cmp ip, fp",
+        "006a4258: bne #0x6a4294"
+      ]
+    },
+    {
+      "address": "0x6a4294",
+      "size": 24,
+      "thumb": false,
+      "instructions": [
+        "006a4294: ldr r0, [pc, #0x3e8]",
+        "006a4298: mov r1, #0",
+        "006a429c: ldr r2, [r0]",
+        "006a42a0: orr r1, r1, r2",
+        "006a42a4: str r1, [r0]",
+        "006a42a8: msr cpsr_c, #0xd3"
+      ]
+    }
+  ],
+  "lcd_image": null
+}

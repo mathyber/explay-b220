@@ -1,0 +1,204 @@
+{
+  "image": "FDL",
+  "engine": "Unicorn ARM926 (approximation, not ARM7TDMI)",
+  "endian": "big / BE32",
+  "entry": "0x34000000",
+  "instruction_limit": 500000,
+  "zero_mmio_stubs": false,
+  "mmio_events": [],
+  "stubbed_pages": [],
+  "endian_adapter": "hold Unicorn CPSR.E=1 to approximate fixed-endian ARM7",
+  "endian_repairs": [],
+  "executed": 22,
+  "status": "unmodeled or protected memory access",
+  "fault": {
+    "access": 19,
+    "address": "0x8b000018",
+    "size": 4,
+    "value": "0x0",
+    "pc": "0x34000054"
+  },
+  "engine_error": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "trace_tail": [
+    {
+      "pc": "0x34000000",
+      "thumb": false,
+      "bytes": "e3a00000",
+      "asm": "mov r0, #0"
+    },
+    {
+      "pc": "0x34000004",
+      "thumb": false,
+      "bytes": "e3a01000",
+      "asm": "mov r1, #0"
+    },
+    {
+      "pc": "0x34000008",
+      "thumb": false,
+      "bytes": "e3a02000",
+      "asm": "mov r2, #0"
+    },
+    {
+      "pc": "0x3400000c",
+      "thumb": false,
+      "bytes": "e3a03000",
+      "asm": "mov r3, #0"
+    },
+    {
+      "pc": "0x34000010",
+      "thumb": false,
+      "bytes": "e3a04000",
+      "asm": "mov r4, #0"
+    },
+    {
+      "pc": "0x34000014",
+      "thumb": false,
+      "bytes": "e3a05000",
+      "asm": "mov r5, #0"
+    },
+    {
+      "pc": "0x34000018",
+      "thumb": false,
+      "bytes": "e3a06000",
+      "asm": "mov r6, #0"
+    },
+    {
+      "pc": "0x3400001c",
+      "thumb": false,
+      "bytes": "e3a07000",
+      "asm": "mov r7, #0"
+    },
+    {
+      "pc": "0x34000020",
+      "thumb": false,
+      "bytes": "e3a08000",
+      "asm": "mov r8, #0"
+    },
+    {
+      "pc": "0x34000024",
+      "thumb": false,
+      "bytes": "e3a09000",
+      "asm": "mov sb, #0"
+    },
+    {
+      "pc": "0x34000028",
+      "thumb": false,
+      "bytes": "e3a0a000",
+      "asm": "mov sl, #0"
+    },
+    {
+      "pc": "0x3400002c",
+      "thumb": false,
+      "bytes": "e3a0b000",
+      "asm": "mov fp, #0"
+    },
+    {
+      "pc": "0x34000030",
+      "thumb": false,
+      "bytes": "e3a0c000",
+      "asm": "mov ip, #0"
+    },
+    {
+      "pc": "0x34000034",
+      "thumb": false,
+      "bytes": "e3a0d000",
+      "asm": "mov sp, #0"
+    },
+    {
+      "pc": "0x34000038",
+      "thumb": false,
+      "bytes": "e3a0e000",
+      "asm": "mov lr, #0"
+    },
+    {
+      "pc": "0x3400003c",
+      "thumb": false,
+      "bytes": "e3a000d3",
+      "asm": "mov r0, #0xd3"
+    },
+    {
+      "pc": "0x34000040",
+      "thumb": false,
+      "bytes": "e121f000",
+      "asm": "msr cpsr_c, r0"
+    },
+    {
+      "pc": "0x34000044",
+      "thumb": false,
+      "bytes": "e59f1040",
+      "asm": "ldr r1, [pc, #0x40]"
+    },
+    {
+      "pc": "0x34000048",
+      "thumb": false,
+      "bytes": "e5911000",
+      "asm": "ldr r1, [r1]"
+    },
+    {
+      "pc": "0x3400004c",
+      "thumb": false,
+      "bytes": "e1a0d001",
+      "asm": "mov sp, r1"
+    },
+    {
+      "pc": "0x34000050",
+      "thumb": false,
+      "bytes": "e3a0048b",
+      "asm": "mov r0, #0x8b000000"
+    },
+    {
+      "pc": "0x34000054",
+      "thumb": false,
+      "bytes": "e5901018",
+      "asm": "ldr r1, [r0, #0x18]"
+    }
+  ],
+  "registers": {
+    "pc": "0x34000054",
+    "sp": "0x400029bc",
+    "r0": "0x8b000000",
+    "cpsr": "0x2d3"
+  },
+  "hot_pcs": [
+    [
+      "0x34000000",
+      1
+    ],
+    [
+      "0x34000004",
+      1
+    ],
+    [
+      "0x34000008",
+      1
+    ],
+    [
+      "0x3400000c",
+      1
+    ],
+    [
+      "0x34000010",
+      1
+    ],
+    [
+      "0x34000014",
+      1
+    ],
+    [
+      "0x34000018",
+      1
+    ],
+    [
+      "0x3400001c",
+      1
+    ],
+    [
+      "0x34000020",
+      1
+    ],
+    [
+      "0x34000024",
+      1
+    ]
+  ]
+}

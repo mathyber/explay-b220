@@ -1,0 +1,58 @@
+{
+  "stop": {
+    "reason": "requested LCD frame count",
+    "pc": "0x17a74a",
+    "frames": 5
+  },
+  "registers": {
+    "pc": "0x17a74a",
+    "sp": "0x408aa94",
+    "lr": "0x17a6ff",
+    "cpsr": "0x200002f3"
+  },
+  "normalized_chip": "00050009",
+  "elapsed_seconds": 58.995,
+  "engine_error": null,
+  "hot_blocks": [
+    {
+      "pc": "0x400036ee",
+      "count": 655290
+    },
+    {
+      "pc": "0x4293804",
+      "count": 290259
+    },
+    {
+      "pc": "0x42937e2",
+      "count": 289651
+    },
+    {
+      "pc": "0x42937f0",
+      "count": 289031
+    },
+    {
+      "pc": "0x40003530",
+      "count": 244090
+    }
+  ],
+  "recent_logs": [
+    "GetMessageDispImageId MMIAPISMS_IsSMSFullEx() is %d",
+    "SMS: MMISMS_GetSMSMemory dual_sys=%d, is_nv = %d, max_num = %d, used_num = %d",
+    "SMS: MMISMS_GetSMSMemory dual_sys=%d, is_nv = %d, max_num = %d, used_num = %d",
+    "SMS: MMISMS_GetSMSMemory dual_sys=%d, is_nv = %d, max_num = %d, used_num = %d",
+    "SMS: MMISMS_GetSMSMemory dual_sys=%d, is_nv = %d, max_num = %d, used_num = %d",
+    "SMS: MMISMS_GetSMSMemory dual_sys=%d, is_nv = %d, max_num = %d, used_num = %d",
+    "SMS: MMISMS_GetSMSMemory dual_sys=%d, is_nv = %d, max_num = %d, used_num = %d",
+    "MMIMMS_GetManagerTotalNum is %d",
+    "MMIAPISET_GetDualSysSetting e_dual_sys=%d",
+    "MMIPHONE_PowerOnPs, dual_sys=%d ps is already",
+    "MMK_HandleWinMoveMsg msg = 0x%x",
+    "LCD_SetDirection: direct_type%d"
+  ],
+  "nor_events": 435982,
+  "lcd": {
+    "device_id": "0x9225",
+    "pixel_writes": 193600,
+    "register_writes": 73
+  }
+}

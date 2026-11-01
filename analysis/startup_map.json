@@ -1,0 +1,52 @@
+{
+  "source": "SC6600L_S915D_B220_L7A_64X32_M224_qcif.bin",
+  "sha256": "7bd1dd7b3ce3a3efa65f957eb24e4e4b3114775c8b7770121f98b39816bacbeb",
+  "table_header": "0x179e34",
+  "bounds": [
+    "0x7235e8",
+    "0x723714",
+    "0x723714",
+    "0x7237cc"
+  ],
+  "copy_regions": [
+    {
+      "table_offset": "0x723654",
+      "source": "0x7237cc",
+      "destination": "0x4293600",
+      "size": "0x2001c",
+      "end": "0x42b361c"
+    },
+    {
+      "table_offset": "0x7236c0",
+      "source": "0x74432c",
+      "destination": "0x40003400",
+      "size": "0x364",
+      "end": "0x40003764"
+    }
+  ],
+  "zero_regions": [
+    {
+      "table_offset": "0x72374c",
+      "destination": "0x42b361c",
+      "size": "0xefcd8",
+      "end": "0x43a32f4"
+    },
+    {
+      "table_offset": "0x723794",
+      "destination": "0x40003764",
+      "size": "0x78",
+      "end": "0x400037dc"
+    }
+  ],
+  "reset": "0x6a4228",
+  "exceptions": [
+    "0x6a4228",
+    "0x6a4494",
+    "0x6a4500",
+    "0x6a4544",
+    "0x6a45b0",
+    "0x6a461c",
+    "0x6a43e0",
+    "0x6a4664"
+  ]
+}
