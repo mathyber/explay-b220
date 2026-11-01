@@ -145,12 +145,13 @@ class Board:
         self.lcd_ports = {int(panel['command'],0):False,int(panel['data'],0):True} if panel else {}
         self.known_registers.update(self.lcd_ports)
         self.lcd_dma = self.profile.get('models',{}).get('lcd_dma')
+        self.dma_enabled = 0
         self.dma_transfers = []
         self.full_lcd_frames = 0
         self._lcd_frame_pixels = 0
         self.stop_after_frames = stop_after_frames
         if self.lcd_dma:
-            self.known_registers.update(range(0x20100600,0x20100620,4))
+            self.known_registers.update(range(0x20100600,0x20100640,4))
             self.known_registers.update((0x20100010,0x20100014,0x20100060,0x20100070,0x20100074))
         adc = self.profile.get('models',{}).get('adc')
         self.adc = {k:int(adc[k],0) for k in ('control','selection','result','start_mask','ready_mask')} if adc else None
@@ -458,6 +459,37 @@ class Board:
                 uc.mem_write(address,value.to_bytes(4,'big'))
             self._record_mmio(write,address,pc,value,size,'SPI transport, no attached responder')
             return
+        if self.lcd_dma and word in (0x20100010,0x20100014,0x20100060,0x20100070,0x20100074):
+            if size != 4 or address != word:
+                self.stop = dict(reason='unsupported DMA control width',pc=hex(pc),address=hex(address),size=size)
+                uc.emu_stop()
+                return
+            if write:
+                if word == 0x20100010:
+                    requested = value&~self.dma_enabled
+                    self.dma_enabled |= value
+                    for channel in range(16,22):
+                        if requested&(1<<channel):
+                            if channel not in (16,17):
+                                self.stop = dict(reason='unsupported DMA channel',channel=channel,pc=hex(pc))
+                                uc.emu_stop()
+                                break
+                            self._dma_transfer(channel,pc)
+                            if self.stop:
+                                break
+                elif word == 0x20100014:
+                    self.dma_enabled &= ~value
+                elif word in (0x20100070,0x20100074):
+                    self.storage[0x20100060] = self.storage.get(0x20100060,0)&~value
+                else:
+                    self.stop = dict(reason='unsupported DMA status write',pc=hex(pc),address=hex(address))
+                    uc.emu_stop()
+            else:
+                value = (self.dma_enabled if word == 0x20100010 else
+                         self.storage.get(word,0) if word == 0x20100060 else 0)
+                uc.mem_write(address,value.to_bytes(4,'big'))
+            self._record_mmio(write,address,pc,value,size,'DMA enable/disable and per-channel W1C completion')
+            return
         if word in self.lcd_ports:
             if write:
                 accepted = self.lcd.write(self.lcd_ports[word],size,value)
@@ -484,10 +516,6 @@ class Board:
                 self.storage[word] = (self.storage[word]&~0x80000)|0x20000
             if self.irq and self.dsp and word == 0x8b000014 and value&3:
                 self.irq.set_line(13,False)
-            if self.lcd_dma and word in (0x20100070,0x20100074):
-                self.storage[0x20100060] = self.storage.get(0x20100060,0)&~value
-            if self.lcd_dma and word == 0x20100010 and value&0x10000:
-                self._lcd_dma_transfer(pc)
             if self.timer and word == self.timer['control']:
                 if not old&self.timer['enable_mask'] and self.storage[word]&self.timer['enable_mask']:
                     self.timer_epoch = self.block_serial
@@ -517,11 +545,17 @@ class Board:
             model = 'instant ADC conversion, virtual input'
         self._record_mmio(write,address,pc,value,size,model)
 
-    def _lcd_dma_transfer(self,pc):
-        """Channel 16: RGB565 rows with source gaps, fixed 8-bit LCD target."""
-        config,count,source,target = (self.storage.get(0x20100600+offset,0) for offset in (0,4,8,12))
-        stride,frame = (self.storage.get(0x20100600+offset,0) for offset in (0x14,0x18))
-        if config>>16 == 0x0a80 and stride == 0x40004 and frame == 4 and self.storage.get(0x2010061c,0) == 4:
+    def _dma_complete(self,channel):
+        mask = 1<<channel
+        self.storage[0x20100060] = self.storage.get(0x20100060,0)|mask
+        self.dma_enabled &= ~mask
+
+    def _dma_transfer(self,channel,pc):
+        """Observed software channels: LCD on 16; RAM copies on 16 or 17."""
+        base = 0x20100400+channel*0x20
+        config,count,source,target = (self.storage.get(base+offset,0) for offset in (0,4,8,12))
+        stride,frame = (self.storage.get(base+offset,0) for offset in (0x14,0x18))
+        if config>>16 == 0x0a80 and stride == 0x40004 and frame == 4 and self.storage.get(base+0x1c,0) == 4:
             def in_ram(address,length):
                 return any(start <= address <= end-length for start,end in
                            ((0x04000000,0x04400000),(0x34000000,0x34400000),(0x40000000,0x40010000)))
@@ -532,15 +566,15 @@ class Board:
                 return
             payload = bytes(self.uc.mem_read(source,count))
             self.uc.mem_write(target,payload)
-            self.storage[0x20100060] = self.storage.get(0x20100060,0)|0x10000
-            self.dma_transfers.append(dict(channel=16,kind='memory copy',pc=hex(pc),source=hex(source),target=hex(target),
+            self._dma_complete(channel)
+            self.dma_transfers.append(dict(channel=channel,kind='memory copy',pc=hex(pc),source=hex(source),target=hex(target),
                 count=count,sha256=hashlib.sha256(payload).hexdigest(),completed='immediately; polling only'))
             return
         row_bytes = config&0xffff
         row_stride = row_bytes+(frame&0xffff)-2
         rows = (count+row_bytes-1)//row_bytes if row_bytes else 0
         extent = (rows-1)*row_stride+(count-(rows-1)*row_bytes) if rows else 0
-        if (not self.lcd or config>>16 != 0x0488 or target != 0x08020000 or
+        if (channel != 16 or not self.lcd or config>>16 != 0x0488 or target != 0x08020000 or
             stride != 0x20000 or frame>>16 or frame < 2 or frame&1 or
             not 0 < row_bytes <= self.lcd.width*2 or row_bytes&1 or
             count&1 or not 0 < count <= self.lcd.width*self.lcd.height*2 or
@@ -554,7 +588,7 @@ class Board:
         previous_pixels = self.lcd.pixel_writes
         for byte in payload:
             self.lcd.write(True,2,byte<<8)
-        self.storage[0x20100060] = self.storage.get(0x20100060,0)|0x10000
+        self._dma_complete(channel)
         self.dma_transfers.append(dict(channel=16,pc=hex(pc),source=hex(source),target=hex(target),
                                        count=count,sha256=hashlib.sha256(payload).hexdigest(),
                                        row_bytes=row_bytes,source_row_stride=row_stride,virtual_blocks=self.block_serial,

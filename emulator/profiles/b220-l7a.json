@@ -90,7 +90,7 @@
       "evidence": "PS 0x5267ea/0x5268f2: halfword mailbox 0x10000000, status +2, word offset +4, word count +6, payload +8. Command 1 ready, 3 stage, rising bit2 commit. Completion raises IRQ13; guest callback 0x526a26 sets RAM flag 0x0434c3dc and writes 0x8b000014 OR 3 to acknowledge. This is a protocol peer, not execution of DSP firmware."
     },
     "lcd_dma": {
-      "evidence": "PS 0x496638 programs channel 16 at 0x20100600; enable 0x20100010, done polled at 0x20100060, clears at 0x20100070/74. Only observed config 0x04880160, source increment 2, fixed LCD target 0x08020000 is implemented. BE RGB565 is serialized as two upper-lane bytes; immediate completion, no DMA interrupt."
+      "evidence": "PS 0x496638 programs LCD channel 16 at 0x20100600, RGB565 rows with source gaps and fixed target 0x08020000. Software RAM copies use channels 16 or 17 (0x20100620), config 0x0a80xxxx and word increments; PS 0x17a9ca polls completion for the selected channel. Enable 0x20100010 sets channel bits; disable +14 and completion W1C +70/+74 read zero. Synchronous completed channels leave the enable mask, preventing a read-modify-write for channel 17 from repeating an old LCD transfer. Done bits at +60 are independent per channel. Immediate polling completion only; no DMA IRQ or peripheral-channel execution."
     },
     "adc": {
       "control": "0x8a003000",

@@ -338,6 +338,46 @@ class BoardTests(unittest.TestCase):
         self.assertEqual(result['stop']['reason'],'unsupported memory DMA range')
         self.assertEqual(bytes(b.uc.mem_read(0x1000,32)),original)
 
+    def test_lcd_frame_survives_interleaved_memory_dma_on_channel_17(self):
+        b = self.board
+        pixels = [((row&255)<<8)|(column&255) for row in range(220) for column in range(176)]
+        b.uc.mem_write(0x04010000,b''.join(v.to_bytes(2,'big') for v in pixels))
+        b.uc.mem_write(0x04030000,bytes(range(64)))
+        b.lcd.index = 0x22
+        for row,rows in ((0,64),(64,64),(128,64),(192,28)):
+            for offset,value in ((0,0x04880160),(4,rows*352),(8,0x04010000+row*352),
+                                 (12,0x08020000),(20,0x20000),(24,2)):
+                b.storage[0x20100600+offset] = value
+            self.access(0x20100010,0xe5810000,self.access(0x20100010)[1]|0x10000)
+            if row == 64:
+                before = b.lcd.pixel_writes
+                for offset,value in ((0,0x0a800100),(4,64),(8,0x04030000),(12,0x04031000),
+                                     (20,0x40004),(24,4),(28,4)):
+                    self.access(0x20100620+offset,0xe5810000,value)
+                result,_ = self.access(0x20100010,0xe5810000,self.access(0x20100010)[1]|0x20000)
+                self.assertEqual(result['stop']['reason'],'requested end address')
+                self.assertEqual(b.lcd.pixel_writes,before)
+                self.assertEqual(bytes(b.uc.mem_read(0x04031000,64)),bytes(range(64)))
+                self.assertEqual(self.access(0x20100060)[1]&0x30000,0x30000)
+                self.assertEqual(self.access(0x20100070)[1],0)
+                self.access(0x20100070,0xe5810000,self.access(0x20100070)[1]|0x20000)
+                self.assertEqual(self.access(0x20100060)[1]&0x30000,0x10000)
+                self.assertEqual(self.access(0x20100074)[1],0)
+        self.assertEqual(b.lcd.gram,pixels)
+        self.assertEqual(b.lcd.pixel_writes,176*220)
+        self.assertEqual((b.lcd.registers[0x20],b.lcd.registers[0x21]),(0,0))
+        self.assertEqual(self.access(0x20100010)[1]&0x30000,0)
+        self.assertEqual([v['channel'] for v in b.dma_transfers],[16,16,17,16,16])
+
+    def test_dma_disable_is_write_only_and_other_channels_do_not_repeat_lcd(self):
+        b = self.board
+        self.access(0x20100010,0xe5810000,1)
+        self.assertEqual(self.access(0x20100010)[1],1)
+        self.assertEqual(self.access(0x20100014)[1],0)
+        self.access(0x20100014,0xe5810000,1)
+        self.assertEqual(self.access(0x20100010)[1],0)
+        self.assertEqual(b.dma_transfers,[])
+
     def test_power_gpio_input_and_irq_acknowledgement(self):
         b = self.board
         self.access(0x8a000018,0xe5810000,8)
