@@ -6,6 +6,8 @@ from pathlib import Path
 from .board import Board, ROOT
 from .report import write_html
 from .frames import LiveFramePublisher
+from .snapshot import SnapshotError,load_snapshot,save_snapshot
+from unicorn.arm_const import UC_ARM_REG_PC,UC_ARM_REG_CPSR
 
 
 def save_outputs(board,result,args,publish_frame,save_flash=True):
@@ -36,7 +38,10 @@ def main():
     p.add_argument('--seconds',type=float,default=20)
     p.add_argument('--until',type=lambda v:int(v,0),default=0xffffffff,help='Stop before this guest PC, e.g. 0x526912')
     p.add_argument('--out',type=Path,default=ROOT/'analysis/emulator/latest.json')
-    p.add_argument('--load-flash',type=Path,help='Resume saved virtual NOR; PS prefix must match exactly')
+    inputs = p.add_mutually_exclusive_group()
+    inputs.add_argument('--load-flash',type=Path,help='Resume saved virtual NOR; PS prefix must match exactly')
+    inputs.add_argument('--load-state',type=Path,help='Restore a complete .b220state snapshot and continue from its PC')
+    p.add_argument('--save-state',type=Path,help='Save a complete .b220state snapshot after execution stops')
     p.add_argument('--save-flash',type=Path,help='Save virtual NOR after this run; original PS is never written')
     p.add_argument('--live-frame',type=Path,help='Atomically update this PNG after each LCD DMA transfer')
     p.add_argument('--full-nor-trace',action='store_true',help='Keep every NOR command instead of the first/last 4096')
@@ -49,23 +54,52 @@ def main():
         p.error('Budgets must be positive/finite and --until must be a 32-bit address')
     if a.interactive and (not a.commands or not a.session_status):
         p.error('--interactive requires --commands and --session-status')
+    if a.interactive and a.load_state:
+        p.error('--load-state currently supports console runs; window integration is the next step')
+    if a.save_state and a.save_state.suffix.lower() != '.b220state':
+        p.error('--save-state output must use the .b220state extension')
     a.out.parent.mkdir(parents=True,exist_ok=True)
     publish_frame = LiveFramePublisher(a.live_frame) if a.live_frame else None
-    board = Board(json.loads(a.profile.read_text(encoding='utf-8')),explore=a.explore,
-                  flash_state=a.load_flash.read_bytes() if a.load_flash else None,
-                  frame_callback=publish_frame,full_nor_trace=a.full_nor_trace,stop_after_frames=a.frames)
+    profile = json.loads(a.profile.read_text(encoding='utf-8'))
+    try:
+        if a.load_state:
+            board = load_snapshot(a.load_state,profile=profile,frame_callback=publish_frame)
+            if a.explore and not board.explore:
+                p.error('--explore cannot override the strict mode stored in this snapshot')
+            if a.full_nor_trace and board.flash.trace_limit is not None:
+                p.error('--full-nor-trace cannot override the trace mode stored in this snapshot')
+            board.stop_after_frames = board.full_lcd_frames+a.frames if a.frames else 0
+            if publish_frame:
+                publish_frame(board.lcd)
+        else:
+            board = Board(profile,explore=a.explore,
+                          flash_state=a.load_flash.read_bytes() if a.load_flash else None,
+                          frame_callback=publish_frame,full_nor_trace=a.full_nor_trace,stop_after_frames=a.frames)
+    except SnapshotError as exc:
+        p.error(str(exc))
     if a.interactive:
         from .interactive import InteractiveSession
         session = InteractiveSession(board,a,lambda result,save:save_outputs(board,result,a,publish_frame,save))
         result = session.run()
-        save_outputs(board,result,a,publish_frame,save_flash=session.ready)
+        save_flash = session.ready
     else:
-        result = board.run(a.instructions,a.seconds,until=a.until)
-        save_outputs(board,result,a,publish_frame)
+        entry = board.uc.reg_read(UC_ARM_REG_PC)|(1 if board.uc.reg_read(UC_ARM_REG_CPSR)&0x20 else 0)
+        result = board.run(a.instructions,a.seconds,entry=entry,until=a.until)
+        save_flash = True
+    if a.load_state:
+        result['loaded_state'] = str(a.load_state)
+    if a.save_state:
+        try:
+            result['saved_state'] = save_snapshot(board,a.save_state)
+        except (SnapshotError,OSError) as exc:
+            p.error(str(exc))
+    save_outputs(board,result,a,publish_frame,save_flash=save_flash)
     summary = {k:result[k] for k in ('stop','registers','normalized_chip','elapsed_seconds','engine_error')}
     summary['hot_blocks'] = result['hot_blocks'][:5]
     summary['recent_logs'] = [v['format'] for v in result['guest_logs'][-12:]]
     summary['nor_events'] = result['nor_event_count']
+    if a.save_state:
+        summary['saved_state'] = result['saved_state']
     summary['lcd'] = {k:result['lcd'][k] for k in ('device_id','pixel_writes','register_writes')} if result['lcd'] else None
     print(json.dumps(summary,ensure_ascii=True,indent=2))
 

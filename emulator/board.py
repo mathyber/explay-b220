@@ -171,6 +171,7 @@ class Board:
         self.stop = None
         self.started_at = None
         self.deadline = None
+        self._running = False
         self.md = {False: Cs(CS_ARCH_ARM, CS_MODE_ARM | CS_MODE_BIG_ENDIAN),
                    True: Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_BIG_ENDIAN)}
         self.uc.reg_write(UC_ARM_REG_CPSR, 0x2d3)
@@ -678,16 +679,21 @@ class Board:
                                         normalized_chip=bytes(uc.mem_read(0x04296450,4)).hex()))
 
     def run(self, instructions=2000000, seconds=20, entry=0, until=0xffffffff,report=True):
+        if self._running:
+            raise ValueError('CPU execution is already active')
         if instructions <= 0 or not 0 < seconds < float('inf'):
             raise ValueError('Instruction and wall-time budgets must be positive and finite')
         self.started_at = time.monotonic()
         self.deadline = self.started_at + seconds
         self.stop = None
         error = None
+        self._running = True
         try:
             self.uc.emu_start(entry, until, count=instructions)
         except UcError as exc:
             error = str(exc)
+        finally:
+            self._running = False
         self._restore_flash_overlays()
         if not self.stop:
             pc = self.uc.reg_read(UC_ARM_REG_PC)
