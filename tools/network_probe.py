@@ -22,6 +22,7 @@ def main():
     parser.add_argument('--out',type=Path,required=True,help='New, empty output directory')
     parser.add_argument('--instructions',type=int,default=8000000,help='CPU budget per step')
     parser.add_argument('--seconds',type=float,default=45,help='Wall time limit per step')
+    parser.add_argument('--virtual-network',action='store_true',help='Experimental SIM1/PDP/HTTP setup; stop before DNS; no host network and no output snapshots')
     args = parser.parse_args()
     steps = args.steps.split(',')
     if any(key not in (*KEY_MATRIX,'end','wait') for key in steps):
@@ -33,7 +34,15 @@ def main():
     board = load_snapshot(args.load_state)
     args.out.mkdir(parents=True,exist_ok=True)
     trace = NetworkTrace(board)
+    network = None
     try:
+        if args.virtual_network:
+            from emulator.virtual_network import VirtualNetwork
+            try:
+                network = VirtualNetwork(board)
+            except ValueError as exc:
+                parser.error(str(exc))
+            trace.mark('virtual-network-enabled')
         for index,key in enumerate(steps,1):
             name = f'{index:02d}-{key}'
             trace.mark(name)
@@ -44,13 +53,18 @@ def main():
             entry = pc | (1 if board.uc.reg_read(UC_ARM_REG_CPSR)&0x20 else 0)
             result = board.run(args.instructions,args.seconds,entry=entry,report=False)
             board.lcd.save(args.out,name)
-            save_snapshot(board,args.out/(name+'.b220state'))
+            if not network:
+                save_snapshot(board,args.out/(name+'.b220state'))
+            else:
+                (args.out/'virtual-network.json').write_text(json.dumps(network.report(),indent=2),encoding='utf-8')
             trace.write(args.out/'network-trace.json')
             print(json.dumps(dict(step=name,stop=result['stop'],backlight=board.lcd_backlight,
                                   counts=dict(trace.counts))),flush=True)
             if result['stop']['reason'] not in ('instruction budget','wall time budget'):
                 break
     finally:
+        if network:
+            network.close()
         trace.close()
 
 

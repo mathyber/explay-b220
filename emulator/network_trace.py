@@ -15,6 +15,11 @@ from unicorn.arm_const import UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,UC_ARM_R
 PS_SHA256 = '7bd1dd7b3ce3a3efa65f957eb24e4e4b3114775c8b7770121f98b39816bacbeb'
 # Function identities follow CMS call sites and the original veneer targets.
 POINTS = {
+    0x1d49f6:'browser.access_url',0x2d9c9a:'cms.access_url',
+    0x5991e6:'cms.gprs.start',0x5990f4:'cms.gprs.start.sim',
+    0x59e5b8:'cms.pdp.configure',0x5ecdd2:'pdp.configure.request',
+    0x5eca5e:'pdp.activate.request',0x599c14:'pdp.activate.confirm',
+    0x24028a:'pdp.reject.66',0x23ff6a:'pdp.status.66',
     # Homepage checks the current SIM at 0x58d704. Another menu branch scans slots.
     0x58d708:'browser.sim.result',0x58d832:'browser.sim.scan.result',
     0x58d848:'browser.sim.reject',
@@ -56,9 +61,15 @@ class NetworkTrace:
 
     def _point(self,uc,address,size,name):
         args = [uc.reg_read(register) for register in REGISTERS]
+        decoded = {}
+        if name == 'pdp.activate.confirm' and 0x04000000 <= args[0] <= 0x043ffff8:
+            raw = bytes(uc.mem_read(args[0],8))
+            decoded = dict(result=int.from_bytes(raw[:4],'big'),slot=int.from_bytes(raw[4:],'big'))
+        elif name == 'pdp.activate.request' and 0x04000000 <= args[2] <= 0x043fffd4:
+            decoded = dict(slot=args[0],selection_mode=args[1],context_bytes=bytes(uc.mem_read(args[2],44)).hex())
         self._append(name,address,args=[hex(v) for v in args],
                      strings=[self.board.cstring(v,160) for v in args],
-                     r4=hex(uc.reg_read(UC_ARM_REG_R4)),r6=hex(uc.reg_read(UC_ARM_REG_R6)))
+                     r4=hex(uc.reg_read(UC_ARM_REG_R4)),r6=hex(uc.reg_read(UC_ARM_REG_R6)),**decoded)
 
     def _log(self,uc,address,size,data):
         pointer = uc.reg_read(UC_ARM_REG_R0)

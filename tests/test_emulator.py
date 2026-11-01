@@ -338,6 +338,30 @@ class BoardTests(unittest.TestCase):
         self.assertEqual(result['stop']['reason'],'unsupported memory DMA range')
         self.assertEqual(bytes(b.uc.mem_read(0x1000,32)),original)
 
+    def test_browser_partial_lcd_update_on_channel_17_has_independent_completion(self):
+        b = self.board
+        # Captured browser update: 32x19 pixels cut from a 176-pixel-wide buffer.
+        payload = b''.join((y*176+x).to_bytes(2,'big') for y in range(19) for x in range(176))
+        b.uc.mem_write(0x04010000,payload)
+        b.lcd.index = 0x22
+        b.lcd.registers.update({0x36:31,0x37:0,0x38:18,0x39:0})
+        b.storage[0x20100060] = 1<<16
+        for offset,value in ((0,0x04880040),(4,1216),(8,0x04010000),(12,0x08020000),
+                             (20,0x20000),(24,0x122),(28,0)):
+            self.access(0x20100620+offset,0xe5810000,value)
+        result,_ = self.access(0x20100010,0xe5810000,1<<17)
+        self.assertEqual(result['stop']['reason'],'requested end address')
+        self.assertEqual([b.lcd.gram[y*176+x] for y in range(19) for x in range(32)],
+                         [y*176+x for y in range(19) for x in range(32)])
+        self.assertEqual(b.lcd.pixel_writes,608)
+        self.assertEqual(b.lcd.gram[32],0)
+        self.assertEqual(b.dma_transfers[-1]['channel'],17)
+        self.assertEqual(b.dma_transfers[-1]['source_row_stride'],352)
+        self.assertEqual(self.access(0x20100060)[1],(1<<16)|(1<<17))
+        self.assertEqual(self.access(0x20100010)[1],0)
+        self.access(0x20100070,0xe5810000,1<<17)
+        self.assertEqual(self.access(0x20100060)[1],1<<16)
+
     def test_lcd_frame_survives_interleaved_memory_dma_on_channel_17(self):
         b = self.board
         pixels = [((row&255)<<8)|(column&255) for row in range(220) for column in range(176)]

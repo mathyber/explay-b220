@@ -552,7 +552,7 @@ class Board:
         self.dma_enabled &= ~mask
 
     def _dma_transfer(self,channel,pc):
-        """Observed software channels: LCD on 16; RAM copies on 16 or 17."""
+        """Observed software channels: LCD and RAM copies on 16 or 17."""
         base = 0x20100400+channel*0x20
         config,count,source,target = (self.storage.get(base+offset,0) for offset in (0,4,8,12))
         stride,frame = (self.storage.get(base+offset,0) for offset in (0x14,0x18))
@@ -575,7 +575,7 @@ class Board:
         row_stride = row_bytes+(frame&0xffff)-2
         rows = (count+row_bytes-1)//row_bytes if row_bytes else 0
         extent = (rows-1)*row_stride+(count-(rows-1)*row_bytes) if rows else 0
-        if (channel != 16 or not self.lcd or config>>16 != 0x0488 or target != 0x08020000 or
+        if (channel not in (16,17) or not self.lcd or config>>16 != 0x0488 or target != 0x08020000 or
             stride != 0x20000 or frame>>16 or frame < 2 or frame&1 or
             not 0 < row_bytes <= self.lcd.width*2 or row_bytes&1 or
             count&1 or not 0 < count <= self.lcd.width*self.lcd.height*2 or
@@ -590,7 +590,7 @@ class Board:
         for byte in payload:
             self.lcd.write(True,2,byte<<8)
         self._dma_complete(channel)
-        self.dma_transfers.append(dict(channel=16,pc=hex(pc),source=hex(source),target=hex(target),
+        self.dma_transfers.append(dict(channel=channel,pc=hex(pc),source=hex(source),target=hex(target),
                                        count=count,sha256=hashlib.sha256(payload).hexdigest(),
                                        row_bytes=row_bytes,source_row_stride=row_stride,virtual_blocks=self.block_serial,
                                        elapsed_seconds=round(time.monotonic()-self.started_at,4) if self.started_at else None,
