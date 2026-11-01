@@ -85,6 +85,7 @@ class InteractiveSession:
                      ready=self.ready,last_key=self.last_key,input_error=self.last_error,
                      key_edges=len(self.board.keypad.events),guest_key_events=len(self.board.key_callbacks),
                      window_id=hex(self.board.last_window_id) if self.board.last_window_id is not None else None,
+                     backlight=self.board.lcd_backlight,
                      lcd_pixels=self.board.lcd.pixel_writes if self.board.lcd else 0,
                      boot_seconds=self.boot_seconds,report=str(self.args.out))
         now = time.monotonic()

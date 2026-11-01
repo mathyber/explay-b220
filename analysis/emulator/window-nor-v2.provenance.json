@@ -1,7 +1,0 @@
-{
-  "source": "analysis\\emulator\\nor-v2\\fresh.bin",
-  "source_report": "analysis/emulator/31-nor-parameter-blocks.json",
-  "sha256": "02818b1babb5ef1ae612f13be5ac3eaeefce728ea612d265dae36d48f885a6d7",
-  "geometry_revision": 2,
-  "purpose": "Initial GUI virtual NOR, created only when absent; never an original firmware input"
-}

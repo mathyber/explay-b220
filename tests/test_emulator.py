@@ -353,6 +353,23 @@ class BoardTests(unittest.TestCase):
         self.assertEqual(self.access(0x8a000000)[1]&8,0)
         self.assertTrue(b.irq.raw&0x40)
 
+    def test_backlight_observer_survives_trace_cap_without_guest_mutation(self):
+        b = self.board
+        b.logs = [{}]*3000
+        b.uc.reg_write(UC_ARM_REG_R0,b.backlight_log_pointer)
+        b.uc.reg_write(UC_ARM_REG_R1,0)
+        observed = (UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_SP,UC_ARM_REG_LR,UC_ARM_REG_CPSR)
+        before = [b.uc.reg_read(r) for r in observed]
+        b._guest_log(b.uc,0x48e11a,2,None)
+        self.assertIs(b.lcd_backlight,False)
+        self.assertEqual(b.uc.reg_read(UC_ARM_REG_R0),b.backlight_log_pointer)
+        self.assertEqual(b.uc.reg_read(UC_ARM_REG_R1),0)
+        self.assertEqual(len(b.logs),3000)
+        self.assertEqual([b.uc.reg_read(r) for r in observed],before)
+        b.uc.reg_write(UC_ARM_REG_R1,1)
+        b._guest_log(b.uc,0x48e11a,2,None)
+        self.assertIs(b.lcd_backlight,True)
+
     def test_lcd_dma_moves_bytes_and_clear_is_not_storage(self):
         b = self.board
         b.lcd.index = 0x22

@@ -1,0 +1,51 @@
+# Python environments, caches and generated package/test output.
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+/build/
+/dist/
+
+# Keep the original firmware ZIP as the canonical input; its unpacked copy
+# and extracted PAC components are reproduced locally (see README.md).
+/Explay_B220_M224_V02.02_B06_20120720_FSPD/
+
+# Generated analysis, reports, resources, virtual NOR, previews and sessions.
+# Preserve handwritten notes and the three historical diagnostic profiles.
+/analysis/**
+!/analysis/**/
+!/analysis/**/*.md
+!/analysis/emulator/normal-boot-profile.json
+!/analysis/emulator/jpeg/model-profile.json
+!/analysis/emulator/jpeg/storage-only-profile.json
+
+# Local Windows shortcuts, editor/OS files and temporary/profiling output.
+*.lnk
+.idea/
+.vs/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.log
+*.tmp
+*.tmp.*
+*.bak
+*.swp
+*.swo
+*~
+*.pstats
+*.prof
+*.pkl
+*.pkl.gz
+*.rgb565be

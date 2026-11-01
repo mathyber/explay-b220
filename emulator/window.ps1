@@ -36,6 +36,7 @@ $script:pcKeys = @{}
 $script:mouseClicks = @{}
 $script:sessionReady = $false
 $script:sessionPaused = $true
+$script:lcdBacklight = $true
 $script:commandPath = $null
 $script:sessionStatusPath = $null
 $script:keyTestStage = 0
@@ -43,6 +44,7 @@ $script:keyTestSettled = $false
 $script:keyTestAt = [DateTime]::MinValue
 $script:keyTestEvents = 0
 $script:keyTestPixels = 0
+$script:keyTestNavigationRetried = $false
 $script:tooltip = New-Object System.Windows.Forms.ToolTip
 
 $script:form = New-Object System.Windows.Forms.Form
@@ -78,6 +80,11 @@ $screen.Add_Paint({
         $paintArgs.Graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
         $paintArgs.Graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
         $paintArgs.Graphics.DrawImage($script:frame, $sender.ClientRectangle)
+        if (-not $script:lcdBacklight) {
+            $shade = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(220,0,0,0))
+            try { $paintArgs.Graphics.FillRectangle($shade,$sender.ClientRectangle) }
+            finally { $shade.Dispose() }
+        }
     }
 })
 $form.Controls.Add($screen)
@@ -307,6 +314,7 @@ function Start-B220Boot {
         $script:journal.Enabled = $false
         $script:report = $null
         $script:sessionReady = $false
+        $script:lcdBacklight = $true
         $script:phonePanel.Enabled = $false
         $script:pause.Enabled = $false
         $script:framePath = $null
@@ -467,7 +475,17 @@ function Test-B220Keys($state) {
     if ($script:keyTestStage -eq -1) { $script:keyTestStage = 0; return }
     $expectedWindows = @{1='0x2';2='0x2';3='0x1';4='0x5';5='0x5'}
     if ($state.window_id -ne $expectedWindows[$script:keyTestStage]) { return }
-    if ($script:keyTestStage -eq 2 -and (Get-B220TestFrameHash) -eq $script:keyTestFrameHash) { return }
+    if ($script:keyTestStage -eq 2 -and (Get-B220TestFrameHash) -eq $script:keyTestFrameHash) {
+        if (-not $script:keyTestNavigationRetried -and $state.backlight) {
+            # The firmware consumes the first key when waking a dark LCD.
+            $script:keyTestNavigationRetried = $true
+            $script:keyTestEvents = [int]$state.guest_key_events
+            $script:keyTestPixels = [int]$state.lcd_pixels
+            $script:keyTestAt = [DateTime]::UtcNow
+            Invoke-B220TestPcKey 'Right'
+        }
+        return
+    }
     $script:form.Refresh()
     $capture = New-Object System.Drawing.Bitmap($script:form.Width,$script:form.Height)
     try {
@@ -504,6 +522,10 @@ $timer.Add_Tick({
             $state = Get-Content -LiteralPath $script:sessionStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
             $script:sessionReady = [bool]$state.ready -and $state.state -in @('paused','running')
             $script:sessionPaused = $state.state -eq 'paused'
+            if ($null -ne $state.backlight -and $script:lcdBacklight -ne [bool]$state.backlight) {
+                $script:lcdBacklight = [bool]$state.backlight
+                $script:screen.Invalidate()
+            }
             $script:phonePanel.Enabled = $script:sessionReady
             $script:pause.Enabled = $script:sessionReady
             if ($script:sessionReady) {
@@ -512,6 +534,10 @@ $timer.Add_Tick({
                 $script:pause.Text = if ($script:sessionPaused) { 'Продолжить' } else { 'Пауза' }
                 $script:status.Text = if ($script:sessionPaused) { 'Готов к нажатиям · пауза' } else { 'Телефон работает' }
                 $script:detail.Text = 'Мышь или клавиатура: стрелки, Enter, цифры, F1/F2.'
+                if (-not $script:lcdBacklight) {
+                    $script:status.Text = 'Подсветка выключена прошивкой'
+                    $script:detail.Text = 'Первое нажатие включает подсветку. Затем нажмите нужную клавишу.'
+                }
                 $script:progress.Visible = $false
             }
         } catch { $state = $null }

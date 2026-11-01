@@ -49,6 +49,8 @@ class Board:
         image_path = next((ROOT/'analysis/extracted').glob('SC*.bin'))
         image = image_path.read_bytes()
         self.window_log_pointer = image.find(b'MMK_RunWinProc, win_handle')
+        self.backlight_log_pointer = image.find(b'GPIO_SetLcdBackLight: %d')
+        self.lcd_backlight = None
         self.last_window_id = None
         self.image_sha256 = hashlib.sha256(image).hexdigest()
         if self.image_sha256 != self.profile['ps_sha256']:
@@ -613,6 +615,10 @@ class Board:
         ptr = uc.reg_read(UC_ARM_REG_R0)
         if ptr == self.window_log_pointer:
             self.last_window_id = uc.reg_read(UC_ARM_REG_R2)
+        elif ptr == self.backlight_log_pointer:
+            # Observe the firmware's LCD output request, including after the
+            # general trace reaches its cap. This never changes guest state.
+            self.lcd_backlight = bool(uc.reg_read(UC_ARM_REG_R1))
         if len(self.logs) >= 3000:
             return
         fmt = self.cstring(ptr)
@@ -687,6 +693,7 @@ class Board:
                     dma_transfers=self.dma_transfers,
                     full_lcd_frames=self.full_lcd_frames,
                     keypad=self.keypad.report() if self.keypad else None,key_callbacks=self.key_callbacks,
+                    lcd_backlight=self.lcd_backlight,
                     mmi_window_id=hex(self.last_window_id) if self.last_window_id is not None else None,
                     dsp_bootstrap=self.dsp.report() if self.dsp else None,
                     jpeg=self.jpeg.report() if self.jpeg else None,

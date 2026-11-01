@@ -1,5 +1,0 @@
-file=SC6600L_S915D_B220_L7A_64X32_M224_qcif.bin, base=0x0, ARM big-endian
-006a5bac: e59fc000     ldr      ip, [pc]
-006a5bb0: e12fff1c     bx       ip
-006a5bb4: 001fc4c7     andseq   ip, pc, r7, asr #9
-006a5bb8: 477846c0     ldrbmi   r4, [r8, -r0, asr #13]!
