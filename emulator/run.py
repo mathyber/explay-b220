@@ -49,6 +49,7 @@ def main():
     p.add_argument('--interactive',action='store_true',help='Keep CPU/RAM alive and accept phone keys after the first screen')
     p.add_argument('--commands',type=Path,help='Per-session JSONL input file')
     p.add_argument('--session-status',type=Path,help='Per-session atomic status JSON')
+    p.add_argument('--network-trace',type=Path,help='Write read-only CMS/GPRS/socket observations to this JSON; does not enable networking')
     a = p.parse_args()
     if a.instructions <= 0 or a.frames < 0 or not 0 < a.seconds < float('inf') or not 0 <= a.until <= 0xffffffff:
         p.error('Budgets must be positive/finite and --until must be a 32-bit address')
@@ -77,6 +78,10 @@ def main():
                           frame_callback=publish_frame,full_nor_trace=a.full_nor_trace,stop_after_frames=a.frames)
     except SnapshotError as exc:
         p.error(str(exc))
+    network_trace = None
+    if a.network_trace:
+        from .network_trace import NetworkTrace
+        network_trace = NetworkTrace(board)
     if a.interactive:
         from .interactive import InteractiveSession
         session = InteractiveSession(board,a,lambda result,save:save_outputs(board,result,a,publish_frame,save))
@@ -94,6 +99,9 @@ def main():
         except (SnapshotError,OSError) as exc:
             p.error(str(exc))
     save_outputs(board,result,a,publish_frame,save_flash=save_flash)
+    if network_trace:
+        network_trace.write(a.network_trace)
+        network_trace.close()
     summary = {k:result[k] for k in ('stop','registers','normalized_chip','elapsed_seconds','engine_error')}
     summary['hot_blocks'] = result['hot_blocks'][:5]
     summary['recent_logs'] = [v['format'] for v in result['guest_logs'][-12:]]
