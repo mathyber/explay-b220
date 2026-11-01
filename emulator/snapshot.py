@@ -60,7 +60,7 @@ def _json(value):
 
 
 def _model_hash():
-    names = ('board','snapshot','nor','lcd','dsp','irq','keypad','jpeg','rtc','spi','timer')
+    names = ('board','snapshot','nor','lcd','dsp','irq','keypad','jpeg','rtc','spi','sd','timer')
     return _hash(b''.join(name.encode()+b'\0'+(ROOT/'emulator'/f'{name}.py').read_text(encoding='utf-8-sig').encode()
                          for name in names))
 
@@ -239,6 +239,13 @@ def _validate_device(device,state):
                 raise SnapshotError('Incompatible NOR geometry')
         if state['array'][:device.source_length] != device.array[:device.source_length]:
             raise SnapshotError('Snapshot contains a different firmware image')
+    if type(device).__name__ == 'SdSpi':
+        if len(state['image']) != len(device.image) or len(state['command'])>5 or len(state['write_payload'])>513:
+            raise SnapshotError('Invalid SD media or pending command')
+        if len(state['response'])>2048 or any(type(v) is not int or not 0<=v<=255 for v in state['response']):
+            raise SnapshotError('Invalid SD response FIFO')
+        if any(type(v) is not int or not 0<=v<len(device.image)//512 for v in state['dirty_sectors']):
+            raise SnapshotError('Invalid SD dirty-sector map')
 
 
 def save_snapshot(board,path):
@@ -322,6 +329,12 @@ def _load(archive,profile,frame_callback):
     options = manifest['options']
     if set(options) != {'explore','fast_cpu'} or any(type(v) is not bool for v in options.values()):
         raise SnapshotError('Invalid snapshot execution options')
+    sd = manifest['devices'].get('spi:8e000000',{})
+    if sd.get('model') == 'SdSpi':
+        image = reader.decode(sd['state']['image'])
+        if type(image) is not bytearray or len(image) not in (16*1024*1024,32*1024*1024):
+            raise SnapshotError('Invalid SD image')
+        options['sd_image'] = image
     board = Board(profile=profile,frame_callback=frame_callback,**options)
     if set(manifest['board']) != STATE_FIELDS:
         raise SnapshotError('Invalid board state fields')

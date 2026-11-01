@@ -150,6 +150,17 @@ class JpegEngine:
             return self.bit_value
         if offset == 0x10414:
             return self.bit_position
+        if offset == 0x10418:
+            # PS 0x5e103c starts a bitstream preload; 0x5e1046 waits for
+            # bit31 here before parsing a JPEG file header (unlike boot scans).
+            start = self.registers.get(0x50,0)<<8
+            control = self.registers.get(0x10400,0)
+            size = (control&0x3fffffff)*4
+            if control&0x80000000 and 0<size and 0x04000000<=start<=0x04400000-size:
+                # 0x5e0d90 also waits for a complete 32-bit FIFO word (bit3)
+                # while reading DQT/DHT data through the same bitstream port.
+                return 0x80000000|(8 if size*8-self.bit_position>=32 else 0)
+            return 0
         return self.registers.get(offset,0)
 
     def decode(self,read_memory,write_memory):

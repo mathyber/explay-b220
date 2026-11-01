@@ -2,6 +2,7 @@ r"""Run with .venv\Scripts\python.exe -m emulator.run --explore."""
 import argparse
 import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 from .board import Board, ROOT
 from .report import write_html
@@ -10,7 +11,10 @@ from .snapshot import SnapshotError,load_snapshot,save_snapshot
 from unicorn.arm_const import UC_ARM_REG_PC,UC_ARM_REG_CPSR
 
 
-def save_outputs(board,result,args,publish_frame,save_flash=True):
+def save_outputs(board,result,args,publish_frame,save_flash=True,card_image=None):
+    if card_image:
+        card_image.flush(board.spi)
+        result['sd_image'] = str(card_image.path)
     if publish_frame:
         result['live_frame_output'] = publish_frame.report()
     if args.save_flash and save_flash and not hasattr(board,'experimental_network'):
@@ -45,6 +49,7 @@ def main():
     inputs.add_argument('--load-state',type=Path,help='Restore a complete .b220state snapshot and continue from its PC')
     p.add_argument('--save-state',type=Path,help='Save a complete .b220state snapshot after execution stops')
     p.add_argument('--save-flash',type=Path,help='Save virtual NOR after this run; original PS is never written')
+    p.add_argument('--sd-image',type=Path,help='Attach an exclusively locked 16/32 MiB SDSC image; persist guest sector writes')
     p.add_argument('--live-frame',type=Path,help='Atomically update this PNG after each LCD DMA transfer')
     p.add_argument('--full-nor-trace',action='store_true',help='Keep every NOR command instead of the first/last 4096')
     p.add_argument('--frames',type=int,default=0,help='Stop after this many full LCD updates; 0 means unlimited')
@@ -60,8 +65,19 @@ def main():
         p.error('--interactive requires --commands and --session-status')
     if a.window_http_test and not a.interactive:
         p.error('--window-http-test requires --interactive')
+    if a.sd_image and a.load_state:
+        p.error('SD media is embedded in snapshots; attach --sd-image on cold boot')
     if a.save_state and a.save_state.suffix.lower() != '.b220state':
         p.error('--save-state output must use the .b220state extension')
+    from .card_image import CardImage
+    try:
+        with CardImage(a.sd_image) if a.sd_image else nullcontext(None) as card_image:
+            run_emulator(a,p,card_image)
+    except (OSError,ValueError) as exc:
+        p.error(str(exc))
+
+
+def run_emulator(a,p,card_image=None):
     a.out.parent.mkdir(parents=True,exist_ok=True)
     publish_frame = LiveFramePublisher(a.live_frame) if a.live_frame else None
     profile = json.loads(a.profile.read_text(encoding='utf-8'))
@@ -78,7 +94,8 @@ def main():
         else:
             board = Board(profile,explore=a.explore,
                           flash_state=a.load_flash.read_bytes() if a.load_flash else None,
-                          frame_callback=publish_frame,full_nor_trace=a.full_nor_trace,stop_after_frames=a.frames)
+                          frame_callback=publish_frame,full_nor_trace=a.full_nor_trace,stop_after_frames=a.frames,
+                          sd_image=card_image.data if card_image else None)
     except SnapshotError as exc:
         p.error(str(exc))
     network_trace = None
@@ -87,7 +104,8 @@ def main():
         network_trace = NetworkTrace(board)
     if a.interactive:
         from .interactive import InteractiveSession
-        session = InteractiveSession(board,a,lambda result,save:save_outputs(board,result,a,publish_frame,save))
+        session = InteractiveSession(board,a,lambda result,save:save_outputs(board,result,a,publish_frame,save,card_image),
+                                     flush_media=(lambda:card_image.flush(board.spi)) if card_image else None)
         result = session.run()
         save_flash = session.ready
     else:
@@ -101,7 +119,7 @@ def main():
             result['saved_state'] = save_snapshot(board,a.save_state)
         except (SnapshotError,OSError) as exc:
             p.error(str(exc))
-    save_outputs(board,result,a,publish_frame,save_flash=save_flash)
+    save_outputs(board,result,a,publish_frame,save_flash=save_flash,card_image=card_image)
     if network_trace:
         network_trace.write(a.network_trace)
         network_trace.close()

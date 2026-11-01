@@ -50,3 +50,6 @@ Desktop.ini
 *.pkl.gz
 *.b220state
 *.rgb565be
+
+# Writable virtual memory-card images contain local user data.
+*.img

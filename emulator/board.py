@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class Board:
     def __init__(self, profile=None, explore=False, flash_state=None, frame_callback=None,full_nor_trace=False,
-                 fast_cpu=True,stop_after_frames=0):
+                 fast_cpu=True,stop_after_frames=0,sd_image=None):
         self.profile = profile or json.loads((ROOT/'emulator/profiles/b220-l7a.json').read_text())
         self.explore = explore
         self.frame_callback = frame_callback
@@ -113,6 +113,9 @@ class Board:
         if self.dsp and self.irq:
             self.known_registers.add(0x8b000014)
         self.spi = EmptySpi() if self.profile.get('models',{}).get('spi_no_card') else None
+        if sd_image is not None:
+            from .sd import SdSpi
+            self.spi = SdSpi(sd_image)
         self.spi_controllers = {0x8e000000:self.spi} if self.spi else {}
         self.rtc = Rtc() if self.profile.get('models',{}).get('rtc') else None
         if self.rtc:
@@ -453,12 +456,16 @@ class Board:
                 self.stop = dict(reason='unsupported SPI access width',pc=hex(pc),address=hex(address),size=size)
                 uc.emu_stop()
                 return
-            if write:
-                spi.write(word-spi_base,value)
-            else:
-                value = spi.read(word-spi_base)
-                uc.mem_write(address,value.to_bytes(4,'big'))
-            self._record_mmio(write,address,pc,value,size,'SPI transport, no attached responder')
+            try:
+                if write:
+                    spi.write(word-spi_base,value)
+                else:
+                    value = spi.read(word-spi_base)
+                    uc.mem_write(address,value.to_bytes(4,'big'))
+            except ValueError as exc:
+                self.stop = dict(reason='unsupported SPI operation',pc=hex(pc),detail=str(exc))
+                uc.emu_stop()
+            self._record_mmio(write,address,pc,value,size,spi.description)
             return
         if self.lcd_dma and word in (0x20100010,0x20100014,0x20100060,0x20100070,0x20100074):
             if size != 4 or address != word:
@@ -469,8 +476,14 @@ class Board:
                 if word == 0x20100010:
                     requested = value&~self.dma_enabled
                     self.dma_enabled |= value
-                    for channel in range(16,22):
+                    for channel in range(22):
                         if requested&(1<<channel):
+                            if channel < 16:
+                                base = 0x20100400+channel*0x20
+                                endpoints = (self.storage.get(base+8),self.storage.get(base+12))
+                                if hasattr(self.spi,'image') and 0x8e000000 in endpoints:
+                                    self._spi_dma_transfer(channel,pc)
+                                continue
                             if channel not in (16,17):
                                 self.stop = dict(reason='unsupported DMA channel',channel=channel,pc=hex(pc))
                                 uc.emu_stop()
@@ -550,6 +563,36 @@ class Board:
         mask = 1<<channel
         self.storage[0x20100060] = self.storage.get(0x20100060,0)|mask
         self.dma_enabled &= ~mask
+
+    def _spi_dma_transfer(self,channel,pc):
+        base = 0x20100400+channel*0x20
+        config,count,source,target = (self.storage.get(base+off,0) for off in (0,4,8,12))
+        receive = source == 0x8e000000
+        pointer = target if receive else source
+        expected = 0x0a040010 if receive else 0x0a080010
+        if (config != expected or not 0<count<=65536 or count%4 or
+                not any(lo<=pointer<=hi-count for lo,hi in ((0x04000000,0x04400000),(0x34000000,0x34400000))) or
+                self.spi.registers.get(8,0)&0x7c):
+            self.stop = dict(reason='unsupported SPI DMA',pc=hex(pc),channel=channel,
+                             config=hex(config),count=count,source=hex(source),target=hex(target))
+            self.uc.emu_stop()
+            return
+        try:
+            if receive:
+                payload = b''.join(self.spi.read(0).to_bytes(4,'big') for _ in range(count//4))
+                self.uc.mem_write(target,payload)
+            else:
+                payload = bytes(self.uc.mem_read(source,count))
+                for off in range(0,count,4):
+                    self.spi.write(0,int.from_bytes(payload[off:off+4],'big'))
+        except ValueError as exc:
+            self.stop = dict(reason='unsupported SPI DMA',pc=hex(pc),detail=str(exc))
+            self.uc.emu_stop()
+            return
+        self._dma_complete(channel)
+        self.dma_transfers.append(dict(channel=channel,kind='SD SPI receive' if receive else 'SD SPI transmit',
+                                       pc=hex(pc),count=count,source=hex(source),target=hex(target),
+                                       sha256=hashlib.sha256(payload).hexdigest()))
 
     def _dma_transfer(self,channel,pc):
         """Observed software channels: LCD and RAM copies on 16 or 17."""

@@ -39,7 +39,7 @@ class CommandInbox:
 
 
 class InteractiveSession:
-    def __init__(self,board,args,emit_result):
+    def __init__(self,board,args,emit_result,flush_media=None):
         if not board.keypad:
             raise ValueError('Interactive session requires the keypad model')
         self.board,self.args,self.emit_result = board,args,emit_result
@@ -65,6 +65,7 @@ class InteractiveSession:
             options['backend_factory'] = lambda b,s:LoopbackNetwork(b,self.fixture.endpoint,service=s)
         self.network = WindowNetwork(board,Path(args.session_status).with_suffix('.network.json'),**options)
         self.last_network_publish = 0
+        self.flush_media = flush_media
 
     def commands(self):
         for command in self.inbox.poll():
@@ -115,9 +116,14 @@ class InteractiveSession:
                      window_id=hex(self.board.last_window_id) if self.board.last_window_id is not None else None,
                      backlight=self.board.lcd_backlight,
                      lcd_pixels=self.board.lcd.pixel_writes if self.board.lcd else 0,
-                     boot_seconds=self.boot_seconds,report=str(self.args.out),network=self.network.status())
+                     boot_seconds=self.boot_seconds,report=str(self.args.out),network=self.network.status(),
+                     sd_card=dict(present=hasattr(self.board.spi,'image'),
+                                  sectors_read=getattr(self.board.spi,'sectors_read',0),
+                                  sectors_written=getattr(self.board.spi,'sectors_written',0)))
         now = time.monotonic()
         if force or now-self.last_network_publish >= 1:
+            if self.flush_media:
+                self.flush_media()
             self.network.write_report()
             self.last_network_publish = now
         if not force and value == self.last_status and now-self.last_publish < 1:
@@ -180,13 +186,13 @@ class InteractiveSession:
             elif step['stop']['reason'] not in ('instruction budget','wall time budget'):
                 self.publish(force=True,state='stopped')
                 return self.result(step['engine_error'])
-            # The fifth full redraw can precede the initial date dialog and
-            # its cursor. Let the guest finish opening that window before
-            # exposing input; this is a board-specific boot checkpoint, not
-            # an assertion about the physical CPU frequency.
+            # This checkpoint enables host input; it does not establish that
+            # the boot animation has finished. In particular, SD initialization
+            # changes the boot timing. Keep the CPU running through the splash
+            # and let the original firmware reach its home/date screen itself.
             if (not self.ready and self.boot_checkpoint_block is not None and
                     self.board.block_serial >= self.boot_checkpoint_block+512000):
-                self.ready,self.paused = True,True
+                self.ready,self.paused = True,False
                 self.boot_seconds = round(time.monotonic()-self.started,3)
                 self.emit_result(self.result(),True)
             self.publish()

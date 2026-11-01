@@ -1,4 +1,4 @@
-﻿param([switch]$SmokeTest, [switch]$ScreenTest, [switch]$KeyTest, [switch]$NetworkTest,
+﻿param([switch]$SmokeTest, [switch]$ScreenTest, [switch]$KeyTest, [switch]$NetworkTest, [switch]$CardTest,
       [string]$LoadState, [string]$TestDirectory)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
@@ -10,6 +10,7 @@ $script:pythonPath = Join-Path $script:projectRoot '.venv\Scripts\python.exe'
 $script:outputDirectory = Join-Path $script:projectRoot 'analysis\emulator'
 if ($TestDirectory) { $script:outputDirectory = [System.IO.Path]::GetFullPath($TestDirectory) }
 if ($NetworkTest -and (-not $LoadState -or -not $TestDirectory)) { throw 'NetworkTest requires an isolated TestDirectory and LoadState.' }
+if ($CardTest -and (-not $LoadState -or -not $TestDirectory)) { throw 'CardTest requires an isolated TestDirectory and LoadState.' }
 $script:reportPath = Join-Path $script:outputDirectory 'window-latest.json'
 $script:stdoutPath = Join-Path $script:outputDirectory 'window-stdout.log'
 $script:stderrPath = Join-Path $script:outputDirectory 'window-stderr.log'
@@ -24,6 +25,16 @@ if ($KeyTest) {
     $script:stderrPath = Join-Path $script:outputDirectory 'window-key-test-stderr.log'
 }
 $script:virtualNorPath = Join-Path $script:outputDirectory 'window-nor-v2.bin'
+$script:cardImagePath = Join-Path $script:outputDirectory 'sd-card.img'
+$script:cardSettingsPath = Join-Path $script:outputDirectory 'window-card.json'
+if (Test-Path -LiteralPath $script:cardSettingsPath) {
+    try {
+        $savedCard = Get-Content -LiteralPath $script:cardSettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($savedCard.path -is [string] -and (Test-Path -LiteralPath $savedCard.path -PathType Leaf)) {
+            $script:cardImagePath = $savedCard.path
+        }
+    } catch { } # Invalid optional UI preferences do not prevent startup.
+}
 $script:bootProcess = $null
 $script:frame = $null
 $script:framePath = $null
@@ -58,6 +69,7 @@ $script:networkReportPath = $null
 $script:networkTestStage = 0
 $script:networkTestUrlRequested = $false
 $script:networkTestBrowserRequested = $false
+$script:cardTestDone = $false
 
 $script:form = New-Object System.Windows.Forms.Form
 $form.Text = 'Explay B220'
@@ -264,6 +276,10 @@ $script:networkButton = New-Object System.Windows.Forms.Button
 $networkButton.Text = 'Сеть…'
 $networkButton.Add_Click({ Show-B220NetworkSettings })
 $form.Controls.Add($networkButton)
+$script:cardButton = New-Object System.Windows.Forms.Button
+$cardButton.Text = 'Карта…'
+$cardButton.Add_Click({ Show-B220CardSettings })
+$form.Controls.Add($cardButton)
 $script:networkLabel = New-Object System.Windows.Forms.Label
 $networkLabel.Font = New-Object System.Drawing.Font('Segoe UI', 8)
 $networkLabel.Text = 'Интернет выключен'
@@ -278,6 +294,99 @@ $networkJournal.Add_LinkClicked({
     }
 })
 $form.Controls.Add($networkJournal)
+
+function Ensure-B220Card {
+    if (-not (Test-Path -LiteralPath $script:cardImagePath)) {
+        $result = & $script:pythonPath -X utf8 -m tools.sd_image $script:cardImagePath --create --sample 2>&1
+        if ($LASTEXITCODE -ne 0) { throw ($result -join [Environment]::NewLine) }
+    }
+}
+
+function Show-B220CardSettings {
+    Release-B220Keys
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = 'Карта памяти'
+    $dialog.Font = $script:form.Font
+    $dialog.ClientSize = New-Object System.Drawing.Size(440,290)
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $description = New-Object System.Windows.Forms.Label
+    $description.Text = 'Образ microSD · FAT16 · 16 или 32 МиБ'
+    $description.SetBounds(16,16,408,28)
+    $dialog.Controls.Add($description)
+    $pathBox = New-Object System.Windows.Forms.TextBox
+    $pathBox.Text = $script:cardImagePath
+    $pathBox.ReadOnly = $true
+    $pathBox.SetBounds(16,50,408,28)
+    $dialog.Controls.Add($pathBox)
+    $help = New-Object System.Windows.Forms.Label
+    $help.Text = 'Добавление файлов и смена образа перезапускают телефон. Файлы появятся в корне карты. Длинные имена получают короткие имена вида FILE0001.JPG.'
+    $help.SetBounds(16,92,408,70)
+    $dialog.Controls.Add($help)
+    $add = New-Object System.Windows.Forms.Button
+    $add.Text = 'Добавить файлы и перезапустить…'
+    $add.SetBounds(16,176,408,32)
+    $add.Add_Click({
+        $picker = New-Object System.Windows.Forms.OpenFileDialog
+        $picker.Title = 'Добавить файлы на карту памяти'
+        $picker.Filter = 'Все файлы (*.*)|*.*|Изображения|*.jpg;*.jpeg;*.bmp;*.gif;*.png'
+        $picker.Multiselect = $true
+        try {
+            if ($picker.ShowDialog($dialog) -ne 'OK') { return }
+            Stop-B220Child
+            Ensure-B220Card
+            $result = & $script:pythonPath -X utf8 -m tools.sd_image $script:cardImagePath --add @($picker.FileNames) 2>&1
+            if ($LASTEXITCODE -ne 0) { throw ($result -join [Environment]::NewLine) }
+            [void][System.Windows.Forms.MessageBox]::Show($dialog,('Добавлены: '+($result -join ', ')),'Карта памяти')
+            $dialog.Close()
+            Start-B220Boot
+        } catch {
+            [void][System.Windows.Forms.MessageBox]::Show($dialog,$_.Exception.Message,'Не удалось добавить файлы')
+            if (-not $script:bootProcess) { Start-B220Boot }
+        } finally { $picker.Dispose() }
+    })
+    $dialog.Controls.Add($add)
+    $select = New-Object System.Windows.Forms.Button
+    $select.Text = 'Выбрать другой образ…'
+    $select.SetBounds(16,226,250,32)
+    $select.Add_Click({
+        $picker = New-Object System.Windows.Forms.OpenFileDialog
+        $picker.Title = 'Выбрать образ карты (телефон перезапустится)'
+        $picker.Filter = 'Образы карты (*.img)|*.img|Все файлы (*.*)|*.*'
+        try {
+            if ($picker.ShowDialog($dialog) -eq 'OK') {
+                $length = (Get-Item -LiteralPath $picker.FileName).Length
+                if ($length -notin @(16777216,33554432)) { throw 'Поддерживаются образы размером 16 и 32 МиБ.' }
+                Stop-B220Child
+                $script:cardImagePath = $picker.FileName
+                [System.IO.File]::WriteAllText($script:cardSettingsPath,(@{path=$script:cardImagePath} | ConvertTo-Json),(New-Object System.Text.UTF8Encoding($false)))
+                $dialog.Close()
+                Start-B220Boot
+            }
+        } catch { [void][System.Windows.Forms.MessageBox]::Show($dialog,$_.Exception.Message,'Карта памяти') }
+        finally { $picker.Dispose() }
+    })
+    $dialog.Controls.Add($select)
+    $close = New-Object System.Windows.Forms.Button
+    $close.Text = 'Закрыть'
+    $close.SetBounds(300,226,124,32)
+    $close.Add_Click({ $dialog.Close() })
+    $dialog.Controls.Add($close)
+    if ($CardTest) {
+        $dialog.Add_Shown({
+            $dialog.Refresh()
+            $capture = New-Object System.Drawing.Bitmap($dialog.Width,$dialog.Height)
+            try {
+                $dialog.DrawToBitmap($capture,(New-Object System.Drawing.Rectangle(0,0,$capture.Width,$capture.Height)))
+                $capture.Save((Join-Path $script:outputDirectory 'window-card-settings.png'),[System.Drawing.Imaging.ImageFormat]::Png)
+            } finally { $capture.Dispose() }
+            $dialog.Close()
+        })
+    }
+    try { [void]$dialog.ShowDialog($script:form) } finally { $dialog.Dispose() }
+}
 
 function Show-B220UrlInput {
     $dialog = New-Object System.Windows.Forms.Form
@@ -413,9 +522,10 @@ function Set-B220Layout {
     $height = 220 * $scale + 507
     $area = [System.Windows.Forms.Screen]::FromControl($script:form).WorkingArea
     $clientHeight = [Math]::Min($height,($area.Height-40))
-    $script:form.AutoScroll = $clientHeight -lt $height
-    $script:form.AutoScrollMinSize = New-Object System.Drawing.Size($width,$height)
-    $clientWidth = $width + $(if ($script:form.AutoScroll) { [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth } else { 0 })
+    $needsScroll = $clientHeight -lt $height
+    $script:form.AutoScrollMinSize = if ($needsScroll) { New-Object System.Drawing.Size($width,$height) } else { [System.Drawing.Size]::Empty }
+    $script:form.AutoScroll = $needsScroll
+    $clientWidth = $width + $(if ($needsScroll) { [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth } else { 0 })
     $script:form.ClientSize = New-Object System.Drawing.Size($clientWidth, $clientHeight)
     $script:screen.Size = New-Object System.Drawing.Size((176 * $scale), (220 * $scale))
     $script:screen.Left = [int](($width - $script:screen.Width) / 2)
@@ -433,8 +543,9 @@ function Set-B220Layout {
     $script:journal.Location = New-Object System.Drawing.Point(24, ($bottom + 113))
     $script:zoom.Location = New-Object System.Drawing.Point(($width - 96), ($bottom + 108))
     $script:networkJournal.Location = New-Object System.Drawing.Point(150, ($bottom + 113))
-    $script:networkButton.SetBounds(24,($bottom+145),105,30)
-    $script:networkLabel.SetBounds(140,($bottom+143),($width-164),42)
+    $script:networkButton.SetBounds(24,($bottom+145),90,30)
+    $script:cardButton.SetBounds(122,($bottom+145),90,30)
+    $script:networkLabel.SetBounds(222,($bottom+143),($width-246),42)
     $area = [System.Windows.Forms.Screen]::FromControl($script:form).WorkingArea
     if ($script:form.Bottom -gt $area.Bottom) { $script:form.Top = [Math]::Max($area.Top, $area.Bottom - $script:form.Height) }
 }
@@ -444,7 +555,7 @@ function Show-B220Error([string]$message) {
     $script:restart.Enabled = $true
     $script:status.Text = 'Не удалось завершить запуск'
     $script:detail.Text = 'Можно повторить запуск. Подробности — в сообщении об ошибке.'
-    if ($SmokeTest -or $ScreenTest -or $KeyTest -or $NetworkTest) {
+    if ($SmokeTest -or $ScreenTest -or $KeyTest -or $NetworkTest -or $CardTest) {
         $script:smokeFailure = $message
         [System.IO.File]::WriteAllText((Join-Path $script:outputDirectory 'window-smoke-error.log'), $message)
         $script:form.Close()
@@ -512,6 +623,10 @@ function Start-B220Boot {
         else {
             if (-not $ScreenTest -and -not $KeyTest) { $argsForBoot += @('--save-flash', ('"' + $script:virtualNorPath + '"')) }
             if (Test-Path -LiteralPath $script:virtualNorPath) { $argsForBoot += @('--load-flash', ('"' + $script:virtualNorPath + '"')) }
+        }
+        if (-not $LoadState -and -not $SmokeTest -and -not $ScreenTest -and -not $KeyTest -and -not $NetworkTest) {
+            Ensure-B220Card
+            $argsForBoot += @('--sd-image',('"'+$script:cardImagePath+'"'))
         }
         if ($NetworkTest) { $argsForBoot += '--window-http-test' }
         $script:bootProcess = Start-Process -FilePath $script:pythonPath -ArgumentList $argsForBoot -WorkingDirectory $script:projectRoot -WindowStyle Hidden -RedirectStandardOutput $script:stdoutPath -RedirectStandardError $script:stderrPath -PassThru
@@ -753,13 +868,16 @@ $timer.Add_Tick({
             $state = Get-Content -LiteralPath $script:sessionStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
             $script:sessionReady = [bool]$state.ready -and $state.state -in @('paused','running')
             $script:sessionPaused = $state.state -eq 'paused'
+            if ($state.sd_card) {
+                $script:tooltip.SetToolTip($script:cardButton,('Карта: '+$(if ($state.sd_card.present) {'вставлена'} else {'нет'})+"`nЧтений: $($state.sd_card.sectors_read), записей: $($state.sd_card.sectors_written)"))
+            }
             $script:networkState = $state.network
             if ($state.network) {
                 $script:networkReportPath = [string]$state.network.report
                 $script:networkJournal.Enabled = Test-Path -LiteralPath $script:networkReportPath
                 $networkCaption = switch ([string]$state.network.state) {
                     'off' { 'Интернет выключен' }
-                    'waiting_browser' { 'Откройте меню «Интернет»' }
+                    'waiting_browser' { 'Ожидание браузера' }
                     'changing' { 'Меняется состояние SIM…' }
                     'absent' { 'SIM1 извлечена' }
                     'confirming' { 'Подключение…' }
@@ -767,7 +885,7 @@ $timer.Add_Tick({
                     'error' { 'Ошибка сети · перезапустите телефон' }
                     default { if ($state.network.registered) { 'SIM1 готова к подключению' } else { 'SIM1 без регистрации' } }
                 }
-                if ($state.network.transport_mode -like 'loopback*') { $networkCaption = 'Тестовая сеть · '+$networkCaption }
+                if ($state.network.transport_mode -like 'loopback*') { $networkCaption = 'Тест: '+$networkCaption }
                 $script:networkLabel.Text = $networkCaption
                 if ($state.network.attached) {
                     $script:networkLabel.Text += "`n↑ $($state.network.sent_bytes) Б   ↓ $($state.network.received_bytes) Б"
@@ -802,6 +920,23 @@ $timer.Add_Tick({
         if ($NetworkTest -and $state) {
             try { Test-B220Network $state }
             catch { Show-B220Error $_.Exception.Message }
+        }
+        if ($CardTest -and $script:sessionReady -and -not $script:cardTestDone) {
+            try {
+                $script:cardTestDone = $true
+                if (-not $state.sd_card.present) { throw 'No SD card in the test snapshot.' }
+                $script:form.Refresh()
+                $capture = New-Object System.Drawing.Bitmap($script:form.Width,$script:form.Height)
+                try {
+                    $script:form.DrawToBitmap($capture,(New-Object System.Drawing.Rectangle(0,0,$capture.Width,$capture.Height)))
+                    $capture.Save((Join-Path $script:outputDirectory 'window-card.png'),[System.Drawing.Imaging.ImageFormat]::Png)
+                } finally { $capture.Dispose() }
+                $script:cardButton.PerformClick()
+                $childId = $script:bootProcess.Id
+                $script:form.Close()
+                if (Get-Process -Id $childId -ErrorAction SilentlyContinue) { throw 'SD child survived window close.' }
+                [System.IO.File]::WriteAllText((Join-Path $script:outputDirectory 'window-card-check.json'),'{"status":"PASS","sd_attached":true,"settings_dialog":true,"close_stops_child":true}')
+            } catch { Show-B220Error $_.Exception.Message }
         }
     }
     if (-not $script:bootProcess -or -not $script:bootProcess.HasExited) { return }

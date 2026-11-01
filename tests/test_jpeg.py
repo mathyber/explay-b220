@@ -12,6 +12,16 @@ FIXTURES = Path(__file__).parent/'fixtures'
 
 
 class JpegTests(unittest.TestCase):
+    def test_file_header_preload_and_word_fifo_ready_status(self):
+        engine = JpegEngine()
+        self.assertEqual(engine.read(0x10418,self.read),0)
+        engine.registers.update({0x50:0x04001000>>8,0x10400:0x80000002})
+        self.assertEqual(engine.read(0x10418,self.read),0x80000008)
+        engine.bit_position = 40
+        self.assertEqual(engine.read(0x10418,self.read),0x80000000)
+        engine.registers[0x50] = 0x04400000>>8
+        self.assertEqual(engine.read(0x10418,self.read),0)
+
     def setUp(self):
         self.jpeg = JpegEngine()
         fixture = json.loads((FIXTURES/'jpeg-registers.json').read_text())
