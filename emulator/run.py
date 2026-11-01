@@ -13,12 +13,14 @@ from unicorn.arm_const import UC_ARM_REG_PC,UC_ARM_REG_CPSR
 def save_outputs(board,result,args,publish_frame,save_flash=True):
     if publish_frame:
         result['live_frame_output'] = publish_frame.report()
-    if args.save_flash and save_flash:
+    if args.save_flash and save_flash and not hasattr(board,'experimental_network'):
         args.save_flash.parent.mkdir(parents=True,exist_ok=True)
         temporary = args.save_flash.with_name(f'.{args.save_flash.name}-{os.getpid()}.tmp')
         temporary.write_bytes(board.flash.array)
         temporary.replace(args.save_flash)
         result['saved_flash'] = str(args.save_flash)
+    elif args.save_flash and save_flash:
+        result['flash_save_skipped'] = 'Experimental network RAM/configuration must not persist into ordinary NOR'
     if board.dsp and board.dsp.image:
         payload_path = args.out.parent/(args.out.stem+'-dsp-bootstrap.bin')
         payload_path.write_bytes(board.dsp.image)
@@ -49,14 +51,15 @@ def main():
     p.add_argument('--interactive',action='store_true',help='Keep CPU/RAM alive and accept phone keys after the first screen')
     p.add_argument('--commands',type=Path,help='Per-session JSONL input file')
     p.add_argument('--session-status',type=Path,help='Per-session atomic status JSON')
+    p.add_argument('--window-http-test',action='store_true',help='Use only a private loopback HTTP fixture for interactive UI validation')
     p.add_argument('--network-trace',type=Path,help='Write read-only CMS/GPRS/socket observations to this JSON; does not enable networking')
     a = p.parse_args()
     if a.instructions <= 0 or a.frames < 0 or not 0 < a.seconds < float('inf') or not 0 <= a.until <= 0xffffffff:
         p.error('Budgets must be positive/finite and --until must be a 32-bit address')
     if a.interactive and (not a.commands or not a.session_status):
         p.error('--interactive requires --commands and --session-status')
-    if a.interactive and a.load_state:
-        p.error('--load-state currently supports console runs; window integration is the next step')
+    if a.window_http_test and not a.interactive:
+        p.error('--window-http-test requires --interactive')
     if a.save_state and a.save_state.suffix.lower() != '.b220state':
         p.error('--save-state output must use the .b220state extension')
     a.out.parent.mkdir(parents=True,exist_ok=True)

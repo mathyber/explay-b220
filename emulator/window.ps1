@@ -1,4 +1,5 @@
-﻿param([switch]$SmokeTest, [switch]$ScreenTest, [switch]$KeyTest)
+﻿param([switch]$SmokeTest, [switch]$ScreenTest, [switch]$KeyTest, [switch]$NetworkTest,
+      [string]$LoadState, [string]$TestDirectory)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -7,6 +8,8 @@ Add-Type -AssemblyName System.Drawing
 $script:projectRoot = Split-Path -Parent $PSScriptRoot
 $script:pythonPath = Join-Path $script:projectRoot '.venv\Scripts\python.exe'
 $script:outputDirectory = Join-Path $script:projectRoot 'analysis\emulator'
+if ($TestDirectory) { $script:outputDirectory = [System.IO.Path]::GetFullPath($TestDirectory) }
+if ($NetworkTest -and (-not $LoadState -or -not $TestDirectory)) { throw 'NetworkTest requires an isolated TestDirectory and LoadState.' }
 $script:reportPath = Join-Path $script:outputDirectory 'window-latest.json'
 $script:stdoutPath = Join-Path $script:outputDirectory 'window-stdout.log'
 $script:stderrPath = Join-Path $script:outputDirectory 'window-stderr.log'
@@ -46,6 +49,15 @@ $script:keyTestEvents = 0
 $script:keyTestPixels = 0
 $script:keyTestNavigationRetried = $false
 $script:tooltip = New-Object System.Windows.Forms.ToolTip
+$script:networkEnabled = $false
+$script:networkPlmn = '25001'
+$script:networkSim = $true
+$script:networkRegistered = $true
+$script:networkState = $null
+$script:networkReportPath = $null
+$script:networkTestStage = 0
+$script:networkTestUrlRequested = $false
+$script:networkTestBrowserRequested = $false
 
 $script:form = New-Object System.Windows.Forms.Form
 $form.Text = 'Explay B220'
@@ -243,16 +255,168 @@ $form.Controls.Add($journal)
 $script:zoom = New-Object System.Windows.Forms.ComboBox
 $zoom.DropDownStyle = 'DropDownList'
 $zoom.Size = New-Object System.Drawing.Size(72, 28)
-$maxScale = [Math]::Max(1, [Math]::Min(4, [Math]::Floor(([System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Height - 500) / 220)))
+$maxScale = [Math]::Max(1, [Math]::Min(4, [Math]::Floor(([System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Height - 548) / 220)))
 for ($scaleOption = 1; $scaleOption -le $maxScale; $scaleOption++) { [void]$zoom.Items.Add("${scaleOption}×") }
 $zoom.Add_SelectedIndexChanged({ Set-B220Layout })
 $form.Controls.Add($zoom)
 
+$script:networkButton = New-Object System.Windows.Forms.Button
+$networkButton.Text = 'Сеть…'
+$networkButton.Add_Click({ Show-B220NetworkSettings })
+$form.Controls.Add($networkButton)
+$script:networkLabel = New-Object System.Windows.Forms.Label
+$networkLabel.Font = New-Object System.Drawing.Font('Segoe UI', 8)
+$networkLabel.Text = 'Интернет выключен'
+$form.Controls.Add($networkLabel)
+$script:networkJournal = New-Object System.Windows.Forms.LinkLabel
+$networkJournal.Text = 'Журнал сети'
+$networkJournal.AutoSize = $true
+$networkJournal.Enabled = $false
+$networkJournal.Add_LinkClicked({
+    if ($script:networkReportPath -and (Test-Path -LiteralPath $script:networkReportPath)) {
+        Start-Process -FilePath notepad.exe -ArgumentList @('"'+$script:networkReportPath+'"')
+    }
+})
+$form.Controls.Add($networkJournal)
+
+function Show-B220UrlInput {
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = 'Открыть адрес в телефоне'
+    $dialog.Font = $script:form.Font
+    $dialog.ClientSize = New-Object System.Drawing.Size(420,160)
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = 'Сначала откройте «Ввести адрес» в браузере телефона.'
+    $label.SetBounds(16,14,388,38)
+    $dialog.Controls.Add($label)
+    $inputBox = New-Object System.Windows.Forms.TextBox
+    $inputBox.Text = 'http://'
+    $inputBox.MaxLength = 512
+    $inputBox.SetBounds(16,56,388,28)
+    $dialog.Controls.Add($inputBox)
+    $open = New-Object System.Windows.Forms.Button
+    $open.Text = 'Открыть'
+    $open.SetBounds(284,108,120,30)
+    $open.Add_Click({
+        Write-B220Command @{action='open_url';url=$inputBox.Text}
+        $dialog.Close()
+    })
+    $dialog.Controls.Add($open)
+    $dialog.AcceptButton = $open
+    if ($NetworkTest) {
+        $dialog.Add_Shown({
+            $inputBox.Text = 'http://a.aa/'
+            $dialog.Refresh()
+            $capture = New-Object System.Drawing.Bitmap($dialog.Width,$dialog.Height)
+            try {
+                $dialog.DrawToBitmap($capture,(New-Object System.Drawing.Rectangle(0,0,$capture.Width,$capture.Height)))
+                $capture.Save((Join-Path $script:outputDirectory 'window-network-url.png'),[System.Drawing.Imaging.ImageFormat]::Png)
+            } finally { $capture.Dispose() }
+            $open.PerformClick()
+        })
+    }
+    try { [void]$dialog.ShowDialog($script:form) } finally { $dialog.Dispose() }
+}
+
+function Show-B220NetworkSettings {
+    Release-B220Keys
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = 'Сеть и виртуальная SIM1'
+    $dialog.Font = $script:form.Font
+    $dialog.ClientSize = New-Object System.Drawing.Size(420,322)
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $enabledBox = New-Object System.Windows.Forms.CheckBox
+    $enabledBox.Text = 'Интернет через компьютер (эксперимент)'
+    $enabledBox.SetBounds(16,16,390,28)
+    $enabledBox.Checked = $script:networkEnabled
+    $dialog.Controls.Add($enabledBox)
+    $help = New-Object System.Windows.Forms.Label
+    $help.Text = 'Откройте меню «Интернет» в телефоне. Возможности браузера и ограничения сайтов сохраняются.'
+    $help.SetBounds(16,52,388,44)
+    $dialog.Controls.Add($help)
+    $plmnLabel = New-Object System.Windows.Forms.Label
+    $plmnLabel.Text = 'Домашний PLMN (MCC + MNC):'
+    $plmnLabel.SetBounds(16,108,255,24)
+    $dialog.Controls.Add($plmnLabel)
+    $plmnBox = New-Object System.Windows.Forms.TextBox
+    $plmnBox.Text = $script:networkPlmn
+    $plmnBox.MaxLength = 6
+    $plmnBox.Enabled = -not ($script:networkState -and $script:networkState.attached)
+    $plmnBox.SetBounds(282,104,122,28)
+    $dialog.Controls.Add($plmnBox)
+    $simBox = New-Object System.Windows.Forms.CheckBox
+    $simBox.Text = 'Виртуальная SIM1 вставлена'
+    $simBox.Checked = $script:networkSim
+    $simBox.SetBounds(16,146,388,28)
+    $dialog.Controls.Add($simBox)
+    $registeredBox = New-Object System.Windows.Forms.CheckBox
+    $registeredBox.Text = 'Зарегистрирована в сети'
+    $registeredBox.Checked = $script:networkRegistered
+    $registeredBox.Enabled = $simBox.Checked
+    $registeredBox.SetBounds(16,180,388,28)
+    $dialog.Controls.Add($registeredBox)
+    $simBox.Add_CheckedChanged({
+        $registeredBox.Enabled = $simBox.Checked
+        if (-not $simBox.Checked) { $registeredBox.Checked = $false }
+    })
+    $urlButton = New-Object System.Windows.Forms.Button
+    $urlButton.Text = 'Открыть URL…'
+    $urlButton.SetBounds(16,232,150,30)
+    $urlButton.Enabled = $script:sessionReady -and $script:networkState -and $script:networkState.enabled
+    $urlButton.Add_Click({ $dialog.Close(); Show-B220UrlInput })
+    $dialog.Controls.Add($urlButton)
+    $apply = New-Object System.Windows.Forms.Button
+    $apply.Text = 'Применить'
+    $apply.SetBounds(284,276,120,30)
+    $apply.Add_Click({
+        if ($plmnBox.Text -notmatch '^[0-9]{5,6}$') {
+            [void][System.Windows.Forms.MessageBox]::Show($dialog,'PLMN должен содержать 5 или 6 цифр.','Параметры SIM')
+            return
+        }
+        $script:networkEnabled = $enabledBox.Checked
+        $script:networkPlmn = $plmnBox.Text
+        $script:networkSim = $simBox.Checked
+        $script:networkRegistered = $registeredBox.Checked
+        Write-B220Command @{action='network';enabled=$script:networkEnabled;plmn=$script:networkPlmn;sim_present=$script:networkSim;registered=$script:networkRegistered}
+        $dialog.Close()
+    })
+    $dialog.Controls.Add($apply)
+    $dialog.AcceptButton = $apply
+    if ($NetworkTest) {
+        $dialog.Add_Shown({
+            $enabledBox.Checked = $script:networkTestStage -ne 4
+            if ($script:networkTestStage -eq 3) { $registeredBox.Checked = $false }
+            if ($script:networkTestStage -eq 1) {
+                $dialog.Refresh()
+                $capture = New-Object System.Drawing.Bitmap($dialog.Width,$dialog.Height)
+                try {
+                    $dialog.DrawToBitmap($capture,(New-Object System.Drawing.Rectangle(0,0,$capture.Width,$capture.Height)))
+                    $capture.Save((Join-Path $script:outputDirectory 'window-network-settings.png'),[System.Drawing.Imaging.ImageFormat]::Png)
+                } finally { $capture.Dispose() }
+            }
+            $apply.PerformClick()
+        })
+    }
+    try { [void]$dialog.ShowDialog($script:form) } finally { $dialog.Dispose() }
+}
+
 function Set-B220Layout {
+    $script:form.AutoScrollPosition = New-Object System.Drawing.Point(0,0)
     $scale = $script:zoom.SelectedIndex + 1
     $width = [Math]::Max(400, 176 * $scale + 48)
-    $height = 220 * $scale + 459
-    $script:form.ClientSize = New-Object System.Drawing.Size($width, $height)
+    $height = 220 * $scale + 507
+    $area = [System.Windows.Forms.Screen]::FromControl($script:form).WorkingArea
+    $clientHeight = [Math]::Min($height,($area.Height-40))
+    $script:form.AutoScroll = $clientHeight -lt $height
+    $script:form.AutoScrollMinSize = New-Object System.Drawing.Size($width,$height)
+    $clientWidth = $width + $(if ($script:form.AutoScroll) { [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth } else { 0 })
+    $script:form.ClientSize = New-Object System.Drawing.Size($clientWidth, $clientHeight)
     $script:screen.Size = New-Object System.Drawing.Size((176 * $scale), (220 * $scale))
     $script:screen.Left = [int](($width - $script:screen.Width) / 2)
     $script:phonePanel.Location = New-Object System.Drawing.Point(([int](($width-352)/2)),($script:screen.Bottom+8))
@@ -268,6 +432,9 @@ function Set-B220Layout {
     $script:save.SetBounds((40+2*$buttonWidth),($bottom+72),$buttonWidth,30)
     $script:journal.Location = New-Object System.Drawing.Point(24, ($bottom + 113))
     $script:zoom.Location = New-Object System.Drawing.Point(($width - 96), ($bottom + 108))
+    $script:networkJournal.Location = New-Object System.Drawing.Point(150, ($bottom + 113))
+    $script:networkButton.SetBounds(24,($bottom+145),105,30)
+    $script:networkLabel.SetBounds(140,($bottom+143),($width-164),42)
     $area = [System.Windows.Forms.Screen]::FromControl($script:form).WorkingArea
     if ($script:form.Bottom -gt $area.Bottom) { $script:form.Top = [Math]::Max($area.Top, $area.Bottom - $script:form.Height) }
 }
@@ -277,7 +444,7 @@ function Show-B220Error([string]$message) {
     $script:restart.Enabled = $true
     $script:status.Text = 'Не удалось завершить запуск'
     $script:detail.Text = 'Можно повторить запуск. Подробности — в сообщении об ошибке.'
-    if ($SmokeTest -or $ScreenTest -or $KeyTest) {
+    if ($SmokeTest -or $ScreenTest -or $KeyTest -or $NetworkTest) {
         $script:smokeFailure = $message
         [System.IO.File]::WriteAllText((Join-Path $script:outputDirectory 'window-smoke-error.log'), $message)
         $script:form.Close()
@@ -313,6 +480,10 @@ function Start-B220Boot {
         $script:save.Enabled = $false
         $script:journal.Enabled = $false
         $script:report = $null
+        $script:networkState = $null
+        $script:networkReportPath = $null
+        $script:networkLabel.Text = if ($script:networkEnabled) { 'Ожидается меню «Интернет»' } else { 'Интернет выключен' }
+        $script:networkJournal.Enabled = $false
         $script:sessionReady = $false
         $script:lcdBacklight = $true
         $script:phonePanel.Enabled = $false
@@ -337,13 +508,18 @@ function Start-B220Boot {
             $argsForBoot += @('--interactive','--commands',('"'+$script:commandPath+'"'),'--session-status',('"'+$script:sessionStatusPath+'"'))
         }
         if ($SmokeTest) { $argsForBoot += @('--until', '0x1a0fc2') }
+        elseif ($LoadState) { $argsForBoot += @('--load-state',('"'+$LoadState+'"')) }
         else {
             if (-not $ScreenTest -and -not $KeyTest) { $argsForBoot += @('--save-flash', ('"' + $script:virtualNorPath + '"')) }
             if (Test-Path -LiteralPath $script:virtualNorPath) { $argsForBoot += @('--load-flash', ('"' + $script:virtualNorPath + '"')) }
         }
+        if ($NetworkTest) { $argsForBoot += '--window-http-test' }
         $script:bootProcess = Start-Process -FilePath $script:pythonPath -ArgumentList $argsForBoot -WorkingDirectory $script:projectRoot -WindowStyle Hidden -RedirectStandardOutput $script:stdoutPath -RedirectStandardError $script:stderrPath -PassThru
         # Keep the process handle open so ExitCode remains available after exit.
         [void]$script:bootProcess.Handle
+        if ($script:networkEnabled) {
+            Write-B220Command @{action='network';enabled=$true;plmn=$script:networkPlmn;sim_present=$script:networkSim;registered=$script:networkRegistered}
+        }
         $script:timer.Start()
     } catch { Show-B220Error $_.Exception.Message }
 }
@@ -507,6 +683,61 @@ function Test-B220Keys($state) {
     $script:keyTestStage++
 }
 
+function Test-B220Network($state) {
+    if (([DateTime]::UtcNow-$script:bootStarted).TotalSeconds -gt 90) { throw 'Network window test timed out.' }
+    if (-not $script:sessionReady) { return }
+    switch ($script:networkTestStage) {
+        0 {
+            $script:networkTestStage = 1
+            $script:networkButton.PerformClick()
+        }
+        1 {
+            if ($state.network.state -eq 'waiting_browser' -and $script:sessionPaused) { $script:pause.PerformClick() }
+            if ($state.network.state -eq 'waiting_browser' -and $state.window_id -eq '0x2' -and -not $script:networkTestBrowserRequested) {
+                $script:networkTestBrowserRequested = $true
+                $script:phoneButtons['ok'].PerformClick()
+            }
+            if (-not $state.network.attached) { return }
+            if ($state.window_id -ne '0x4001b') {
+                if (-not $script:networkTestUrlRequested) {
+                    $script:networkTestUrlRequested = $true
+                    $script:phoneButtons['ok'].PerformClick()
+                }
+                return
+            }
+            $script:networkTestStage = 2
+            Show-B220UrlInput
+        }
+        2 {
+            if ($state.network.received_bytes -lt 300 -or ([DateTime]::UtcNow-$script:bootStarted).TotalSeconds -lt 8) { return }
+            $script:form.Refresh()
+            $capture = New-Object System.Drawing.Bitmap($script:form.Width,$script:form.Height)
+            try {
+                $script:form.DrawToBitmap($capture,(New-Object System.Drawing.Rectangle(0,0,$capture.Width,$capture.Height)))
+                $capture.Save((Join-Path $script:outputDirectory 'window-network.png'),[System.Drawing.Imaging.ImageFormat]::Png)
+            } finally { $capture.Dispose() }
+            $script:networkTestStage = 3
+            $script:networkButton.PerformClick()
+        }
+        3 {
+            if ($state.network.registered -or $state.network.state -eq 'changing') { return }
+            $script:networkTestStage = 4
+            $script:networkButton.PerformClick()
+        }
+        4 {
+            if ($state.network.state -ne 'off') { return }
+            $childId = $script:bootProcess.Id
+            $script:networkTestStage = 5
+            $script:form.Close()
+            if (Get-Process -Id $childId -ErrorAction SilentlyContinue) { throw 'Network child survived window close.' }
+            $report = Get-Content -LiteralPath $script:networkReportPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if (-not ($report.transport.events | Where-Object {$_.kind -eq 'bearer.down'})) { throw 'SIM service did not close its bearer.' }
+            $check = @{status='PASS';loopback_only=$true;settings_dialog=$true;url_input=$true;received_bytes=$state.network.received_bytes;unregister=$true;disable=$true;close_stops_child=$true} | ConvertTo-Json
+            [System.IO.File]::WriteAllText((Join-Path $script:outputDirectory 'window-network-check.json'),$check)
+        }
+    }
+}
+
 $script:timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 120
 $timer.Add_Tick({
@@ -522,6 +753,27 @@ $timer.Add_Tick({
             $state = Get-Content -LiteralPath $script:sessionStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
             $script:sessionReady = [bool]$state.ready -and $state.state -in @('paused','running')
             $script:sessionPaused = $state.state -eq 'paused'
+            $script:networkState = $state.network
+            if ($state.network) {
+                $script:networkReportPath = [string]$state.network.report
+                $script:networkJournal.Enabled = Test-Path -LiteralPath $script:networkReportPath
+                $networkCaption = switch ([string]$state.network.state) {
+                    'off' { 'Интернет выключен' }
+                    'waiting_browser' { 'Откройте меню «Интернет»' }
+                    'changing' { 'Меняется состояние SIM…' }
+                    'absent' { 'SIM1 извлечена' }
+                    'confirming' { 'Подключение…' }
+                    'active' { 'Интернет подключён' }
+                    'error' { 'Ошибка сети · перезапустите телефон' }
+                    default { if ($state.network.registered) { 'SIM1 готова к подключению' } else { 'SIM1 без регистрации' } }
+                }
+                if ($state.network.transport_mode -like 'loopback*') { $networkCaption = 'Тестовая сеть · '+$networkCaption }
+                $script:networkLabel.Text = $networkCaption
+                if ($state.network.attached) {
+                    $script:networkLabel.Text += "`n↑ $($state.network.sent_bytes) Б   ↓ $($state.network.received_bytes) Б"
+                }
+                $script:tooltip.SetToolTip($script:networkLabel,[string]$state.network.error)
+            }
             if ($null -ne $state.backlight -and $script:lcdBacklight -ne [bool]$state.backlight) {
                 $script:lcdBacklight = [bool]$state.backlight
                 $script:screen.Invalidate()
@@ -538,11 +790,17 @@ $timer.Add_Tick({
                     $script:status.Text = 'Подсветка выключена прошивкой'
                     $script:detail.Text = 'Первое нажатие включает подсветку. Затем нажмите нужную клавишу.'
                 }
+                if ($state.input_error) { $script:detail.Text = [string]$state.input_error }
+                if ($state.network.error) { $script:detail.Text = [string]$state.network.error }
                 $script:progress.Visible = $false
             }
         } catch { $state = $null }
         if ($KeyTest -and $state) {
             try { Test-B220Keys $state }
+            catch { Show-B220Error $_.Exception.Message }
+        }
+        if ($NetworkTest -and $state) {
+            try { Test-B220Network $state }
             catch { Show-B220Error $_.Exception.Message }
         }
     }
@@ -579,11 +837,15 @@ $timer.Add_Tick({
         } elseif ($script:report.stop.device -eq 'JPEG engine') {
             $script:status.Text = 'Остановка: неподдерживаемый режим JPEG'
             $script:detail.Text = 'Базовый декодер работает. Этот режим обработки изображения ещё не реализован.'
+        } elseif ($script:report.stop.reason -in @('Internet emulation boundary','virtual network boundary','loopback network boundary')) {
+            $script:status.Text = 'Остановка сетевого эксперимента'
+            $script:detail.Text = [string]$script:report.stop.detail
+            if (-not $script:detail.Text) { $script:detail.Text = [string]$script:report.stop.operation }
         } else {
             $script:status.Text = 'Выполнение остановлено'
             $script:detail.Text = 'Достигнута другая точка остановки. Подробности — в журнале запуска.'
         }
-        if ($KeyTest) { throw ('Interactive key test stopped early: '+$script:report.stop.reason) }
+        if ($KeyTest -or $NetworkTest) { throw ('Interactive window test stopped early: '+$script:report.stop.reason) }
         if ($ScreenTest) {
             if (-not $script:frame -or $script:report.stop.reason -ne 'requested LCD frame count' -or $script:report.full_lcd_frames -ne 5 -or $script:report.jpeg.operations.Count -lt 1) { throw 'GUI did not reach MMI through the JPEG model.' }
             $script:form.Refresh()

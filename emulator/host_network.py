@@ -41,6 +41,7 @@ class SocketNetwork:
         self.received = bytearray()
         self.hooks = []
         self.closed = False
+        self.enabled = True
         if service is not None and hasattr(service,'on_link_down'):
             service.on_link_down.append(self.disconnect)
         board.uc.mem_map(self.SCRATCH,4096,UC_PROT_READ|UC_PROT_WRITE)
@@ -72,7 +73,7 @@ class SocketNetwork:
     def _call(self,uc,address,size,name):
         args = [uc.reg_read(r) for r in (UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,UC_ARM_REG_R3)]
         fd = args[0]
-        if self.service and self.service.phase != 'active' and name not in ('close','error'):
+        if (not self.enabled or self.service and self.service.phase != 'active') and name not in ('close','error'):
             if name == 'dns':
                 self._return(0)
             elif name == 'socket' or fd in self.errors:
@@ -81,7 +82,7 @@ class SocketNetwork:
                 self._return(-1)
             else:
                 return
-            self._event('service.unavailable',operation=name,phase=self.service.phase)
+            self._event('service.unavailable',operation=name,phase=self.service.phase if self.service else 'disabled')
             return
         if name == 'dns':
             host = self.board.cstring(fd,254)
@@ -213,6 +214,13 @@ class SocketNetwork:
         self.sockets.clear()
         self._event('bearer.down')
 
+    def set_enabled(self,enabled):
+        if type(enabled) is not bool:
+            raise ValueError('Transport enabled flag must be boolean')
+        if self.enabled and not enabled:
+            self.disconnect()
+        self.enabled = enabled
+
     def close(self):
         if self.closed:
             return
@@ -232,13 +240,13 @@ class LoopbackNetwork(SocketNetwork):
     mode = 'loopback socket HLE; static laboratory DNS'
     boundary = 'loopback network boundary'
 
-    def __init__(self,board,endpoint,domain='a.aa'):
+    def __init__(self,board,endpoint,domain='a.aa',service=None):
         if endpoint[0] != '127.0.0.1' or type(endpoint[1]) is not int or not 0 < endpoint[1] < 65536:
             raise ValueError('Only one IPv4 loopback endpoint is supported')
         if not domain or len(domain) > 120 or not domain.isascii():
             raise ValueError('Expected a short ASCII test domain')
         self.endpoint,self.domain = endpoint,domain
-        super().__init__(board)
+        super().__init__(board,service=service)
 
     def _resolve(self,host):
         if host != self.domain:

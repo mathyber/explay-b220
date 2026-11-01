@@ -55,12 +55,40 @@ class InteractiveSession:
         self.last_publish = 0
         self.boot_seconds = None
         self.boot_checkpoint_block = None
+        from .window_network import WindowNetwork
+        self.fixture = None
+        options = {}
+        if getattr(args,'window_http_test',False):
+            from tools.http_fixture import HttpFixture
+            from .host_network import LoopbackNetwork
+            self.fixture = HttpFixture()
+            options['backend_factory'] = lambda b,s:LoopbackNetwork(b,self.fixture.endpoint,service=s)
+        self.network = WindowNetwork(board,Path(args.session_status).with_suffix('.network.json'),**options)
+        self.last_network_publish = 0
 
     def commands(self):
         for command in self.inbox.poll():
             action = command.get('action')
             if action == 'stop':
                 self.shutdown = True
+                break
+            elif action == 'network':
+                try:
+                    self.network.configure(enabled=command.get('enabled'),plmn=command.get('plmn','25001'),
+                                           sim_present=command.get('sim_present',True),registered=command.get('registered',True))
+                    self.last_error = None
+                except (ValueError,OSError) as exc:
+                    self.last_error = str(exc)
+            elif action == 'open_url' and self.ready:
+                try:
+                    url = command.get('url')
+                    if not isinstance(url,str):
+                        raise ValueError('URL must be a string')
+                    self.network.open_url(url)
+                    self.paused = False
+                    self.last_error = None
+                except (ValueError,OSError) as exc:
+                    self.last_error = str(exc)
             elif action == 'pause' and self.ready:
                 self.paused = True
             elif action == 'resume' and self.ready:
@@ -87,8 +115,11 @@ class InteractiveSession:
                      window_id=hex(self.board.last_window_id) if self.board.last_window_id is not None else None,
                      backlight=self.board.lcd_backlight,
                      lcd_pixels=self.board.lcd.pixel_writes if self.board.lcd else 0,
-                     boot_seconds=self.boot_seconds,report=str(self.args.out))
+                     boot_seconds=self.boot_seconds,report=str(self.args.out),network=self.network.status())
         now = time.monotonic()
+        if force or now-self.last_network_publish >= 1:
+            self.network.write_report()
+            self.last_network_publish = now
         if not force and value == self.last_status and now-self.last_publish < 1:
             return
         path = Path(self.args.session_status)
@@ -109,13 +140,27 @@ class InteractiveSession:
         return value
 
     def run(self):
-        self.board.stop_after_frames = self.args.frames or 5
+        try:
+            return self._run()
+        finally:
+            self.network.close()
+            if self.fixture:
+                self.fixture.close()
+
+    def _run(self):
+        if getattr(self.args,'load_state',None):
+            self.ready,self.paused = True,True
+            self.boot_seconds = 0
+            self.board.stop_after_frames = 0
+        else:
+            self.board.stop_after_frames = self.args.frames or 5
         self.publish(force=True)
         while True:
             self.commands()
             if self.shutdown:
                 self.board.stop = dict(reason='host requested shutdown',pc=hex(self.board.uc.reg_read(UC_ARM_REG_PC)))
                 break
+            self.network.update()
             if self.paused:
                 self.publish()
                 time.sleep(0.02)
@@ -128,6 +173,7 @@ class InteractiveSession:
                 pc |= 1
             step = self.board.run(self.args.instructions,0.2,entry=pc,until=self.args.until,report=False)
             self.active_seconds += step['elapsed_seconds']
+            self.network.update()
             if step['stop']['reason'] == 'requested LCD frame count' and not self.ready:
                 self.boot_checkpoint_block = self.board.block_serial
                 self.board.stop_after_frames = 0

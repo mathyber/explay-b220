@@ -11,13 +11,16 @@ from emulator.network_trace import PS_SHA256
 class BrowserUrlInput:
     ADDRESS = 0x50001000
 
-    def __init__(self,board,url):
+    def __init__(self,board,url,*,address=ADDRESS):
         if board.image_sha256 != PS_SHA256 or not hasattr(board,'experimental_network'):
             raise ValueError('Debugger URL input requires an experimental network session')
         if not url.isascii() or not 0 < len(url) <= 512 or any(ord(c)<32 for c in url):
             raise ValueError('Expected an ASCII URL of 1..512 bytes without control characters')
         if board.last_window_id != 0x4001b:
             raise ValueError('Debugger URL input requires an already open URL editor')
+        if type(address) is not int or not self.ADDRESS <= address < self.ADDRESS+64*4096 or address%4096:
+            raise ValueError('URL input address must be a page in the reserved debugger range')
+        self.ADDRESS = address
         self.board,self.url,self.applied = board,url,False
         board.uc.mem_map(self.ADDRESS,4096,UC_PROT_READ|UC_PROT_WRITE)
         board.uc.mem_write(self.ADDRESS,url.encode('ascii')+b'\0')
