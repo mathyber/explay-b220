@@ -46,7 +46,7 @@ def elf_payload(data):
     return payload,entry
 
 
-def compile_game(directory):
+def compile_game(directory,source='patches/catch_game.c'):
     if not EXECUTABLE.exists():
         raise ValueError('Run python -m tools.setup_arm_toolchain first')
     environment = os.environ.copy()
@@ -57,14 +57,14 @@ def compile_game(directory):
     command = [str(EXECUTABLE),'cc','-target','thumbeb-freestanding-eabi','-mcpu=arm7tdmi','-mthumb',
                '-Oz','-Wall','-Wextra','-Werror','-ffreestanding','-fno-builtin','-fno-stack-protector','-fno-unwind-tables',
                '-fno-asynchronous-unwind-tables','-nostdlib','-Wl,-T,patches/catch_game.ld',
-               '-Wl,--gc-sections','-Wl,--build-id=none','-Wl,-e,game_handler','patches/catch_game.c','-o',str(elf)]
+               '-Wl,--gc-sections','-Wl,--build-id=none','-Wl,-e,game_handler',str(source),'-o',str(elf)]
     run = subprocess.run(command,cwd=ROOT,env=environment,capture_output=True,text=True,encoding='utf-8')
     if run.returncode:
         raise ValueError(f'ARM compilation failed:\n{run.stdout}\n{run.stderr}')
     data = elf.read_bytes()
     payload,entry = elf_payload(data)
     return payload,entry,dict(version=VERSION,command=command,elf_sha256=sha(data),
-                              source_sha256=sha((ROOT/'patches/catch_game.c').read_bytes()),
+                              source=str(source),source_sha256=sha((ROOT/source).read_bytes()),
                               linker_sha256=sha((ROOT/'patches/catch_game.ld').read_bytes()))
 
 

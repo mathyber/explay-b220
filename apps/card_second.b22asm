@@ -1,0 +1,14 @@
+; A visibly different program for the SAME unchanged firmware loader.
+clear 0x0010
+set r0 8
+set r1 0xffe0
+text r0 r1 "SECOND SD APP"
+set r0 48
+set r1 64
+set r2 80
+set r3 64
+set r4 0xf800
+rect r0
+set r5 148
+text r5 r4 "LOADED FROM FILE"
+yield 0

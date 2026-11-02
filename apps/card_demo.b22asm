@@ -1,0 +1,59 @@
+; This program lives on the SD card. Nothing below is compiled into the PS.
+set r0 72
+set r1 80
+set r2 16
+set r3 16
+set r4 0x07ff
+jmp draw
+input:
+event r6
+set r7 UP
+jeq r6 r7 up
+set r7 DOWN
+jeq r6 r7 down
+set r7 LEFT
+jeq r6 r7 left
+set r7 RIGHT
+jeq r6 r7 right
+set r7 OK
+jeq r6 r7 reset
+jmp draw
+up: add r1 -4
+jmp clamp
+down: add r1 4
+jmp clamp
+left: add r0 -4
+jmp clamp
+right: add r0 4
+jmp clamp
+reset:
+set r0 72
+set r1 80
+clamp:
+set r7 0
+jlt r0 r7 low_x
+set r7 160
+jlt r7 r0 high_x
+jmp check_y
+low_x: set r0 0
+jmp check_y
+high_x: set r0 160
+check_y:
+set r7 48
+jlt r1 r7 low_y
+set r7 128
+jlt r7 r1 high_y
+jmp draw
+low_y: set r1 48
+jmp draw
+high_y: set r1 128
+draw:
+clear 0x0841
+rect r0
+set r5 6
+text r5 r4 "FROM SD CARD"
+set r5 27
+text r5 r4 "APP.B22"
+set r5 154
+text r5 r4 "ARROWS / OK"
+yield input

@@ -105,6 +105,32 @@ class Fat16:
                 return name
         raise ValueError('No available import name')
 
+    def replace_file(self,name,data):
+        """Replace one root file on a copy, preserving the volume on failure."""
+        name=name.upper()
+        updated=Fat16(self.image)
+        entry=next((e for e in updated.entries() if e['name']==name),None)
+        if entry:
+            if entry['directory']:raise ValueError('Cannot replace a directory')
+            chain=[];cluster=entry['cluster'];seen=set()
+            while cluster:
+                if cluster in seen or not 2<=cluster<updated.clusters+2:
+                    raise ValueError('Invalid or cyclic FAT chain')
+                seen.add(cluster);chain.append(cluster)
+                following=int.from_bytes(updated.image[updated.fat+cluster*2:updated.fat+cluster*2+2],'little')
+                if following>=0xfff8:break
+                if following<2 or following>=0xfff0:raise ValueError('Broken FAT chain')
+                cluster=following
+            if len(chain)*updated.cluster_bytes<entry['size']:
+                raise ValueError('FAT chain is shorter than the file size')
+            for cluster in chain:
+                for index in range(2):
+                    offset=updated.fat+index*updated.fat_sectors*512+cluster*2
+                    updated.image[offset:offset+2]=b'\0\0'
+            updated.image[entry['offset']]=0xe5
+        updated.add_file(name,data)
+        self.image=updated.image
+
 
 def sample_image(format='JPEG'):
     from PIL import Image,ImageDraw
