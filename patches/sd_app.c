@@ -6,8 +6,10 @@ typedef unsigned char u8;
 #define FN(a,t) ((t)(a))
 #define MAGIC 0x53444150u
 typedef struct {
-    u32 magic,code,size,status,loads,pc,r[8],steps,checksum,event,drive,io_status,io_count;
+    u32 magic,code,size,status,loads,pc,r[8],steps,checksum,event,mode,catalog,io_count;
 } State;
+typedef struct { u32 count,selected; char names[16][13]; } Catalog;
+#define CAT ((Catalog *)S->catalog)
 _Static_assert(sizeof(State)==80,"Must fit the original 81-byte board");
 #define S ((volatile State *)0x04388f50u)
 typedef u32 (*Handler)(u32,u32,u32);
@@ -20,10 +22,19 @@ typedef void (*Free)(void *);
 typedef void (*Fill)(u32 *,u32,u32,u32);
 typedef u32 (*Text)(u32 *,u32,u32,const u16 *,u32,u32,u32,u32,u32,u32);
 typedef u32 (*Label)(u32,const void *,u32);
+typedef u32 (*Create)(u32,u32);
+
+/* First payload section: replace only the Games menu's launch callback. */
+__attribute__((used,section(".launch")))
+u32 launch_sd_apps(void) { return FN(0x4d7da3,Create)(0x70d150,0)&255; }
 
 static u32 be16(const u8 *p) { return ((u32)p[0]<<8)|p[1]; }
 static u32 be32(const u8 *p) { return (be16(p)<<16)|be16(p+2); }
 static u32 point(u32 x,u32 y) { return (x<<16)|y; }
+static void clear_panel(void) {
+    u32 dev[2]={0,0};
+    FN(0x4c65ad,Fill)(dev,0,point(175,195),0);
+}
 static void fill(u32 x,u32 y,u32 w,u32 h,u32 color) {
     if (x>=176 || y>=176 || !w || !h) return;
     if (w>176-x) w=176-x;
@@ -44,13 +55,20 @@ static void release(void) {
         S->code=0;
     }
 }
+static void release_all(void) {
+    release();
+    if (S->magic==MAGIC && S->catalog) {
+        FN(0x6a5469,Free)((void *)S->catalog);
+        S->catalog=0;
+    }
+}
 static void error(u32 status) {
     S->status=status;
-    fill(0,0,176,176,0);
+    clear_panel();
     text(24,"SD APP ERROR",0xf800);
     char number[]={'0'+(char)status,0};
     text(50,number,0xffff);
-    text(90,"APP.B22",0xffe0);
+    text(90,S->catalog && CAT->count?CAT->names[CAT->selected]:"SD CARD",0xffe0);
     text(120,"F1: RELOAD",0xffff);
 }
 static int validate(const u8 *p,u32 size) {
@@ -74,31 +92,89 @@ static int validate(const u8 *p,u32 size) {
     }
     return 1;
 }
-static int load(void) {
-    release();
-    u32 loads=S->magic==MAGIC?S->loads:0;
-    volatile u32 *state=(volatile u32 *)S;
-    for (u32 i=0;i<sizeof(State)/4;i++) state[i]=0;
-    S->magic=MAGIC; S->loads=loads+1;
-    /* E: is the SD volume in this pinned firmware (verified via SFS and SPI). */
-    static const u16 path[]={'E',':','\\','A','P','P','.','B','2','2',0};
-    S->drive='E';
+static u8 *read_file(const char *name,u32 minimum,u32 maximum,u32 *length,u32 *reason) {
+    u16 path[16]={'E',':','\\',0};
+    u32 i=0;
+    while (name[i] && i<12) { path[i+3]=(u8)name[i]; i++; }
+    path[i+3]=0;
     u32 handle=FN(0x5edc5f,Open)(path,0x31,0,0);
-    if (!handle) { error(1); return 0; }
+    if (!handle) { *reason=1; return 0; }
     u32 size=0,actual=0;
     u32 result=FN(0x5ee59f,Size)(handle,&size);
-    S->size=size; S->io_status=result;
-    if (result || size<16 || size>4096) {
-        FN(0x5ee485,Close)(handle); error(2); return 0;
+    *length=size;
+    if (result || size<minimum || size>maximum) {
+        FN(0x5ee485,Close)(handle); *reason=2; return 0;
     }
     u8 *buffer=FN(0x6a5439,Alloc)(size,0,"B22V",0);
-    if (!buffer) { FN(0x5ee485,Close)(handle); error(3); return 0; }
+    if (!buffer) { FN(0x5ee485,Close)(handle); *reason=3; return 0; }
     result=FN(0x5ee49f,Read)(handle,buffer,size,&actual,0);
-    S->io_status=result; S->io_count=actual;
+    S->io_count=actual;
     u32 closed=FN(0x5ee485,Close)(handle);
     if (result || actual!=size || closed) {
-        FN(0x6a5469,Free)(buffer); error(4); return 0;
+        FN(0x6a5469,Free)(buffer); *reason=4; return 0;
     }
+    return buffer;
+}
+static int filename(const char *s,u32 length) {
+    if (length<5 || length>12) return 0;
+    u32 dot=length-4;
+    if (dot<1 || dot>8 || s[dot]!='.' || s[dot+1]!='B' || s[dot+2]!='2' || s[dot+3]!='2') return 0;
+    for (u32 i=0;i<dot;i++)
+        if (!((s[i]>='A' && s[i]<='Z') || (s[i]>='0' && s[i]<='9') || s[i]=='_')) return 0;
+    return 1;
+}
+static void menu(void) {
+    clear_panel(); text(4,"SD APPS",0xffff);
+    if (!S->catalog || !CAT->count) {
+        text(54,"NO APPLICATIONS",0xffe0);
+        text(84,"APPS.LST",0xffff);
+        text(120,"F1: REFRESH",0xffff);
+        return;
+    }
+    u32 first=0;
+    while (CAT->selected>=first+6) first+=6;
+    for (u32 i=0;i<6 && first+i<CAT->count;i++) {
+        u32 selected=first+i==CAT->selected,y=32+i*24;
+        if (selected) fill(0,y,176,20,0x2104);
+        text(y,CAT->names[first+i],selected?0x07ff:0xffff);
+    }
+}
+static void refresh(void) {
+    release_all(); S->mode=0; S->status=0;
+    Catalog *catalog=FN(0x6a5439,Alloc)(sizeof(Catalog),0,"B22V catalog",0);
+    if (!catalog) { S->status=3; menu(); return; }
+    catalog->count=0; catalog->selected=0; S->catalog=(u32)catalog;
+    u32 size=0,reason=0;
+    u8 *data=read_file("APPS.LST",1,224,&size,&reason);
+    if (!data) { S->status=reason; menu(); return; }
+    u32 pos=0;
+    while (pos<size) {
+        char name[13]; u32 count=0;
+        while (pos<size && data[pos]!='\r' && data[pos]!='\n') {
+            if (count>=12) { reason=5; break; }
+            name[count++]=(char)data[pos++];
+        }
+        if (reason) break;
+        while (pos<size && (data[pos]=='\r' || data[pos]=='\n')) pos++;
+        if (!count) continue;
+        name[count]=0;
+        if (!filename(name,count) || catalog->count>=16) { reason=5; break; }
+        for (u32 j=0;j<=count;j++) catalog->names[catalog->count][j]=name[j];
+        catalog->count++;
+    }
+    FN(0x6a5469,Free)(data);
+    if (reason) { catalog->count=0; S->status=reason; }
+    menu();
+}
+static int load(void) {
+    release(); S->mode=1; S->loads++; S->pc=0; S->steps=0; S->status=0;
+    S->checksum=0; S->size=0; S->io_count=0;
+    for (u32 i=0;i<8;i++) S->r[i]=0;
+    clear_panel();
+    u32 size=0,reason=0;
+    u8 *buffer=read_file(CAT->names[CAT->selected],16,4096,&size,&reason);
+    S->size=size;
+    if (!buffer) { error(reason); return 0; }
     if (!validate(buffer,size)) {
         FN(0x6a5469,Free)(buffer); error(5); return 0;
     }
@@ -142,17 +218,34 @@ __attribute__((used,section(".entry")))
 u32 game_handler(u32 win,u32 msg,u32 param) {
     Handler original=FN(0x60f74f,Handler);
     if (msg==0xf021) {
-        release(); original(win,msg,param);
+        release_all(); original(win,msg,param);
+        volatile u32 *state=(volatile u32 *)S;
+        for (u32 i=0;i<sizeof(State)/4;i++) state[i]=0;
+        S->magic=MAGIC;
         static const u16 empty[]={0};
         struct {const u16 *s;u16 length,padding;} label={empty,0,0};
         FN(0x4c5b69,Label)(0x16000c,&label,0);
-        if (load()) run(msg);
+        refresh();
         return 1;
     }
-    if (msg==0xf022) { release(); return original(win,msg,param); }
+    if (msg==0xf022) { release_all(); return original(win,msg,param); }
+    if (S->magic==MAGIC && S->mode==0) {
+        if (msg==0xfa16) { refresh(); return 1; }
+        if (S->catalog && CAT->count) {
+            if (msg==0xfa01) { if (CAT->selected) CAT->selected--; menu(); return 1; }
+            if (msg==0xfa02) { if (CAT->selected+1<CAT->count) CAT->selected++; menu(); return 1; }
+            if (msg==0xfa1b) { if (load()) run(0xf021); return 1; }
+        }
+        if (msg==0xf024 || msg==0xf025 || msg==0x40000014) { menu(); return 1; }
+        if ((msg>=0xfa00 && msg<0xfa17) || msg==0xfa1b || msg==0xf001) return 1;
+        return original(win,msg,param);
+    }
+    if (msg==0xfa17) { release(); S->mode=0; S->status=0; menu(); return 1; }
     if (msg==0xfa16) { if (load()) run(0xf021); return 1; }
     if (msg==0xf024 || msg==0xf025 || msg==0x40000014 || (msg>=0xfa00 && msg<0xfa17) || msg==0xfa1b) {
-        run(msg); return 1;
+        if (S->status && S->status<9) error(S->status);
+        else run(msg);
+        return 1;
     }
     if (msg==0xf001) return 1;
     return original(win,msg,param);

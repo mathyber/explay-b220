@@ -18,7 +18,7 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-".venv\Scripts\python.exe" -X utf8 -m tools.install_sd_app --ensure
+".venv\Scripts\python.exe" -X utf8 -m tools.install_sd_app --examples
 if errorlevel 1 (
     pause
     exit /b 1

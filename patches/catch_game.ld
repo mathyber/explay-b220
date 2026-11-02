@@ -2,6 +2,7 @@ ENTRY(game_handler)
 SECTIONS {
     . = 0x0014d000;
     .payload : {
+        KEEP(*(.launch))
         KEEP(*(.entry))
         *(.text*)
         *(.rodata*)
