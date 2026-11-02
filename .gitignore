@@ -53,3 +53,6 @@ Desktop.ini
 
 # Writable virtual memory-card images contain local user data.
 *.img
+
+# Downloaded compiler distributions also contain Markdown documentation.
+/analysis/toolchains/
