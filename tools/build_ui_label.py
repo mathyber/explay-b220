@@ -71,7 +71,7 @@ def build(image):
     with Image.open(BytesIO(text_jpeg)) as a,Image.open(BytesIO(text_stripped+text)) as b:
         if a.convert('RGB').tobytes()!=b.convert('RGB').tobytes():
             raise ValueError('UTF-16 pool changed the second resource pixels')
-    # Real native ABI: R0 is a rectangle workspace, R1/R2 contain packed
+    # Real native ABI: R0 is the graphics device context, R1/R2 contain packed
     # coordinates, R3 is UTF-16, and [original SP] is the code-unit count.
     # PUSH saves scratch R4; [SP+4] then refers to that one outgoing argument.
     # POP restores SP before forwarding all the other stack arguments.
@@ -98,7 +98,7 @@ def build(image):
         native_draw=hex(NATIVE_DRAW),original_text=hex(ORIGINAL_TEXT),text=TEXT,
         payload=hex(payload_address),payload_size=len(payload),string_address=hex(text_address),
         tail_call_checkpoint=hex(payload_address+20),instructions=instructions,
-        parameters=dict(r0='native rectangle workspace',r1='packed coordinates',r2='packed coordinates',
+        parameters=dict(r0='native graphics device context',r1='packed coordinates',r2='packed coordinates',
                         r3='UTF-16 BE text pointer',stack_0='code-unit count',stack_12='native font argument',
                         stack_other='preserved'),
         resource=dict(start=hex(JPEG_START),size=JPEG_SIZE,removed_segments=removed,

@@ -21,12 +21,16 @@ STATE = 0x04388f50
 
 
 def elf_payload(data):
-    if data[:7]!=b'\x7fELF\x01\x02\x01' or struct.unpack_from('>HH',data,16)!=(2,40):
+    if len(data)<52 or data[:7]!=b'\x7fELF\x01\x02\x01' or struct.unpack_from('>HH',data,16)!=(2,40):
         raise ValueError('Expected an executable ELF32 big-endian ARM image')
     entry = struct.unpack_from('>I',data,24)[0]
     table = struct.unpack_from('>I',data,32)[0]
     stride,count,index = struct.unpack_from('>HHH',data,46)
+    if stride!=40 or not count or index>=count or table+stride*count>len(data):
+        raise ValueError('Invalid ELF section table')
     sections = [struct.unpack_from('>10I',data,table+i*stride) for i in range(count)]
+    if any(s[1]!=8 and s[4]+s[5]>len(data) for s in sections):
+        raise ValueError('Truncated ELF section data')
     strings = data[sections[index][4]:sections[index][4]+sections[index][5]]
     payload = None
     for section in sections:
@@ -50,10 +54,10 @@ def compile_game(directory):
     environment['ZIG_LOCAL_CACHE_DIR'] = str(ROOT/'analysis/toolchains/local-cache')
     directory.mkdir(parents=True,exist_ok=True)
     elf = directory/'catch-game.elf'
-    command = [str(EXECUTABLE),'cc','-target','armeb-freestanding-eabi','-mcpu=arm7tdmi','-mthumb',
-               '-Oz','-ffreestanding','-fno-builtin','-fno-stack-protector','-fno-unwind-tables',
+    command = [str(EXECUTABLE),'cc','-target','thumbeb-freestanding-eabi','-mcpu=arm7tdmi','-mthumb',
+               '-Oz','-Wall','-Wextra','-Werror','-ffreestanding','-fno-builtin','-fno-stack-protector','-fno-unwind-tables',
                '-fno-asynchronous-unwind-tables','-nostdlib','-Wl,-T,patches/catch_game.ld',
-               '-Wl,--gc-sections','-Wl,--build-id=none','patches/catch_game.c','-o',str(elf)]
+               '-Wl,--gc-sections','-Wl,--build-id=none','-Wl,-e,game_handler','patches/catch_game.c','-o',str(elf)]
     run = subprocess.run(command,cwd=ROOT,env=environment,capture_output=True,text=True,encoding='utf-8')
     if run.returncode:
         raise ValueError(f'ARM compilation failed:\n{run.stdout}\n{run.stderr}')
@@ -65,6 +69,8 @@ def compile_game(directory):
 
 
 def build(image,payload,entry):
+    if not payload or entry&1!=1 or not ROM<=entry&~1<ROM+len(payload) or ROM+len(payload)>LIMIT:
+        raise ValueError('Invalid Thumb game entry or payload bounds')
     base,previous = build_ui_label(image)
     stream = BytesIO()
     Image.new('RGB',(176,220),(8,16,24)).save(stream,format='JPEG',quality=80,subsampling=1,optimize=False)
@@ -86,14 +92,19 @@ def build(image,payload,entry):
         if image[offset:offset+14]!=old.encode('utf-16-be'):
             raise ValueError('Unexpected stock game title')
         result[offset:offset+14] = new.encode('utf-16-be')
-    manifest = dict(format='b220-catch-game',version=1,source_sha256=previous['source_sha256'],
+    manifest = dict(format='b220-catch-game',version=1,source_sha256=previous['source_sha256'],ps_size=len(result),
         output_sha256=sha(result),entry=hex(entry),rom=hex(ROM),code_size=len(payload),
         code_sha256=sha(payload),handler_descriptors=[hex(p) for p in POINTERS],
         original_handler='0x60f74f',state=dict(address=hex(STATE),size=32,
             ownership='First 32 bytes of the original 81-byte Sokoban board at game root +0x14'),
         wallpaper=dict(address=hex(JPEG_START),slot_size=JPEG_SIZE,jpeg_size=len(wallpaper),
                        change='One built-in wallpaper replaced by solid dark blue; code follows its EOI'),
-        inherited_ui_patch_sha256=previous['output_sha256'],key_marker_preserved=True)
+        inherited_ui_patch_sha256=previous['output_sha256'],key_marker_preserved=True,
+        changed_regions=previous['changed_regions']+[
+            dict(start=hex(JPEG_START),size=JPEG_SIZE,kind='replacement wallpaper and native C game'),
+            *[dict(start=hex(p),size=4,kind='game window handler') for p in POINTERS],
+            dict(start='0x16c0f8',size=14,kind='English game title'),
+            dict(start='0x16c3b4',size=14,kind='Russian game title')])
     return bytes(result),manifest
 
 

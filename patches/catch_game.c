@@ -48,13 +48,13 @@ static void cell(unsigned x,unsigned y) {
 }
 static void render(void) {
     static const u16 title[]={'C','A','T','C','H',' ','T','H','E',' ','D','O','T',0};
-    static const u16 help[]={'A','r','r','o','w','s',':',' ','m','o','v','e',' ',' ','O','K',':',' ','r','e','s','e','t',0};
+    static const u16 help[]={'O','K',':',' ','R','E','S','E','T',0};
     fill(0,0,176,196,0x0841);
     text(3,22,title,13,0xffff,6);
     score_text();
     for (unsigned y=0;y<7;y++)
         for (unsigned x=0;x<8;x++) cell(x,y);
-    text(179,17,help,23,0xbdf7,0);
+    text(177,19,help,9,0xbdf7,6);
     STATE->paints++;
 }
 static void reset(u32 win) {
@@ -107,7 +107,7 @@ u32 game_handler(u32 win,u32 msg,u32 param) {
         render();
         return 1;
     }
-    if (msg==0xf025 || msg==0x40000014) {
+    if (msg==0xf024 || msg==0xf025 || msg==0x40000014) {
         if (STATE->magic!=MAGIC) reset(win);
         render(); return 1;
     }
@@ -115,7 +115,7 @@ u32 game_handler(u32 win,u32 msg,u32 param) {
     if (STATE->magic==MAGIC) {
         if (msg==0xfa01 || msg==0xfa09) { move(0,-1); return 1; }
         if (msg==0xfa02 || msg==0xfa0f) { move(0,1); return 1; }
-        if (msg==0xfa03 || msg==0xfa08) { move(-1,0); return 1; }
+        if (msg==0xfa03 || msg==0xfa0b) { move(-1,0); return 1; }
         if (msg==0xfa04 || msg==0xfa0d) { move(1,0); return 1; }
         if (msg==0xfa1b) { reset(win); render(); return 1; }
         /* Suppress legacy undo/level actions which interpret the old board. */
