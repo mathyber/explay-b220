@@ -14,6 +14,13 @@ from emulator.firmware import ROOT, load_firmware, protect_outputs
 DIRECTORY = ROOT/'analysis/firmware-patches/narrow-font'
 DEFAULT_SOURCE = ROOT/'analysis/firmware-patches/sd-app/sd-app.bin'
 DEFAULT_FONT = Path('C:/Windows/Fonts/ARIALN.TTF')
+# The pinned K550 Regular font's monochrome Cyrillic K is one row above its
+# Latin K and the shared baseline at these two tested raster sizes. Do not
+# bottom-align all glyphs: that would destroy descenders and accents.
+BASELINE_SHIFTS = {
+    ('a30e2289ea0c694121e211eaf95a4a5f97ce4479825b25393db089d2ec7fceaa', 10, 0x041a): 1,
+    ('a30e2289ea0c694121e211eaf95a4a5f97ce4479825b25393db089d2ec7fceaa', 12, 0x041a): 1,
+}
 LATIN = tuple(c for a, b in ((0x20, 0x7e), (0xa0, 0xbf), (0xd7, 0xd7),
     (0xf7, 0xf7), (0x2013, 0x2014), (0x2018, 0x2019), (0x201c, 0x201d),
     (0x2026, 0x2026), (0x2039, 0x203a), (0x20ac, 0x20ac), (0x2116, 0x2116),
@@ -75,7 +82,7 @@ def mask(font, char):
     return Image.frombytes('L', pixels.size, bytes(pixels)), offset
 
 
-def raster(font, char, height, max_width, missing, original):
+def raster(font, char, height, max_width, missing, original, baseline_shift=0):
     ink, (left, top) = mask(font, char)
     if (ink.size, ink.tobytes()) == missing:
         # Preserve uncommon characters absent from the selected desktop font.
@@ -85,7 +92,7 @@ def raster(font, char, height, max_width, missing, original):
     advance = max(1, math.ceil(font.getlength(char)))
     if bounds:
         left = max(0, left+bounds[0])
-        top += bounds[1]+height-2  # shared baseline, two rows for descenders
+        top += bounds[1]+height-2+baseline_shift  # shared baseline, two rows for descenders
         ink = ink.crop(bounds).convert('1')
         advance = max(advance, left+ink.width+1)
     width = min(max_width, advance)
@@ -106,6 +113,7 @@ def build(image, font_path=DEFAULT_FONT, large_height=14, small_height=12):
         raise ValueError('Expected 8 <= small height <= 14 and small <= large <= 16')
     output = bytearray(image)
     allowed = bytearray(len(image))
+    font_digest = sha(font_path.read_bytes())
     sets = []
     for s in SETS:
         if sha(image[s.widths:s.end]) != s.digest:
@@ -128,7 +136,8 @@ def build(image, font_path=DEFAULT_FONT, large_height=14, small_height=12):
                    if index+1 < len(s.codepoints) else s.end)
             if start+capacity != end:
                 raise ValueError(f'Unexpected glyph slot in {s.name} U+{cp:04X}')
-            bitmap, fallback = (raster(font, chr(cp), height, old.width, missing, old)
+            baseline_shift = BASELINE_SHIFTS.get((font_digest, height-2, cp), 0)
+            bitmap, fallback = (raster(font, chr(cp), height, old.width, missing, old, baseline_shift)
                                 if old.width else (Image.new('1', (0, height)), False))
             data = pack(bitmap)
             if len(data)>capacity:
@@ -138,7 +147,8 @@ def build(image, font_path=DEFAULT_FONT, large_height=14, small_height=12):
             allowed[s.widths+index] = 1
             allowed[start:end] = bytes([1])*capacity
             records.append(dict(codepoint=f'U+{cp:04X}', old_width=old.width,
-                                width=bitmap.width, offset=offset, fallback=fallback))
+                                width=bitmap.width, offset=offset, fallback=fallback,
+                                baseline_shift=baseline_shift))
         sets.append(dict(name=s.name, old_height=s.height, height=height,
                          raster_size=height-2, glyphs=records))
     for address, before, height in ((0x5b8716, b'\x20\x10', large_height),
@@ -151,7 +161,7 @@ def build(image, font_path=DEFAULT_FONT, large_height=14, small_height=12):
         raise ValueError('Changes outside verified font slots and height immediates')
     manifest = dict(format='b220-narrow-font', version=1, source_sha256=sha(image),
         output_sha256=sha(output), font_path=str(font_path.resolve()),
-        font_sha256=sha(font_path.read_bytes()), font_name=font.getname(), sets=sets,
+        font_sha256=font_digest, font_name=font.getname(), sets=sets,
         height_instructions=['0x5b8716', '0x5b871e'], offsets_unchanged=True,
         preview='Host decoding of actual ROM bitmaps; not an emulator screenshot')
     return bytes(output), manifest
@@ -180,7 +190,7 @@ def preview(before, after, manifest, destination):
     for column, image in enumerate((before, after)):
         x = 14+column*378
         label = ('ORIGINAL 16 / 14' if column == 0 else
-                 f"NARROW {manifest['sets'][0]['height']} / {manifest['sets'][1]['height']}")
+                 f"{' '.join(manifest['font_name'])} {manifest['sets'][0]['height']}/{manifest['sets'][1]['height']}")
         draw.text((x, 7), label, fill='white')
         panel = Image.new('RGB', (176, 220), 'black')
         height = 16 if column == 0 else manifest['sets'][0]['height']
