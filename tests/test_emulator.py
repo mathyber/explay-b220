@@ -235,6 +235,18 @@ class BoardTests(unittest.TestCase):
         self.board.uc.mem_write(0x04001234,b'alias')
         self.assertEqual(bytes(self.board.uc.mem_read(0x34001234,5)),b'alias')
 
+    def test_jpeg_interrupt_mask_and_w1c_drive_irq26_through_guest_mmio(self):
+        b = self.board
+        b.irq.write(8,1<<26)
+        b.jpeg.registers[0x1c] = 1<<9
+        result,_ = self.access(0x20200024,0xe5810000,1<<9)
+        self.assertEqual(result['stop']['reason'],'requested end address')
+        self.assertEqual(b.irq.pending,1<<26)
+        result,_ = self.access(0x20200028,0xe5810000,1<<9)
+        self.assertEqual(result['stop']['reason'],'requested end address')
+        self.assertEqual(b.irq.pending,0)
+        self.assertEqual(b.jpeg.read(0x20,b.uc.mem_read),0)
+
     def test_saved_flash_preserves_nv_and_rejects_a_changed_ps(self):
         saved = bytearray(self.board.flash.array)
         saved[0x7a0010:0x7a0014] = b'test'

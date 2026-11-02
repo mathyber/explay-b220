@@ -31,8 +31,8 @@ def standard_huffman():
     return tables
 
 
-def entropy_end(data,mcus,tables):
-    """Find the exact end of a baseline 4:2:2 scan without decoding its pixels."""
+def entropy_end(data,mcus,tables,luma_blocks=2):
+    """Find the exact end of a supported baseline scan without decoding pixels."""
     codes = {}
     for key,table in tables.items():
         code,index,mapping = 0,17,{}
@@ -69,7 +69,7 @@ def entropy_end(data,mcus,tables):
                 return codes[table][length,code]
         raise ValueError('Invalid JPEG Huffman code')
     for _ in range(mcus):
-        for table in (0,0,1,1):
+        for table in (0,)*luma_blocks+(1,1):
             category = symbol(table)
             if category > 11:
                 raise ValueError('Invalid baseline JPEG DC category')
@@ -105,22 +105,35 @@ class JpegEngine:
         self.decoded = None
         self.bit_position = 0
         self.bit_value = 0
+        self.planar_bank = 0
 
     def write(self,offset,value,read_memory,write_memory):
         if not any(start <= offset < end for start,end in self.register_ranges):
             raise NotImplementedError(f'JPEG register write {offset:#x}')
+        old = self.registers.get(offset,0)
         self.registers[offset] = value
+        if offset == 0x28:
+            self.registers[0x1c] = self.registers.get(0x1c,0)&~value
+            self.registers[0x28] = 0
         if len(self.events) < 4000:
             self.events.append(dict(op='write',offset=hex(offset),value=hex(value)))
         if offset == 0 and value == 9:
             self.decoded = None
+            self.planar_bank = 0
+        if offset == 0x11810:
+            self.registers[offset] = old&~(value&3)
         if offset == 0x11818 and value&1:
             self.processed = 0
+            self.planar_bank = 0
             self.registers[0x11810] = 0
         if offset == 0x10800 and value&1:
             self.decode(read_memory,write_memory)
         if offset == 0x10404:
             self.bit_position = (value&0x3fffffff)*32
+        if offset == 0x50:
+            # A newly programmed bitstream buffer starts at its first byte;
+            # the driver can then seek within it with BSM_CFG1 (0x10404).
+            self.bit_position,self.bit_value = 0,0
         if offset == 0x10408:
             if value == 2:
                 self.bit_position,self.bit_value = 0,0
@@ -146,6 +159,8 @@ class JpegEngine:
             return self.registers.get(0,0)|(0x80 if self.registers.get(0,0)&0x10 else 0)
         if offset == 0x14:
             return 2  # bitstream interface available, polled by 0x2fa95e
+        if offset == 0x20:
+            return self.registers.get(0x1c,0)&self.registers.get(0x24,0)&0x3fff
         if offset == 0x10410:
             return self.bit_value
         if offset == 0x10414:
@@ -169,11 +184,36 @@ class JpegEngine:
         sampling = regs.get(0x10004,0)>>24
         if regs.get(0x11800,0)&0x3000:
             raise NotImplementedError('JPEG scaled output')
-        if sampling != 3 or not 0 < width <= 1024 or not 0 < height <= 1024:
+        if sampling not in (0,3) or not 0 < width <= 1024 or not 0 < height <= 1024:
             raise NotImplementedError(f'JPEG dimensions/sampling {width}x{height}, mode {sampling}')
-        destination = regs.get(0x58,0)<<8
-        if not destination or regs.get(0x40,0) or regs.get(0x44,0):
-            raise NotImplementedError('JPEG planar output is not yet reconstructed')
+        mcu_height = 16 if sampling==0 else 8
+        vertical_chroma = 2 if sampling==0 else 1
+        planar = bool(regs.get(0x40,0) or regs.get(0x44,0))
+        columns = (width+15)//16
+        frame_total = columns*((height+mcu_height-1)//mcu_height)
+        total,batch = regs.get(0x1180c,0),regs.get(0x1087c,0)
+        if not 0<total<=frame_total or (not planar and total!=frame_total):
+            raise ValueError('JPEG MCU count does not match frame dimensions')
+        if not 0<batch<=frame_total or not 0<=self.processed<frame_total:
+            raise ValueError('JPEG MCU batch is empty, too large or follows a finished frame')
+        completed = min(self.processed+batch,frame_total)
+        first_row = self.processed//columns*mcu_height
+        if planar:
+            bank = getattr(self,'planar_bank',0)
+            destination,chroma = (regs.get(0x40+bank*8+off,0)<<8 for off in (0,4))
+            rows = min(completed//columns*mcu_height,height)-first_row
+            if self.processed%columns or completed%columns or batch>total:
+                raise NotImplementedError('JPEG planar batch must contain complete MCU rows')
+            size = width*rows
+            chroma_size = width*((rows+vertical_chroma-1)//vertical_chroma)
+            if (not 0x04000000<=destination<=0x04400000-size or
+                    not 0x04000000<=chroma<=0x04400000-chroma_size or
+                    not (destination+size<=chroma or chroma+chroma_size<=destination)):
+                raise ValueError('JPEG planar buffers exceed RAM or overlap')
+        else:
+            destination = regs.get(0x58,0)<<8
+            if not 0x04000000<=destination<=0x04400000-width*height*2:
+                raise ValueError('JPEG RGB output exceeds external RAM')
         if self.decoded is None:
             tables = standard_huffman()
             # Restrict this first model to the exact standard DC/AC code and
@@ -196,44 +236,76 @@ class JpegEngine:
             header = b'\xff\xd8'+segment(0xdb,b'\x00'+quant[0]+b'\x01'+quant[1])
             header += b''.join(segment(0xc4,v) for v in tables.values())
             header += segment(0xc0,b'\x08'+height.to_bytes(2,'big')+width.to_bytes(2,'big')+
-                              b'\x03\x01\x21\x00\x02\x11\x01\x03\x11\x01')
+                              bytes([3,1,0x22 if sampling==0 else 0x21,0,2,0x11,1,3,0x11,1]))
             header += segment(0xda,b'\x03\x01\x00\x02\x11\x03\x11\x00\x3f\x00')
             if self.bit_position&7:
                 raise NotImplementedError('JPEG entropy starts at a non-byte boundary')
             source = (regs.get(0x50,0)<<8)+self.bit_position//8
             if not 0x04000000 <= source < 0x04400000:
                 raise NotImplementedError('JPEG bitstream outside external RAM')
-            entropy = bytes(read_memory(source,min(0x10000,0x04400000-source)))
-            length = entropy_end(entropy,((width+15)//16)*((height+7)//8),tables)
+            available = min(0x10000,0x04400000-source)
+            if planar:
+                buffered = (regs.get(0x10400,0)&0x3fffffff)*4-self.bit_position//8
+                if buffered<=0:
+                    raise ValueError('JPEG stream position exceeds its declared input buffer')
+                available = min(available,buffered)
+            entropy = bytes(read_memory(source,available))
+            length = entropy_end(entropy,frame_total,tables,4 if sampling==0 else 2)
             try:
-                image = Image.open(BytesIO(header+entropy[:length]+b'\xff\xd9')).convert('RGB')
+                image = Image.open(BytesIO(header+entropy[:length]+b'\xff\xd9'))
+                if planar:
+                    image.draft('YCbCr',image.size)
+                image = image.convert('YCbCr' if planar else 'RGB')
             except OSError as exc:
                 raise ValueError(f'JPEG pixel decode failed: {exc}') from exc
             raw = bytearray()
-            for r,g,b in image.getdata():
-                raw.extend((((r>>3)<<11)|((g>>2)<<5)|(b>>3)).to_bytes(2,'big'))
+            if planar:
+                raw.extend(image.tobytes())
+            else:
+                for r,g,b in image.getdata():
+                    raw.extend((((r>>3)<<11)|((g>>2)<<5)|(b>>3)).to_bytes(2,'big'))
             self.decoded = bytes(raw)
-            if not 0x04000000 <= destination <= 0x04400000-len(raw):
-                raise ValueError('JPEG RGB output exceeds external RAM')
             self.operations.append(dict(width=width,height=height,sampling=sampling,
-                source=hex(source),input_bytes=length,destination=hex(destination),output='RGB565 BE, linear (hypothesis)',
+                source=hex(source),input_bytes=length,destination=hex(destination),output=f'Y + interleaved CbCr{420 if sampling==0 else 422}, alternating strips' if planar else 'RGB565 BE, linear (hypothesis)',
                 output_sha256=hashlib.sha256(raw).hexdigest()))
-        columns = (width+15)//16
-        total = regs.get(0x1180c,0)
-        if total != columns*((height+7)//8):
-            raise ValueError('JPEG MCU count does not match frame dimensions')
-        completed = min(self.processed+regs.get(0x1087c,0),total)
-        for mcu in range(self.processed,completed):
-            x,y = (mcu%columns)*16,(mcu//columns)*8
-            length = min(16,width-x)*2
-            for row in range(y,min(y+8,height)):
-                start = (row*width+x)*2
-                write_memory(destination+start,self.decoded[start:start+length])
+        if len(self.decoded)!=width*height*(3 if planar else 2):
+            raise ValueError('JPEG output configuration changed without resetting the decoder')
+        if planar:
+            for row in range(first_row,min(completed//columns*mcu_height,height)):
+                pixels = self.decoded[row*width*3:(row+1)*width*3]
+                write_memory(destination+(row-first_row)*width,pixels[0::3])
+                if row%vertical_chroma:
+                    continue
+                next_pixels = self.decoded[min(row+1,height-1)*width*3:(min(row+1,height-1)+1)*width*3] if vertical_chroma==2 else None
+                uv = bytearray()
+                for x in range(0,width,2):
+                    for component in (1,2):
+                        value = pixels[x*3+component]+pixels[min(x+1,width-1)*3+component]
+                        if next_pixels is not None:
+                            value += next_pixels[x*3+component]+next_pixels[min(x+1,width-1)*3+component]
+                        uv.append((value+vertical_chroma)//(2*vertical_chroma))
+                write_memory(chroma+(row-first_row)//vertical_chroma*width,bytes(uv))
+            self.operations[-1].setdefault('batches',[]).append(dict(bank=bank,first_row=first_row,rows=rows,
+                luma=hex(destination),chroma=hex(chroma),completed_mcus=completed))
+        else:
+            for mcu in range(self.processed,completed):
+                x,y = (mcu%columns)*16,(mcu//columns)*mcu_height
+                length = min(16,width-x)*2
+                for row in range(y,min(y+mcu_height,height)):
+                    start = (row*width+x)*2
+                    write_memory(destination+start,self.decoded[start:start+length])
         self.processed = completed
         regs[0x11808] = ((self.processed//columns)<<16)|(self.processed%columns)
-        regs[0x11810] = 4 if self.processed == total else 0
+        regs[0x11810] = ((1<<bank)|(4 if completed==frame_total else 0)) if planar else (4 if self.processed == total else 0)
         regs[0x10800] = 0
         regs[0x68] = 0
+        if planar:
+            regs[0x1c] = regs.get(0x1c,0)|(1<<9)
+            self.planar_bank = 1-bank
+
+    @property
+    def pending(self):
+        return bool(self.registers.get(0x1c,0)&self.registers.get(0x24,0)&0x3fff)
 
     def report(self):
         return dict(registers={hex(k):hex(v) for k,v in self.registers.items()},

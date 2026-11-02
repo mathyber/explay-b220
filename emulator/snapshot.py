@@ -16,6 +16,7 @@ import unicorn
 from unicorn.arm_const import (UC_ARM_REG_R0, UC_ARM_REG_SP, UC_ARM_REG_LR,
                                UC_ARM_REG_PC, UC_ARM_REG_CPSR, UC_ARM_REG_SPSR)
 from .board import Board, ROOT
+from .firmware import load_firmware,protect_outputs
 
 
 FORMAT = 'explay-b220-state'
@@ -38,12 +39,12 @@ DEVICES = ('flash','lcd','dsp','irq','keypad','jpeg','rtc')
 # Keeping this list explicit detects newly added state that needs a decision.
 EXCLUDED_FIELDS = {
     'profile','explore','fast_cpu','frame_callback','uc','ram','md','_cpsr_value',
-    'mmio_windows','window_log_pointer','backlight_log_pointer','image_sha256',
+    'mmio_windows','window_log_pointer','backlight_log_pointer','image_sha256','firmware',
     'chip_id','known_registers','flash_overlays','spi','spi_controllers',
     'countdown_timers','lcd_ports','pages','pending_frame_stop','stop_after_frames',
     'irq_entries','key_callbacks','dma_transfers','mmio_counts','mmio_pc_counts',
     'mmio_samples','mmio_tail','blocks','block_tail','logs','milestones',
-    'endian_repairs','stop','started_at','deadline','_running',
+    'endian_repairs','stop','started_at','deadline','_running','terminal_observer',
 }
 
 
@@ -60,7 +61,7 @@ def _json(value):
 
 
 def _model_hash():
-    names = ('board','snapshot','nor','lcd','dsp','irq','keypad','jpeg','rtc','spi','sd','timer')
+    names = ('board','snapshot','firmware','nor','lcd','dsp','irq','keypad','jpeg','rtc','spi','sd','timer')
     return _hash(b''.join(name.encode()+b'\0'+(ROOT/'emulator'/f'{name}.py').read_text(encoding='utf-8-sig').encode()
                          for name in names))
 
@@ -251,6 +252,7 @@ def _validate_device(device,state):
 def save_snapshot(board,path):
     """Save a stopped Board atomically. Does not write a separate NOR file."""
     path = Path(path)
+    protect_outputs(board.profile,board.firmware,[path])
     if path.suffix.lower() != '.b220state':
         raise SnapshotError('Snapshot output must use the .b220state extension')
     if getattr(board,'_running',False):
@@ -302,7 +304,7 @@ def save_snapshot(board,path):
                 virtual_blocks=board.block_serial,size=path.stat().st_size)
 
 
-def _load(archive,profile,frame_callback):
+def _load(archive,profile,frame_callback,firmware_path):
     infos = archive.infolist()
     names = [info.filename for info in infos]
     if len(names) != len(set(names)) or len(names) > 4096 or 'manifest.json' not in names:
@@ -314,7 +316,8 @@ def _load(archive,profile,frame_callback):
         raise SnapshotError('Unsupported snapshot format/version')
     if manifest['model_sha256'] != _model_hash() or manifest['dependencies'] != _dependencies():
         raise SnapshotError('Snapshot was created by a different emulator model or dependency version')
-    if manifest['profile_sha256'] != _hash(_json(profile)) or manifest['firmware_sha256'] != profile['ps_sha256']:
+    _,identity = load_firmware(profile,firmware_path)
+    if manifest['profile_sha256'] != _hash(_json(profile)) or manifest['firmware_sha256'] != identity['sha256']:
         raise SnapshotError('Snapshot does not match the selected profile/firmware')
     blobs = manifest['blobs']
     if set(names) != {'manifest.json',*blobs}:
@@ -335,7 +338,9 @@ def _load(archive,profile,frame_callback):
         if type(image) is not bytearray or len(image) not in (16*1024*1024,32*1024*1024):
             raise SnapshotError('Invalid SD image')
         options['sd_image'] = image
-    board = Board(profile=profile,frame_callback=frame_callback,**options)
+    board = Board(profile=profile,frame_callback=frame_callback,firmware_path=firmware_path,**options)
+    if board.image_sha256 != manifest['firmware_sha256']:
+        raise SnapshotError('Selected firmware changed while loading the snapshot')
     if set(manifest['board']) != STATE_FIELDS:
         raise SnapshotError('Invalid board state fields')
     state = {key:reader.decode(value) for key,value in manifest['board'].items()}
@@ -391,12 +396,12 @@ def _load(archive,profile,frame_callback):
     return board
 
 
-def load_snapshot(path,profile=None,frame_callback=None):
+def load_snapshot(path,profile=None,frame_callback=None,firmware_path=None):
     """Return a new Board; a failed load never changes an existing instance."""
     profile = profile or json.loads((ROOT/'emulator/profiles/b220-l7a.json').read_text())
     try:
         with zipfile.ZipFile(path,'r') as archive:
-            return _load(archive,profile,frame_callback)
+            return _load(archive,profile,frame_callback,firmware_path)
     except SnapshotError:
         raise
     except (OSError,ValueError,KeyError,TypeError,IndexError,RecursionError,RuntimeError,

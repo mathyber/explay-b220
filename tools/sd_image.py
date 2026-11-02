@@ -135,12 +135,13 @@ def main():
     group.add_argument('--add',type=Path,nargs='+')
     group.add_argument('--list',action='store_true')
     parser.add_argument('--size-mib',type=int,choices=(16,32),default=16)
-    parser.add_argument('--sample',action='store_true',help='Include TEST.BMP for native picture-viewer validation')
+    parser.add_argument('--sample',action='store_true',help='Include TEST.BMP and TEST.JPG for native picture-viewer validation')
     args = parser.parse_args()
     if args.create:
         volume = Fat16(create_image(args.size_mib*1024*1024))
         if args.sample:
             volume.add_file('TEST.BMP',sample_image('BMP'))
+            volume.add_file('TEST.JPG',sample_jpeg())
         args.image.parent.mkdir(parents=True,exist_ok=True)
         with args.image.open('xb') as stream:
             stream.write(volume.image)

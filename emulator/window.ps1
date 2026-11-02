@@ -1,5 +1,5 @@
 ﻿param([switch]$SmokeTest, [switch]$ScreenTest, [switch]$KeyTest, [switch]$NetworkTest, [switch]$CardTest,
-      [string]$LoadState, [string]$TestDirectory)
+      [string]$LoadState, [string]$TestDirectory, [string]$Firmware, [switch]$DebuggerTest)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -11,6 +11,7 @@ $script:outputDirectory = Join-Path $script:projectRoot 'analysis\emulator'
 if ($TestDirectory) { $script:outputDirectory = [System.IO.Path]::GetFullPath($TestDirectory) }
 if ($NetworkTest -and (-not $LoadState -or -not $TestDirectory)) { throw 'NetworkTest requires an isolated TestDirectory and LoadState.' }
 if ($CardTest -and (-not $LoadState -or -not $TestDirectory)) { throw 'CardTest requires an isolated TestDirectory and LoadState.' }
+if ($DebuggerTest -and (-not $Firmware -or -not $TestDirectory -or $LoadState)) { throw 'DebuggerTest requires a fixture Firmware and isolated TestDirectory, without LoadState.' }
 $script:reportPath = Join-Path $script:outputDirectory 'window-latest.json'
 $script:stdoutPath = Join-Path $script:outputDirectory 'window-stdout.log'
 $script:stderrPath = Join-Path $script:outputDirectory 'window-stderr.log'
@@ -70,6 +71,14 @@ $script:networkTestStage = 0
 $script:networkTestUrlRequested = $false
 $script:networkTestBrowserRequested = $false
 $script:cardTestDone = $false
+$script:baseOutputDirectory = $script:outputDirectory
+$script:firmwarePath = $Firmware
+$script:firmwareIdentity = $null
+$script:debugStartPaused = [bool]$DebuggerTest
+$script:breakpoints = @()
+$script:debugState = $null
+$script:debugDialog = $null
+$script:debugTestStarted = $false
 
 $script:form = New-Object System.Windows.Forms.Form
 $form.Text = 'Explay B220'
@@ -280,6 +289,14 @@ $script:cardButton = New-Object System.Windows.Forms.Button
 $cardButton.Text = 'Карта…'
 $cardButton.Add_Click({ Show-B220CardSettings })
 $form.Controls.Add($cardButton)
+$script:firmwareButton = New-Object System.Windows.Forms.Button
+$firmwareButton.Text = 'Прошивка…'
+$firmwareButton.Add_Click({ Show-B220FirmwareSettings })
+$form.Controls.Add($firmwareButton)
+$script:debugButton = New-Object System.Windows.Forms.Button
+$debugButton.Text = 'Отладка…'
+$debugButton.Add_Click({ Show-B220Debugger })
+$form.Controls.Add($debugButton)
 $script:networkLabel = New-Object System.Windows.Forms.Label
 $networkLabel.Font = New-Object System.Drawing.Font('Segoe UI', 8)
 $networkLabel.Text = 'Интернет выключен'
@@ -300,6 +317,271 @@ function Ensure-B220Card {
         $result = & $script:pythonPath -X utf8 -m tools.sd_image $script:cardImagePath --create --sample 2>&1
         if ($LASTEXITCODE -ne 0) { throw ($result -join [Environment]::NewLine) }
     }
+}
+
+function Set-B220FirmwarePaths {
+    $script:outputDirectory = $script:baseOutputDirectory
+    if ($script:firmwarePath) {
+        $result = & $script:pythonPath -X utf8 -m emulator.firmware $script:firmwarePath 2>&1
+        if ($LASTEXITCODE -ne 0) { throw ($result -join [Environment]::NewLine) }
+        $script:firmwareIdentity = ($result -join '') | ConvertFrom-Json
+        $script:outputDirectory = Join-Path $script:baseOutputDirectory ('experiments\'+$script:firmwareIdentity.sha256)
+        $script:subtitle.Text = 'Эксперимент · '+$script:firmwareIdentity.sha256.Substring(0,12)
+        $script:networkEnabled = $false
+        $script:networkButton.Enabled = $false
+    } else {
+        $script:firmwareIdentity = $null
+        $script:subtitle.Text = 'Оригинальная прошивка · 176 × 220'
+        $script:networkButton.Enabled = $true
+    }
+    $script:virtualNorPath = Join-Path $script:outputDirectory 'window-nor-v2.bin'
+    $script:cardImagePath = Join-Path $script:outputDirectory 'sd-card.img'
+    $script:cardSettingsPath = Join-Path $script:outputDirectory 'window-card.json'
+    if (-not $script:firmwarePath -and (Test-Path -LiteralPath $script:cardSettingsPath)) {
+        try {
+            $settings = Get-Content -LiteralPath $script:cardSettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($settings.path -is [string] -and (Test-Path -LiteralPath $settings.path -PathType Leaf)) { $script:cardImagePath = $settings.path }
+        } catch { }
+    }
+    if (-not $SmokeTest -and -not $ScreenTest -and -not $KeyTest) {
+        $script:reportPath = Join-Path $script:outputDirectory 'window-latest.json'
+        $script:stdoutPath = Join-Path $script:outputDirectory 'window-stdout.log'
+        $script:stderrPath = Join-Path $script:outputDirectory 'window-stderr.log'
+    }
+    $script:liveFramePath = Join-Path $script:outputDirectory ("window-live-$PID.png")
+}
+
+function Show-B220FirmwareSettings {
+    Release-B220Keys
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = 'Образ прошивки'
+    $dialog.Font = $script:form.Font
+    $dialog.ClientSize = New-Object System.Drawing.Size(540,320)
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $info = New-Object System.Windows.Forms.TextBox
+    $info.Multiline = $true
+    $info.ReadOnly = $true
+    $info.ScrollBars = 'Vertical'
+    $info.SetBounds(16,16,508,142)
+    $info.Text = if ($script:firmwareIdentity) {
+        "Экспериментальный PS: $($script:firmwareIdentity.source)`r`nSHA-256: $($script:firmwareIdentity.sha256)`r`nРазмер: $($script:firmwareIdentity.size) Б`r`nДанные: $script:outputDirectory"
+    } else { 'Выбран оригинальный PS из analysis\extracted.' }
+    $dialog.Controls.Add($info)
+    $hint = New-Object System.Windows.Forms.Label
+    $hint.Text = 'Выберите отдельную копию raw PS того же размера. Для каждого хеша создаются свои NOR и SD. Выбор перезапускает телефон; исходный файл не записывается. Интернет HLE доступен в режиме оригинала.'
+    $hint.SetBounds(16,166,508,62)
+    $dialog.Controls.Add($hint)
+    $pauseBox = New-Object System.Windows.Forms.CheckBox
+    $pauseBox.Text = 'Остановиться перед первой инструкцией'
+    $pauseBox.Checked = $true
+    $pauseBox.SetBounds(16,230,508,26)
+    $dialog.Controls.Add($pauseBox)
+    $choose = New-Object System.Windows.Forms.Button
+    $choose.Text = 'Выбрать PS…'
+    $choose.SetBounds(16,272,160,32)
+    $choose.Add_Click({
+        $picker = New-Object System.Windows.Forms.OpenFileDialog
+        $picker.Filter = 'Raw PS (*.bin)|*.bin|Все файлы (*.*)|*.*'
+        try {
+            if ($picker.ShowDialog($dialog) -ne 'OK') { return }
+            $check = & $script:pythonPath -X utf8 -m emulator.firmware $picker.FileName 2>&1
+            if ($LASTEXITCODE -ne 0) { throw ($check -join [Environment]::NewLine) }
+            $script:firmwarePath = $picker.FileName
+            $script:LoadState = $null
+            $script:debugStartPaused = $pauseBox.Checked
+            $dialog.Close()
+            Start-B220Boot
+        } catch { [void][System.Windows.Forms.MessageBox]::Show($dialog,$_.Exception.Message,'Образ прошивки') }
+        finally { $picker.Dispose() }
+    })
+    $dialog.Controls.Add($choose)
+    $original = New-Object System.Windows.Forms.Button
+    $original.Text = 'Оригинал'
+    $original.SetBounds(188,272,160,32)
+    $original.Add_Click({
+        $script:firmwarePath = $null
+        $script:LoadState = $null
+        $script:debugStartPaused = $pauseBox.Checked
+        $dialog.Close()
+        Start-B220Boot
+    })
+    $dialog.Controls.Add($original)
+    $close = New-Object System.Windows.Forms.Button
+    $close.Text = 'Закрыть'
+    $close.SetBounds(360,272,164,32)
+    $close.Add_Click({ $dialog.Close() })
+    $dialog.Controls.Add($close)
+    try { [void]$dialog.ShowDialog($script:form) } finally { $dialog.Dispose() }
+}
+
+function Show-B220Debugger {
+    Release-B220Keys
+    $script:debugDialog = New-Object System.Windows.Forms.Form
+    $d = $script:debugDialog
+    $d.Text = 'Отладчик ARM / Thumb'
+    $d.Font = $script:form.Font
+    $d.ClientSize = New-Object System.Drawing.Size(680,650)
+    $d.StartPosition = 'CenterParent'
+    $d.FormBorderStyle = 'FixedDialog'
+    $d.MaximizeBox = $false
+    $d.MinimizeBox = $false
+    $stop = New-Object System.Windows.Forms.Button
+    $stop.Text = 'Пауза'
+    $stop.SetBounds(16,12,130,30)
+    $stop.Add_Click({ Write-B220Command @{action='pause'} })
+    $d.Controls.Add($stop)
+    $continue = New-Object System.Windows.Forms.Button
+    $continue.Text = 'Продолжить'
+    $continue.SetBounds(156,12,130,30)
+    $continue.Add_Click({ Write-B220Command @{action='resume'} })
+    $d.Controls.Add($continue)
+    $step = New-Object System.Windows.Forms.Button
+    $step.Text = '1 инструкция'
+    $step.SetBounds(296,12,140,30)
+    $step.Add_Click({ Write-B220Command @{action='debug';operation='step'} })
+    $d.Controls.Add($step)
+    $caption = New-Object System.Windows.Forms.Label
+    $caption.Text = 'Точки останова: адреса через пробел, например 0x483978 0x394320'
+    $caption.SetBounds(16,54,648,24)
+    $d.Controls.Add($caption)
+    $points = New-Object System.Windows.Forms.TextBox
+    $points.Text = $script:breakpoints -join ' '
+    $points.SetBounds(16,80,488,28)
+    $d.Controls.Add($points)
+    $apply = New-Object System.Windows.Forms.Button
+    $apply.Text = 'Применить'
+    $apply.SetBounds(514,78,150,30)
+    $apply.Add_Click({
+        try {
+            $values = @($points.Text.Trim() -split '[,;\s]+' | Where-Object { $_ })
+            if ($values.Count -gt 64) { throw 'Допустимо до 64 адресов.' }
+            foreach ($value in $values) {
+                if ($value -match '^0[xX][0-9a-fA-F]+$') { [void][Convert]::ToUInt32($value.Substring(2),16) }
+                elseif ($value -match '^\d+$') { [void][Convert]::ToUInt32($value,10) }
+                else { throw ('Неверный адрес: '+$value) }
+            }
+            $script:breakpoints = $values
+            Write-B220Command @{action='debug';operation='breakpoints';addresses=@($values)}
+        } catch { [void][System.Windows.Forms.MessageBox]::Show($d,$_.Exception.Message,'Точки останова') }
+    })
+    $d.Controls.Add($apply)
+    $memory = New-Object System.Windows.Forms.TextBox
+    $memory.Text = '0x04000000'
+    $memory.SetBounds(16,120,220,28)
+    $d.Controls.Add($memory)
+    $read = New-Object System.Windows.Forms.Button
+    $read.Text = 'Прочитать 128 Б'
+    $read.SetBounds(246,118,190,30)
+    $read.Add_Click({ Write-B220Command @{action='debug';operation='inspect';address=$memory.Text} })
+    $d.Controls.Add($read)
+    $script:debugText = New-Object System.Windows.Forms.TextBox
+    $script:debugText.Multiline = $true
+    $script:debugText.ReadOnly = $true
+    $script:debugText.ScrollBars = 'Both'
+    $script:debugText.WordWrap = $false
+    $script:debugText.Font = New-Object System.Drawing.Font('Consolas',10)
+    $script:debugText.SetBounds(16,162,648,434)
+    $d.Controls.Add($script:debugText)
+    $hint = New-Object System.Windows.Forms.Label
+    $hint.Text = 'Регистры и память читаются на паузе. Закрытие окна сохраняет паузу.'
+    $hint.SetBounds(16,608,648,28)
+    $d.Controls.Add($hint)
+    Write-B220Command @{action='pause'}
+    $testTimer = $null
+    if ($DebuggerTest) {
+        $script:debugTestStage = 0
+        $script:debugTestAt = [DateTime]::UtcNow
+        $testTimer = New-Object System.Windows.Forms.Timer
+        $testTimer.Interval = 150
+        $testTimer.Add_Tick({
+            try {
+                if (([DateTime]::UtcNow-$script:debugTestAt).TotalSeconds -gt 30) { throw 'Debugger UI test timeout.' }
+                $s = Get-Content -LiteralPath $script:sessionStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                Update-B220Debugger $s
+                $v = $s.debugger.view
+                switch ($script:debugTestStage) {
+                    0 {
+                        if ($s.state -ne 'paused' -or $v.registers.pc -ne '0x0') { return }
+                        $step.PerformClick()
+                        $script:debugTestStage = 1
+                    }
+                    1 {
+                        if ($v.registers.pc -ne '0x4') { return }
+                        if ($v.registers.r0 -ne '0x1') { throw 'Step did not execute fixture MOV.' }
+                        $points.Text = '0x8'
+                        $apply.PerformClick()
+                        $continue.PerformClick()
+                        $script:debugTestStage = 2
+                    }
+                    2 {
+                        if ($s.debugger.hit -ne '0x8') { return }
+                        if ($v.registers.r0 -ne '0x2') { throw 'Continue did not reach the breakpoint before branch.' }
+                        $memory.Text = '0x0'
+                        $read.PerformClick()
+                        $script:debugTestStage = 3
+                    }
+                    3 {
+                        if (-not $v.memory) { return }
+                        if ($v.memory[0] -notlike '*e3 a0 00 01 e2 80 00 01*') { throw 'Memory inspector returned wrong fixture bytes.' }
+                        $d.Refresh()
+                        $capture = New-Object System.Drawing.Bitmap($d.Width,$d.Height)
+                        try {
+                            $d.DrawToBitmap($capture,(New-Object System.Drawing.Rectangle(0,0,$capture.Width,$capture.Height)))
+                            $capture.Save((Join-Path $script:outputDirectory 'window-debugger.png'),[System.Drawing.Imaging.ImageFormat]::Png)
+                        } finally { $capture.Dispose() }
+                        # Continue must bypass only the stopped branch once,
+                        # then stop at it again instead of hanging or exiting.
+                        $continue.PerformClick()
+                        $script:debugTestStage = 4
+                    }
+                    4 {
+                        if ($s.debugger.hit -ne '0x8' -or -not $v -or $v.memory) { return }
+                        $testTimer.Stop()
+                        [System.IO.File]::WriteAllText((Join-Path $script:outputDirectory 'window-debugger-check.json'),'{"status":"PASS","reset_pause":true,"single_step":true,"breakpoint":true,"resume_rehits":true,"memory":true}')
+                        $d.Close()
+                    }
+                }
+            } catch {
+                $testTimer.Stop()
+                $script:smokeFailure = $_.Exception.Message
+                $d.Close()
+            }
+        })
+        $testTimer.Start()
+    }
+    try { [void]$d.ShowDialog($script:form) }
+    finally {
+        if ($testTimer) { $testTimer.Dispose() }
+        $d.Dispose(); $script:debugDialog = $null; $script:debugText = $null
+    }
+}
+
+function Update-B220Debugger($state) {
+    $script:debugState = $state
+    if (-not $script:debugDialog -or -not $state.debugger) { return }
+    $view = $state.debugger.view
+    $lines = @(('Состояние: '+$state.state), ('Точки: '+($state.debugger.breakpoints -join ', ')))
+    if ($state.cpu_stop) { $lines += 'Остановка: '+$state.cpu_stop.reason+' · '+$state.cpu_stop.pc }
+    if ($state.input_error) { $lines += 'Ошибка: '+$state.input_error }
+    if ($state.state -ne 'paused') { $lines += 'Ниже — последнее чтение на паузе.' }
+    if ($view) {
+        $lines += 'Режим: '+$view.mode
+        $properties = @($view.registers.PSObject.Properties)
+        for ($i=0; $i -lt $properties.Count; $i+=4) {
+            $row = @()
+            for ($j=$i; $j -lt [Math]::Min($i+4,$properties.Count); $j++) {
+                $row += ($properties[$j].Name.PadRight(4)+' '+([string]$properties[$j].Value).PadRight(10))
+            }
+            $lines += $row -join '  '
+        }
+        $lines += @('', 'Инструкции:') + @($view.disassembly)
+        if ($view.memory) { $lines += @('', 'Память:') + @($view.memory) }
+    }
+    $next = $lines -join "`r`n"
+    if ($script:debugText.Text -ne $next) { $script:debugText.Text = $next }
 }
 
 function Show-B220CardSettings {
@@ -360,7 +642,15 @@ function Show-B220CardSettings {
                 $length = (Get-Item -LiteralPath $picker.FileName).Length
                 if ($length -notin @(16777216,33554432)) { throw 'Поддерживаются образы размером 16 и 32 МиБ.' }
                 Stop-B220Child
-                $script:cardImagePath = $picker.FileName
+                if ($script:firmwarePath) {
+                    # Import a copy; an experiment never mounts the ordinary
+                    # card image or another image selected on the host directly.
+                    $destination = Join-Path $script:outputDirectory 'sd-card.img'
+                    if ([System.IO.Path]::GetFullPath($picker.FileName) -ne [System.IO.Path]::GetFullPath($destination)) {
+                        Copy-Item -LiteralPath $picker.FileName -Destination $destination -Force
+                    }
+                    $script:cardImagePath = $destination
+                } else { $script:cardImagePath = $picker.FileName }
                 [System.IO.File]::WriteAllText($script:cardSettingsPath,(@{path=$script:cardImagePath} | ConvertTo-Json),(New-Object System.Text.UTF8Encoding($false)))
                 $dialog.Close()
                 Start-B220Boot
@@ -519,7 +809,7 @@ function Set-B220Layout {
     $script:form.AutoScrollPosition = New-Object System.Drawing.Point(0,0)
     $scale = $script:zoom.SelectedIndex + 1
     $width = [Math]::Max(400, 176 * $scale + 48)
-    $height = 220 * $scale + 507
+    $height = 220 * $scale + 545
     $area = [System.Windows.Forms.Screen]::FromControl($script:form).WorkingArea
     $clientHeight = [Math]::Min($height,($area.Height-40))
     $needsScroll = $clientHeight -lt $height
@@ -546,6 +836,8 @@ function Set-B220Layout {
     $script:networkButton.SetBounds(24,($bottom+145),90,30)
     $script:cardButton.SetBounds(122,($bottom+145),90,30)
     $script:networkLabel.SetBounds(222,($bottom+143),($width-246),42)
+    $script:firmwareButton.SetBounds(24,($bottom+185),166,30)
+    $script:debugButton.SetBounds(198,($bottom+185),154,30)
     $area = [System.Windows.Forms.Screen]::FromControl($script:form).WorkingArea
     if ($script:form.Bottom -gt $area.Bottom) { $script:form.Top = [Math]::Max($area.Top, $area.Bottom - $script:form.Height) }
 }
@@ -555,7 +847,7 @@ function Show-B220Error([string]$message) {
     $script:restart.Enabled = $true
     $script:status.Text = 'Не удалось завершить запуск'
     $script:detail.Text = 'Можно повторить запуск. Подробности — в сообщении об ошибке.'
-    if ($SmokeTest -or $ScreenTest -or $KeyTest -or $NetworkTest -or $CardTest) {
+    if ($SmokeTest -or $ScreenTest -or $KeyTest -or $NetworkTest -or $CardTest -or $DebuggerTest) {
         $script:smokeFailure = $message
         [System.IO.File]::WriteAllText((Join-Path $script:outputDirectory 'window-smoke-error.log'), $message)
         $script:form.Close()
@@ -586,11 +878,13 @@ function Set-B220Frame([string]$path) {
 function Start-B220Boot {
     try {
         Stop-B220Child
+        Set-B220FirmwarePaths
         if (-not (Test-Path -LiteralPath $script:pythonPath)) { throw 'Не найден Python проекта в .venv. Подготовьте окружение по README.md.' }
         $script:restart.Enabled = $false
         $script:save.Enabled = $false
         $script:journal.Enabled = $false
         $script:report = $null
+        $script:debugState = $null
         $script:networkState = $null
         $script:networkReportPath = $null
         $script:networkLabel.Text = if ($script:networkEnabled) { 'Ожидается меню «Интернет»' } else { 'Интернет выключен' }
@@ -609,6 +903,11 @@ function Start-B220Boot {
         $script:progress.Visible = $true
         [void][System.IO.Directory]::CreateDirectory($script:outputDirectory)
         $argsForBoot = @('-X', 'utf8', '-m', 'emulator.run', '--explore', '--instructions', '200000000', '--seconds', '180', '--frames', '5', '--live-frame', ('"' + $script:liveFramePath + '"'), '--out', ('"' + $script:reportPath + '"'))
+        if ($script:firmwarePath) {
+            $argsForBoot += @('--firmware',('"'+$script:firmwarePath+'"'),'--firmware-sha256',$script:firmwareIdentity.sha256)
+        }
+        if ($script:debugStartPaused) { $argsForBoot += '--debug-start-paused' }
+        foreach ($point in $script:breakpoints) { $argsForBoot += @('--breakpoint',$point) }
         $script:commandPath = $null
         $script:sessionStatusPath = $null
         if (-not $SmokeTest -and -not $ScreenTest) {
@@ -868,6 +1167,7 @@ $timer.Add_Tick({
             $state = Get-Content -LiteralPath $script:sessionStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
             $script:sessionReady = [bool]$state.ready -and $state.state -in @('paused','running')
             $script:sessionPaused = $state.state -eq 'paused'
+            Update-B220Debugger $state
             if ($state.sd_card) {
                 $script:tooltip.SetToolTip($script:cardButton,('Карта: '+$(if ($state.sd_card.present) {'вставлена'} else {'нет'})+"`nЧтений: $($state.sd_card.sectors_read), записей: $($state.sd_card.sectors_written)"))
             }
@@ -897,7 +1197,7 @@ $timer.Add_Tick({
                 $script:screen.Invalidate()
             }
             $script:phonePanel.Enabled = $script:sessionReady
-            $script:pause.Enabled = $script:sessionReady
+            $script:pause.Enabled = $state.state -in @('paused','running','booting')
             if ($script:sessionReady) {
                 $script:restart.Enabled = $true
                 $script:journal.Enabled = Test-Path -LiteralPath $script:reportPath
@@ -912,7 +1212,26 @@ $timer.Add_Tick({
                 if ($state.network.error) { $script:detail.Text = [string]$state.network.error }
                 $script:progress.Visible = $false
             }
+            if ($state.state -eq 'paused' -and -not $script:sessionReady) {
+                $script:restart.Enabled = $true
+                $script:pause.Text = 'Продолжить'
+                $script:status.Text = 'CPU остановлен · загрузка не завершена'
+                $script:detail.Text = 'Регистры и инструкции доступны в окне «Отладка…».'
+                $script:progress.Visible = $false
+            } elseif (-not $script:sessionReady -and $state.state -eq 'booting') {
+                $script:pause.Text = 'Пауза'
+                $script:status.Text = 'Выполняется загрузка прошивки…'
+                $script:progress.Visible = $true
+            }
         } catch { $state = $null }
+        if ($DebuggerTest -and $state -and $state.state -eq 'paused' -and -not $script:debugTestStarted) {
+            $script:debugTestStarted = $true
+            $script:debugButton.PerformClick()
+            $childId = $script:bootProcess.Id
+            $script:form.Close()
+            if (Get-Process -Id $childId -ErrorAction SilentlyContinue) { throw 'Debugger child survived window close.' }
+            return
+        }
         if ($KeyTest -and $state) {
             try { Test-B220Keys $state }
             catch { Show-B220Error $_.Exception.Message }

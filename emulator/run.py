@@ -8,6 +8,8 @@ from .board import Board, ROOT
 from .report import write_html
 from .frames import LiveFramePublisher
 from .snapshot import SnapshotError,load_snapshot,save_snapshot
+from .firmware import load_firmware,experiment_directory,protect_outputs
+from .debugger import Debugger,address
 from unicorn.arm_const import UC_ARM_REG_PC,UC_ARM_REG_CPSR
 
 
@@ -43,7 +45,11 @@ def main():
     p.add_argument('--instructions',type=int,default=12000000)
     p.add_argument('--seconds',type=float,default=20)
     p.add_argument('--until',type=lambda v:int(v,0),default=0xffffffff,help='Stop before this guest PC, e.g. 0x526912')
-    p.add_argument('--out',type=Path,default=ROOT/'analysis/emulator/latest.json')
+    p.add_argument('--out',type=Path)
+    p.add_argument('--firmware',type=Path,help='Separate raw PS image, same length/layout as the original; never written')
+    p.add_argument('--firmware-sha256',help='Reject changes to the selected image between GUI selection and startup')
+    p.add_argument('--breakpoint',type=address,action='append',default=[],help='Stop before this address; repeat up to 64 times')
+    p.add_argument('--debug-start-paused',action='store_true',help='Pause before the first instruction (interactive mode)')
     inputs = p.add_mutually_exclusive_group()
     inputs.add_argument('--load-flash',type=Path,help='Resume saved virtual NOR; PS prefix must match exactly')
     inputs.add_argument('--load-state',type=Path,help='Restore a complete .b220state snapshot and continue from its PC')
@@ -65,12 +71,25 @@ def main():
         p.error('--interactive requires --commands and --session-status')
     if a.window_http_test and not a.interactive:
         p.error('--window-http-test requires --interactive')
+    if a.debug_start_paused and not a.interactive:
+        p.error('--debug-start-paused requires --interactive')
     if a.sd_image and a.load_state:
         p.error('SD media is embedded in snapshots; attach --sd-image on cold boot')
     if a.save_state and a.save_state.suffix.lower() != '.b220state':
         p.error('--save-state output must use the .b220state extension')
     from .card_image import CardImage
     try:
+        profile = json.loads(a.profile.read_text(encoding='utf-8'))
+        _,identity = load_firmware(profile,a.firmware)
+        if a.firmware_sha256 and a.firmware_sha256 != identity['sha256']:
+            p.error('Selected firmware changed before startup; select it again')
+        if not a.out:
+            a.out = (experiment_directory(identity) if a.firmware else ROOT/'analysis/emulator')/'latest.json'
+        protect_outputs(profile,identity,[a.out,a.out.with_suffix('.html'),a.save_flash,a.save_state,a.sd_image,
+                        a.live_frame,a.live_frame.with_suffix('.png') if a.live_frame else None,
+                        a.commands,a.session_status,a.session_status.with_suffix('.network.json') if a.session_status else None,
+                        a.network_trace,
+                        *(a.out.parent/(a.out.stem+suffix) for suffix in ('-lcd.png','-lcd.rgb565be','-dsp-bootstrap.bin'))],inputs=[a.profile])
         with CardImage(a.sd_image) if a.sd_image else nullcontext(None) as card_image:
             run_emulator(a,p,card_image)
     except (OSError,ValueError) as exc:
@@ -83,7 +102,7 @@ def run_emulator(a,p,card_image=None):
     profile = json.loads(a.profile.read_text(encoding='utf-8'))
     try:
         if a.load_state:
-            board = load_snapshot(a.load_state,profile=profile,frame_callback=publish_frame)
+            board = load_snapshot(a.load_state,profile=profile,frame_callback=publish_frame,firmware_path=a.firmware)
             if a.explore and not board.explore:
                 p.error('--explore cannot override the strict mode stored in this snapshot')
             if a.full_nor_trace and board.flash.trace_limit is not None:
@@ -95,23 +114,30 @@ def run_emulator(a,p,card_image=None):
             board = Board(profile,explore=a.explore,
                           flash_state=a.load_flash.read_bytes() if a.load_flash else None,
                           frame_callback=publish_frame,full_nor_trace=a.full_nor_trace,stop_after_frames=a.frames,
-                          sd_image=card_image.data if card_image else None)
+                          sd_image=card_image.data if card_image else None,firmware_path=a.firmware)
     except SnapshotError as exc:
         p.error(str(exc))
+    if a.firmware_sha256 and a.firmware_sha256 != board.image_sha256:
+        p.error('Selected firmware changed while constructing the board')
     network_trace = None
     if a.network_trace:
         from .network_trace import NetworkTrace
         network_trace = NetworkTrace(board)
-    if a.interactive:
-        from .interactive import InteractiveSession
-        session = InteractiveSession(board,a,lambda result,save:save_outputs(board,result,a,publish_frame,save,card_image),
-                                     flush_media=(lambda:card_image.flush(board.spi)) if card_image else None)
-        result = session.run()
-        save_flash = session.ready
-    else:
-        entry = board.uc.reg_read(UC_ARM_REG_PC)|(1 if board.uc.reg_read(UC_ARM_REG_CPSR)&0x20 else 0)
-        result = board.run(a.instructions,a.seconds,entry=entry,until=a.until)
-        save_flash = True
+    debugger = Debugger(board,a.breakpoint)
+    try:
+        if a.interactive:
+            from .interactive import InteractiveSession
+            session = InteractiveSession(board,a,lambda result,save:save_outputs(board,result,a,publish_frame,save,card_image),
+                                         flush_media=(lambda:card_image.flush(board.spi)) if card_image else None,debugger=debugger)
+            result = session.run()
+            save_flash = session.ready
+        else:
+            step = debugger.run(a.instructions,a.seconds,until=a.until)
+            result = board.report(a.instructions,step['elapsed_seconds'],step['engine_error'])
+            save_flash = True
+        result['debugger'] = debugger.status()
+    finally:
+        debugger.close()
     if a.load_state:
         result['loaded_state'] = str(a.load_state)
     if a.save_state:

@@ -8,6 +8,30 @@ from emulator.interactive import InteractiveSession
 
 
 class InteractiveBootTests(unittest.TestCase):
+    def test_phone_input_cannot_resume_a_debugger_breakpoint(self):
+        from emulator.board import Board
+        from emulator.debugger import Debugger
+        with TemporaryDirectory() as folder:
+            b = Board(explore=True)
+            d = Debugger(b)
+            path = Path(folder)/'commands.jsonl'
+            args = SimpleNamespace(commands=path,session_status=Path(folder)/'status.json',out='test.json')
+            session = InteractiveSession(b,args,lambda *_:None,debugger=d)
+            session.ready,session.paused,session.debug_stopped = True,True,True
+            path.write_text('{"action":"key","key":"up","down":true}\n{"action":"release_all"}\n')
+            session.commands()
+            self.assertTrue(session.paused)
+            self.assertTrue(session.debug_stopped)
+            self.assertTrue(b.keypad.queue)
+            self.assertFalse(b.keypad.events,'Paused input must not be delivered to guest hardware yet')
+            with path.open('a') as stream:
+                stream.write('{"action":"resume"}\n')
+            session.commands()
+            self.assertFalse(session.paused)
+            self.assertFalse(session.debug_stopped)
+            session.network.close()
+            d.close()
+
     def test_cold_boot_keeps_executing_without_input_and_manual_pause_still_works(self):
         with TemporaryDirectory() as folder:
             b = SimpleNamespace(keypad=SimpleNamespace(events=[]),uc=SimpleNamespace(reg_read=lambda _:0),

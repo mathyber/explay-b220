@@ -29,13 +29,14 @@ from .spi import EmptySpi
 from .rtc import Rtc
 from .jpeg import JpegEngine
 from .keypad import Keypad
+from .firmware import load_firmware
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class Board:
     def __init__(self, profile=None, explore=False, flash_state=None, frame_callback=None,full_nor_trace=False,
-                 fast_cpu=True,stop_after_frames=0,sd_image=None):
+                 fast_cpu=True,stop_after_frames=0,sd_image=None,firmware_path=None):
         self.profile = profile or json.loads((ROOT/'emulator/profiles/b220-l7a.json').read_text())
         self.explore = explore
         self.frame_callback = frame_callback
@@ -46,15 +47,12 @@ class Board:
         self.fast_cpu = fast_cpu and hasattr(uc,'_do_reg_read')
         self._cpsr_value = ctypes.c_uint32()
         uc.ctl_set_cpu_model(UC_CPU_ARM_926)
-        image_path = next((ROOT/'analysis/extracted').glob('SC*.bin'))
-        image = image_path.read_bytes()
+        image,self.firmware = load_firmware(self.profile,firmware_path)
         self.window_log_pointer = image.find(b'MMK_RunWinProc, win_handle')
         self.backlight_log_pointer = image.find(b'GPIO_SetLcdBackLight: %d')
         self.lcd_backlight = None
         self.last_window_id = None
-        self.image_sha256 = hashlib.sha256(image).hexdigest()
-        if self.image_sha256 != self.profile['ps_sha256']:
-            raise ValueError('Profile is pinned to a different PS image')
+        self.image_sha256 = self.firmware['sha256']
         nor_profile = self.profile.get('nor',{})
         self.flash = NorFlash(image,manufacturer=int(nor_profile.get('manufacturer','0x20'),0),
                               device=int(nor_profile.get('device','0x88c0'),0),trace_limit=None if full_nor_trace else 4096,
@@ -64,7 +62,7 @@ class Board:
         self.loaded_flash = None
         if flash_state is not None:
             if len(flash_state) != len(self.flash.array) or flash_state[:len(image)] != image:
-                raise ValueError('Saved NOR must be exactly 8 MiB and contain the unchanged pinned PS')
+                raise ValueError('Saved NOR must be exactly 8 MiB and contain the selected PS image')
             self.flash.array[:] = flash_state
             self.loaded_flash = dict(size=len(flash_state),sha256=hashlib.sha256(flash_state).hexdigest())
         elif seed := self.profile.get('nv_seed'):
@@ -175,6 +173,7 @@ class Board:
         self.started_at = None
         self.deadline = None
         self._running = False
+        self.terminal_observer = None
         self.md = {False: Cs(CS_ARCH_ARM, CS_MODE_ARM | CS_MODE_BIG_ENDIAN),
                    True: Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_BIG_ENDIAN)}
         self.uc.reg_write(UC_ARM_REG_CPSR, 0x2d3)
@@ -187,15 +186,17 @@ class Board:
         for start,end in self.mmio_windows:
             uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,self._mmio,begin=start,end=end-1)
         uc.hook_add(UC_HOOK_INTR, self._interrupt)
-        if self.keypad:
-            uc.hook_add(UC_HOOK_CODE,self._key_callback,begin=0x1a1236,end=0x1a1236)
-        # Observe the firmware's trace function; preserve every guest instruction.
-        for addr in (0x48e11a,):
-            uc.hook_add(UC_HOOK_CODE, self._guest_log, begin=addr, end=addr)
-        uc.hook_add(UC_HOOK_CODE,self._assertion,begin=0x4822ac,end=0x4822ac)
-        uc.hook_add(UC_HOOK_CODE,self._power_loop,begin=0x483b68,end=0x483b68)
-        for addr in (0x483978, 0x483a02, 0x483a04, 0x394320):
-            uc.hook_add(UC_HOOK_CODE, self._milestone, begin=addr, end=addr)
+        # These semantic addresses are only established for the reference PS.
+        # A modified image still gets every hardware hook, but no guessed
+        # assertion/power stops or firmware-specific observers.
+        if not self.firmware['modified']:
+            if self.keypad:
+                uc.hook_add(UC_HOOK_CODE,self._key_callback,begin=0x1a1236,end=0x1a1236)
+            uc.hook_add(UC_HOOK_CODE,self._guest_log,begin=0x48e11a,end=0x48e11a)
+            uc.hook_add(UC_HOOK_CODE,self._assertion,begin=0x4822ac,end=0x4822ac)
+            uc.hook_add(UC_HOOK_CODE,self._power_loop,begin=0x483b68,end=0x483b68)
+            for addr in (0x483978,0x483a02,0x483a04,0x394320):
+                uc.hook_add(UC_HOOK_CODE,self._milestone,begin=addr,end=addr)
 
     def is_mmio(self,address):
         return any(start <= address < end for start,end in self.mmio_windows)
@@ -389,6 +390,8 @@ class Board:
                 else:
                     value = self.jpeg.read(address-self.jpeg.base,uc.mem_read)
                     uc.mem_write(address,value.to_bytes(4,'big'))
+                if self.irq and bool(self.irq.raw&(1<<26)) != self.jpeg.pending:
+                    self.irq.set_line(26,self.jpeg.pending)
             except (ValueError,NotImplementedError) as exc:
                 self.stop = dict(reason='unsupported JPEG operation',device='JPEG engine',detail=str(exc),
                                  pc=hex(pc),address=hex(address),value=hex(value))
@@ -706,12 +709,16 @@ class Board:
                                   args=[hex(v) for v in args],strings=[self.cstring(v,128) for v in args]))
 
     def _assertion(self,uc,address,size,_):
+        if self.terminal_observer and self.terminal_observer(uc,address,size):
+            return
         self.stop = dict(reason='firmware assertion',pc=hex(address),lr=hex(uc.reg_read(UC_ARM_REG_LR)),
                          args=[hex(uc.reg_read(r)) for r in (UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,UC_ARM_REG_R3)],
                          strings=[self.cstring(uc.reg_read(r)) for r in (UC_ARM_REG_R0,UC_ARM_REG_R1)])
         uc.emu_stop()
 
     def _power_loop(self,uc,address,size,_):
+        if self.terminal_observer and self.terminal_observer(uc,address,size):
+            return
         self.stop = dict(reason='firmware power/reset terminal loop',pc=hex(address),
                          lr=hex(uc.reg_read(UC_ARM_REG_LR)))
         uc.emu_stop()
@@ -753,7 +760,7 @@ class Board:
             raw = bytes(self.uc.mem_read(addr,min(size,256)))
             tail.append(dict(address=hex(addr),size=size,thumb=thumb,
                              instructions=[f'{i.address:08x}: {i.mnemonic} {i.op_str}' for i in self.md[thumb].disasm(raw,addr)]))
-        return dict(profile=self.profile, image_sha256=self.image_sha256, explore=self.explore,
+        return dict(profile=self.profile, image_sha256=self.image_sha256,firmware=self.firmware, explore=self.explore,
                     engine='Unicorn 2 / ARM926 approximation, fixed BE adapter',
                     instruction_budget=budget, elapsed_seconds=round(elapsed,3),
                     translated_blocks=self.block_serial,
@@ -785,7 +792,7 @@ class Board:
                     spi=self.spi.report() if self.spi else None,
                     spi_controllers={hex(base):device.report() for base,device in self.spi_controllers.items()},
                     rtc=self.rtc.report(self.block_serial) if self.rtc else None,
-                    rtos_tasks=self._rtos_tasks(),
+                    rtos_tasks=[] if self.firmware['modified'] else self._rtos_tasks(),
                     milestones=self.milestones,guest_logs=self.logs,endian_repairs=self.endian_repairs,
                     unknown_mmio_accesses=sum(n for (op,addr),n in self.mmio_counts.items() if addr&~3 not in self.known_registers),
                     mmio_summary=[dict(op=op,address=hex(addr),count=n,
