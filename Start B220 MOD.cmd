@@ -6,9 +6,9 @@ if not exist ".venv\Scripts\python.exe" (
     pause
     exit /b 1
 )
-".venv\Scripts\python.exe" -X utf8 -m tools.build_key_marker
+".venv\Scripts\python.exe" -X utf8 -m tools.build_ui_label
 if errorlevel 1 (
     pause
     exit /b 1
 )
-start "" "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -STA -WindowStyle Hidden -File "%~dp0emulator\window.ps1" -Firmware "%~dp0analysis\firmware-patches\key-marker\key-marker.bin"
+start "" "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -STA -WindowStyle Hidden -File "%~dp0emulator\window.ps1" -Firmware "%~dp0analysis\firmware-patches\ui-label\b220-mod.bin"
