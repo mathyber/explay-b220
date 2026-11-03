@@ -11,10 +11,14 @@ from tools.b22asm import assemble
 from tools.build_catch_game import compile_game
 from tools.build_sd_app import build
 from tools.build_native_app import compile_native
+from tools.build_jvm import JDK
 from tools.prove_sd_app import state,catalog_state
 from tools.setup_arm_toolchain import EXECUTABLE
 from tools.sd_image import Fat16,create_image
 from tools.install_sd_app import install
+
+
+JAVA_TOOLS=(JDK/'javac.exe').exists()
 
 
 class AssemblerTests(unittest.TestCase):
@@ -100,7 +104,7 @@ class NativeVmTests(unittest.TestCase):
             payload,cls.entry,_=compile_game(Path(folder),'patches/sd_app.c')
         cls.image,cls.manifest=build(original,payload,cls.entry)
 
-    def fixture(self,program,missing=False,short_read=False,files=None,pool_free=0x180000):
+    def fixture(self,program,missing=False,short_read=False,files=None,pool_free=0x180000,budget=500000):
         # This deliberately substitutes SFS/graphics/allocator for fast CPU unit
         # tests. tools.prove_sd_app uses actual firmware APIs and SD/SPI instead.
         uc=Uc(UC_ARCH_ARM,UC_MODE_ARM|UC_MODE_BIG_ENDIAN)
@@ -117,7 +121,8 @@ class NativeVmTests(unittest.TestCase):
             files={'E:\\APPS.LST':b'DEMO.B22\r\nSECOND.B22\r\n','E:\\DEMO.B22':program,
                    'E:\\SECOND.B22':assemble((ROOT/'apps/card_second.b22asm').read_text())}
         if missing:files.pop('E:\\DEMO.B22',None)
-        handles={};heap_next=0x04200000
+        # Stub allocations start low in RAM, clear of the pool, clock and loader state.
+        handles={};positions={};heap_next=0x04000000
         def stub(uc,pc,size,_):
             nonlocal heap_next
             args=[uc.reg_read(UC_ARM_REG_R0+i) for i in range(4)]
@@ -127,15 +132,20 @@ class NativeVmTests(unittest.TestCase):
                 name=bytes(uc.mem_read(r0,32)).decode('utf-16-be').split('\0',1)[0]
                 calls['opens'].append((name,r1))
                 if name in files:
-                    result=len(handles)+1;handles[result]=name
+                    result=len(handles)+1;handles[result]=name;positions[result]=0
             elif pc==0x5ee59e:uc.mem_write(r1,len(files[handles[r0]]).to_bytes(4,'big'))
             elif pc==0x6a5438:
                 calls['allocation_sizes'].append(r0);calls['heaps'].append(r1);result=heap_next
                 calls['allocated'].append(result);heap_next+=(r0+7)&~7
             elif pc==0x5ee49e:
-                data=files[handles[r0]];self.assertEqual(r2,len(data))
-                actual=len(data)-(1 if short_read and handles[r0]=='E:\\DEMO.B22' else 0)
-                uc.mem_write(r1,data[:actual]);uc.mem_write(r3,actual.to_bytes(4,'big'))
+                data=files[handles[r0]];at=positions[r0]
+                chunk=data[at:at+r2]
+                if short_read and handles[r0]=='E:\\DEMO.B22':chunk=chunk[:-1]
+                positions[r0]=at+len(chunk)
+                uc.mem_write(r1,chunk);uc.mem_write(r3,len(chunk).to_bytes(4,'big'))
+            elif pc==0x5ee526:  # SFS_SetFilePointer(handle, high, low, origin 0)
+                self.assertEqual((r1,r3),(0,0))
+                positions[r0]=r2
             elif pc==0x5ee484:calls['closed']+=1
             elif pc==0x6a5468:calls['freed'].append(r0)
             elif pc==0x4c65ac:calls['rects'].append((r1,r2,r3))
@@ -150,7 +160,7 @@ class NativeVmTests(unittest.TestCase):
             uc.reg_write(UC_ARM_REG_R0,result)
             uc.reg_write(UC_ARM_REG_PC,uc.reg_read(UC_ARM_REG_LR))
         for pc in (0x60f74e,0x4c5b68,0x5edc5e,0x5ee59e,0x6a5438,0x5ee49e,0x5ee484,0x6a5468,0x4c65ac,0x4cf432,0x4d7da2,
-                   0x1f55ee,0x1f5640,0x4d67d2,0x1d081e):
+                   0x1f55ee,0x1f5640,0x4d67d2,0x1d081e,0x5ee526):
             uc.hook_add(UC_HOOK_CODE,stub,begin=pc,end=pc)
         class Guest:pass
         guest=Guest();guest.uc=uc
@@ -161,8 +171,11 @@ class NativeVmTests(unittest.TestCase):
             uc.reg_write(UC_ARM_REG_R0,0x160002)
             uc.reg_write(UC_ARM_REG_R0+1,msg)
             uc.reg_write(UC_ARM_REG_R0+2,param)
-            if msg==0xf020:uc.mem_write(param,bytes([7]))  # stub timer id
-            uc.emu_start(entrypoint or self.entry,0x4000f000,count=500000)
+            if msg==0xf020:
+                uc.mem_write(param,bytes([7]))  # stub timer id
+                clock=int.from_bytes(uc.mem_read(0x042ccec0,4),'big')+20  # 20 ms per tick
+                uc.mem_write(0x042ccec0,clock.to_bytes(4,'big'))
+            uc.emu_start(entrypoint or self.entry,0x4000f000,count=budget)
             self.assertEqual(uc.reg_read(UC_ARM_REG_PC),0x4000f000)
             self.assertEqual(uc.reg_read(UC_ARM_REG_SP),0x4000e000)
             result=state(guest);result['catalog_state']=catalog_state(guest)
@@ -225,6 +238,30 @@ class NativeVmTests(unittest.TestCase):
         back=event(0xfc17)
         self.assertEqual((back['mode'],back['code']),(0,0))
         self.assertEqual(calls['repaints'],[2])
+
+    @unittest.skipUnless(JAVA_TOOLS,'Local JDK required')
+    def test_java_vm_runs_a_program_from_jars(self):
+        from tools.build_java_phone import build_app,build_vm,zip_directory
+        from tools.build_jvm import LIBRARY,build_library
+        build_library()
+        with TemporaryDirectory() as folder:
+            library=Path(folder)/'JAVALIB.JAR'
+            zip_directory(LIBRARY,library)
+            files={'E:\\APPS.LST':b'JAVA.B22\r\n','E:\\JAVA.B22':build_vm(),
+                   'E:\\JAVALIB.JAR':library.read_bytes(),
+                   'E:\\APP.JAR':build_app([ROOT/'apps/java/Hello.java'],'Hello')}
+        event,calls=self.fixture(b'',files=files,budget=400000000)
+        event(0xf021);loaded=event(0xfa1b)
+        self.assertEqual((loaded['mode'],loaded['status']),(2,0))
+        self.assertEqual(calls['timers'],[(0x160002,20,1)])
+        for _ in range(200):
+            event(0xf020,param=0x40000100)
+            if '[finished]' in calls['texts']:break
+        for line in ('B220 + B22 JVM','fib(15) = 610','[n0, n1, n4, n9, n16]','thread sum 6','slept true','[finished]'):
+            self.assertIn(line,calls['texts'])
+        event(0xfa1b);event(0xf022)  # OK after the end exits; closing frees everything
+        self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))
+        self.assertEqual(calls['closed'],len([o for o in calls['opens'] if o[0]!='E:\\MISSING']))
 
     def test_invalid_native_programs_are_rejected(self):
         program=compile_native(ROOT/'apps/card_native.c')

@@ -27,6 +27,7 @@ typedef unsigned int b22_u32;
 #define B22N_OPEN 0xf021u
 #define B22N_PAINT 0xf024u
 #define B22N_TIMER 0xf020u  /* parameter: timer id */
+#define B22N_CLOSE 0xf022u  /* last call before unloading: free your allocations */
 
 /* Key messages are kind | code. A short press gives PRESS then RELEASE; holding
    gives PRESS, REPEAT..., LONG, REPEAT... and LONG_RELEASE. All keys, including

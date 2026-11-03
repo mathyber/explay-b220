@@ -23,7 +23,7 @@ static void draw_bar(u16 *screen, u32 top, u16 color) {
 __attribute__((used, section(".entry")))
 u32 b22n_main(const B22Api *api, u32 message, u32 parameter) {
     (void)parameter;
-    if (api->version != B22N_API_VERSION || api->size < sizeof(B22Api)) return 0;
+    if (api->version != B22N_API_VERSION || api->size < sizeof(B22Api) || message == B22N_CLOSE) return 0;
     u16 *screen = api->screen();
     if (message == B22N_OPEN) api->timer(500, 1);
     if (message == B22N_KEY_OK) { api->exit(); return 1; }

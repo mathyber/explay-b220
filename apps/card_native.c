@@ -41,7 +41,7 @@ static void draw(const B22Api *api) {
 __attribute__((used, section(".entry")))
 u32 b22n_main(const B22Api *api, u32 message, u32 parameter) {
     (void)parameter;
-    if (api->version != B22N_API_VERSION) return 0;
+    if (api->version != B22N_API_VERSION || message == B22N_CLOSE) return 0;
     if (message == B22N_OPEN) {
         heap_ok = heap_test(api);
         u32 handle = api->open("E:\\APPS.LST");

@@ -88,8 +88,15 @@ static void stop_timer(void) {
    repaint of the window stack (PostUpdateScreenMsg, 2 = full). */
 typedef u32 (*PostUpdate)(u32);
 static void repaint_all(void) { FN(0x4d67d3,PostUpdate)(2); }
+static const B22Api api;
 static void release(void) {
     stop_timer();
+    /* A native program frees its own allocations on B22N_CLOSE. */
+    if (S->magic==MAGIC && S->code && S->mode==2 && S->pc) {
+        u32 entry=S->pc;
+        S->pc=0;
+        FN(entry,B22Entry)(&api,B22N_CLOSE,0);
+    }
     if (S->magic==MAGIC && S->code) {
         FN(0x6a5469,Free)((void *)S->code);
         S->code=0;

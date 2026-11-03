@@ -83,7 +83,7 @@ def native_file(low, high):
     return result
 
 
-def compile_native(source, sources=()):
+def compile_native(source, sources=(), includes=()):
     if not EXECUTABLE.exists():
         raise ValueError('Run python -m tools.setup_arm_toolchain first')
     environment = os.environ.copy()
@@ -103,7 +103,7 @@ def compile_native(source, sources=()):
             execute([str(EXECUTABLE), 'cc', '-c', '-target', 'thumbeb-freestanding-eabi', '-mcpu=arm7tdmi', '-mthumb',
                      '-Oz', '-Wall', '-Wextra', '-Werror', '-ffreestanding', '-fno-builtin', '-fno-stack-protector',
                      '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-ffunction-sections', '-fdata-sections',
-                     '-Ipatches', str(item), '-o', objects[-1]])
+                     '-Ipatches', *[f'-I{i}' for i in includes], str(item), '-o', objects[-1]])
         script = (ROOT/LINKER).read_text(encoding='utf-8')
         images = []
         for base in (0, DELTA):
