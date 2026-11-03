@@ -79,6 +79,12 @@ class Studio:
         self.tool = tk.StringVar(value='pencil')
         self.last = None
         self.size_job = None
+        # Picture being placed: source image and its box in icon pixels.
+        self.placing = None
+        self.grab = None
+        self.keep_aspect = tk.BooleanVar(value=True)
+        self.smooth = tk.BooleanVar(value=True)
+        self.over = tk.BooleanVar(value=False)
         self.build()
         self.fill_groups()
 
@@ -86,7 +92,7 @@ class Studio:
 
     def build(self):
         self.root.title('B220: иконки')
-        self.root.geometry('1180x760')
+        self.root.geometry('1380x760')
         top = ttk.Frame(self.root, padding=6)
         top.pack(fill='x')
         ttk.Label(top, text='Группа:').pack(side='left')
@@ -119,7 +125,8 @@ class Studio:
         self.canvas.pack(side='left', anchor='n')
         self.canvas.bind('<Button-1>', self.press)
         self.canvas.bind('<B1-Motion>', self.drag)
-        self.canvas.bind('<ButtonRelease-1>', lambda _: setattr(self, 'last', None))
+        self.canvas.bind('<ButtonRelease-1>', self.release)
+        self.canvas.bind('<MouseWheel>', self.wheel)
 
         side = ttk.Frame(work, padding=(10, 0))
         side.pack(side='left', fill='y')
@@ -143,21 +150,48 @@ class Studio:
         actions = ttk.LabelFrame(side, text='Действия', padding=4)
         actions.pack(fill='x')
         for text, command in (('Начать с оригинала', self.from_original), ('Пустой холст', self.blank),
-                              ('Импорт PNG…', self.import_png), ('Отменить  Ctrl+Z', self.undo_step),
+                              ('Отменить  Ctrl+Z', self.undo_step),
                               ('Сохранить  Ctrl+S', self.save), ('Удалить мою версию', self.delete)):
             ttk.Button(actions, text=text, command=command).pack(fill='x', pady=1)
         self.unused_var = tk.BooleanVar()
         ttk.Checkbutton(actions, text='Похоже, не используется', variable=self.unused_var,
                         command=self.toggle_unused).pack(anchor='w', pady=(6, 0))
 
+        paste = ttk.LabelFrame(work, text='Вставить картинку', padding=6)
+        paste.pack(side='left', fill='y', padx=(4, 0))
+        ttk.Button(paste, text='Из файла…', command=self.import_png).pack(fill='x', pady=1)
+        ttk.Button(paste, text='Из буфера обмена', command=self.paste_clipboard).pack(fill='x', pady=1)
+        ttk.Label(paste, text='Тащите мышью, уголок рамки —\nразмер; колесо или +/− —\nмасштаб; стрелки — на пиксель',
+                  foreground='#555555').pack(anchor='w', pady=6)
+        ttk.Checkbutton(paste, text='Сохранять пропорции', variable=self.keep_aspect).pack(anchor='w')
+        ttk.Checkbutton(paste, text='Сглаживать при масштабе', variable=self.smooth,
+                        command=self.redraw_if_placing).pack(anchor='w')
+        ttk.Checkbutton(paste, text='Поверх рисунка', variable=self.over,
+                        command=self.redraw_if_placing).pack(anchor='w')
+        self.placement_buttons = []
+        for text, command in (('Вписать', self.fit_placement), ('1:1', self.actual_placement),
+                              ('Применить  Enter', self.apply_placement), ('Отмена  Esc', self.cancel_placement)):
+            button = ttk.Button(paste, text=text, command=command, state='disabled')
+            button.pack(fill='x', pady=1)
+            self.placement_buttons.append(button)
+        self.placement_info = ttk.Label(paste, text='')
+        self.placement_info.pack(anchor='w', pady=6)
+
+        # The weight line goes above the previews so a short window never hides it.
+        self.sizes = ttk.Label(right, text='', font=('Segoe UI', 10))
+        self.sizes.pack(anchor='w', pady=4)
         previews = ttk.LabelFrame(right, text='Как будет на телефоне: оригинал | новая, 1:1 и ×2, на чёрном и белом', padding=4)
         previews.pack(fill='x')
         self.preview = tk.Canvas(previews, height=120, bg='#808080', highlightthickness=0)
         self.preview.pack(fill='x')
-        self.sizes = ttk.Label(right, text='', font=('Segoe UI', 10))
-        self.sizes.pack(anchor='w', pady=4)
         self.root.bind('<Control-z>', lambda _: self.undo_step())
         self.root.bind('<Control-s>', lambda _: self.save())
+        self.root.bind('<Return>', lambda _: self.apply_placement())
+        self.root.bind('<Escape>', lambda _: self.cancel_placement())
+        for key, dx, dy in (('<Left>', -1, 0), ('<Right>', 1, 0), ('<Up>', 0, -1), ('<Down>', 0, 1)):
+            self.root.bind(key, lambda _, dx=dx, dy=dy: self.nudge(dx, dy))
+        for key, factor in (('<plus>', 1.1), ('<equal>', 1.1), ('<KP_Add>', 1.1), ('<minus>', 1/1.1), ('<KP_Subtract>', 1/1.1)):
+            self.root.bind(key, lambda _, f=factor: self.scale_placement(f))
 
     def fill_groups(self):
         self.groups = [(f'main: {GROUP_NAMES[g]}', lambda e, g=g: e.get('group') == g) for g in GROUP_NAMES]
@@ -217,6 +251,7 @@ class Studio:
     def select(self, entry):
         if not self.confirm_switch():
             return
+        self.cancel_placement()
         self.current = entry
         path = self.edited_path(entry)
         self.picture = Image.open(path).convert('RGBA') if path.exists() else self.original(entry).copy()
@@ -256,6 +291,12 @@ class Studio:
         return None
 
     def press(self, event):
+        if self.placing:
+            p = self.placing
+            z = self.zoom
+            corner = abs(event.x-(p['x']+p['w'])*z) <= 8 and abs(event.y-(p['y']+p['h'])*z) <= 8
+            self.grab = dict(mode='resize' if corner else 'move', x=event.x, y=event.y, box=dict(p))
+            return
         point = self.cell(event)
         if not point:
             return
@@ -272,6 +313,16 @@ class Studio:
         self.redraw()
 
     def drag(self, event):
+        if self.placing and self.grab:
+            g, p, z = self.grab, self.placing, self.zoom
+            dx, dy = (event.x-g['x'])/z, (event.y-g['y'])/z
+            if g['mode'] == 'move':
+                p['x'], p['y'] = g['box']['x']+dx, g['box']['y']+dy
+            else:
+                p['w'] = max(1.0, g['box']['w']+dx)
+                p['h'] = p['w']*g['box']['h']/g['box']['w'] if self.keep_aspect.get() else max(1.0, g['box']['h']+dy)
+            self.redraw()
+            return
         point = self.cell(event)
         if not point or self.tool.get() not in ('pencil', 'eraser') or self.last is None:
             return
@@ -323,26 +374,118 @@ class Studio:
             self.picture = Image.new('RGBA', self.picture.size, (0, 0, 0, 0))
             self.redraw()
 
+    # ---------- placing a picture ----------
+
     def import_png(self):
         if not self.current:
             return
-        name = filedialog.askopenfilename(filetypes=[('Картинки', '*.png *.gif *.bmp *.jpg'), ('Все файлы', '*.*')])
-        if not name:
+        name = filedialog.askopenfilename(filetypes=[('Картинки', '*.png *.gif *.bmp *.jpg *.jpeg *.webp'), ('Все файлы', '*.*')])
+        if name:
+            self.start_placement(Image.open(name))
+
+    def paste_clipboard(self):
+        if not self.current:
             return
-        source = Image.open(name).convert('RGBA')
+        try:
+            from PIL import ImageGrab
+            data = ImageGrab.grabclipboard()
+        except OSError:
+            data = None
+        if isinstance(data, list):  # copied files: the first picture among them
+            for name in data:
+                try:
+                    data = Image.open(name)
+                    break
+                except OSError:
+                    continue
+        if not isinstance(data, Image.Image):
+            messagebox.showinfo('Буфер обмена', 'В буфере обмена нет картинки')
+            return
+        self.start_placement(data)
+
+    def start_placement(self, source):
+        """Show the picture over the icon, fitted and centred; it is placed by Apply."""
+        self.placing = dict(source=source.convert('RGBA'), x=0.0, y=0.0, w=1.0, h=1.0)
+        self.fit_placement()
+        for button in self.placement_buttons:
+            button['state'] = 'normal'
+
+    def fit_placement(self):
+        p = self.placing
+        if not p:
+            return
         width, height = self.picture.size
-        if source.size != (width, height):
-            # Fit inside, keeping proportions; pixel art grows by whole steps.
-            scale = min(width/source.width, height/source.height)
-            size = (max(1, round(source.width*scale)), max(1, round(source.height*scale)))
-            whole = scale >= 1 and scale == int(scale)
-            source = source.resize(size, Image.NEAREST if whole else Image.LANCZOS)
-            canvas = Image.new('RGBA', (width, height), (0, 0, 0, 0))
-            canvas.paste(source, ((width-size[0])//2, (height-size[1])//2))
-            source = canvas
-        self.remember()
-        self.picture = source
+        sw, sh = p['source'].size
+        scale = min(width/sw, height/sh)
+        p['w'], p['h'] = sw*scale, sh*scale
+        p['x'], p['y'] = (width-p['w'])/2, (height-p['h'])/2
         self.redraw()
+
+    def actual_placement(self):
+        p = self.placing
+        if not p:
+            return
+        cx, cy = p['x']+p['w']/2, p['y']+p['h']/2
+        p['w'], p['h'] = p['source'].size
+        p['x'], p['y'] = cx-p['w']/2, cy-p['h']/2
+        self.redraw()
+
+    def scale_placement(self, factor):
+        p = self.placing
+        if not p:
+            return
+        cx, cy = p['x']+p['w']/2, p['y']+p['h']/2
+        p['w'], p['h'] = max(1.0, p['w']*factor), max(1.0, p['h']*factor)
+        p['x'], p['y'] = cx-p['w']/2, cy-p['h']/2
+        self.redraw()
+
+    def wheel(self, event):
+        if self.placing:
+            self.scale_placement(1.1 if event.delta > 0 else 1/1.1)
+
+    def nudge(self, dx, dy):
+        if self.placing:
+            self.placing['x'] += dx
+            self.placing['y'] += dy
+            self.redraw()
+
+    def release(self, _event):
+        self.last = None
+        self.grab = None
+
+    def composed(self):
+        """The icon with the picture being placed, as Apply would make it."""
+        if not self.placing:
+            return self.picture
+        p = self.placing
+        size = (max(1, round(p['w'])), max(1, round(p['h'])))
+        layer = p['source'].resize(size, Image.LANCZOS if self.smooth.get() else Image.NEAREST)
+        result = self.picture.copy() if self.over.get() else Image.new('RGBA', self.picture.size, (0, 0, 0, 0))
+        top = Image.new('RGBA', result.size, (0, 0, 0, 0))
+        top.paste(layer, (round(p['x']), round(p['y'])))
+        result.alpha_composite(top)
+        return result
+
+    def apply_placement(self):
+        if not self.placing:
+            return
+        picture = self.composed()
+        self.remember()
+        self.picture = picture
+        self.cancel_placement()
+
+    def cancel_placement(self):
+        if not self.placing:
+            return
+        self.placing = self.grab = None
+        for button in self.placement_buttons:
+            button['state'] = 'disabled'
+        self.placement_info['text'] = ''
+        self.redraw()
+
+    def redraw_if_placing(self):
+        if self.placing:
+            self.redraw()
 
     def undo_step(self):
         if self.undo:
@@ -393,7 +536,7 @@ class Studio:
         width, height = self.picture.size
         z = self.zoom
         view = checkerboard(width*z, height*z, max(4, z//2))
-        view.alpha_composite(self.picture.resize((width*z, height*z), Image.NEAREST))
+        view.alpha_composite(self.composed().resize((width*z, height*z), Image.NEAREST))
         if z >= 6:
             draw = ImageDraw.Draw(view)
             for x in range(0, width*z+1, z):
@@ -403,6 +546,13 @@ class Studio:
         self.editor_photo = ImageTk.PhotoImage(view)
         self.canvas.delete('all')
         self.canvas.create_image(0, 0, anchor='nw', image=self.editor_photo)
+        if self.placing:
+            p = self.placing
+            x0, y0, x1, y1 = p['x']*z, p['y']*z, (p['x']+p['w'])*z, (p['y']+p['h'])*z
+            self.canvas.create_rectangle(x0, y0, x1, y1, outline='#ff3070', dash=(4, 3), width=2)
+            self.canvas.create_rectangle(x1-6, y1-6, x1+6, y1+6, outline='#ff3070', fill='#ffffff', width=2)
+            self.placement_info['text'] = (f'{round(p["w"])}×{round(p["h"])} px\nв точке {round(p["x"])}, {round(p["y"])}'
+                                           f'\nиз {p["source"].width}×{p["source"].height}')
         if self.size_job:
             self.root.after_cancel(self.size_job)
         self.size_job = self.root.after(200, self.update_preview)
@@ -415,7 +565,7 @@ class Studio:
     def update_preview(self):
         self.size_job = None
         original = self.original(self.current)
-        new, size = self.phone_look(self.picture)
+        new, size = self.phone_look(self.composed())
         old = self.current['size']
         self.preview.delete('all')
         self.preview_photos = []
