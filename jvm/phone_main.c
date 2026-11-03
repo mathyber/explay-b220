@@ -13,7 +13,7 @@ typedef uint32_t u32;
 
 #define SLICE 20000          /* bytecodes per timer tick */
 #define TICK_MS 20
-#define META_BYTES (384*1024)
+#define META_BYTES (512*1024)
 #define RESERVE (64*1024)    /* App Heap left to the firmware */
 #define LINES 9
 #define COLUMNS 28

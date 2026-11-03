@@ -603,4 +603,5 @@ int jvm_start_main(Jvm *vm, const char *class_name) {
 const char *jvm_error(Jvm *vm) { return vm->error; }
 uint32_t jvm_heap_used(Jvm *vm) { return vm->used; }
 uint32_t jvm_gc_count(Jvm *vm) { return vm->gc_count; }
+uint32_t jvm_meta_used(Jvm *vm) { return (uint32_t)(vm->meta_top-vm->meta); }
 uint32_t jvm_uncaught(Jvm *vm) { return vm->uncaught; }

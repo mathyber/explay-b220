@@ -151,10 +151,34 @@ class JvmTests(unittest.TestCase):
         self.assertEqual(exited.returncode, 0, exited.stderr)
         self.assertIn('destroyApp', exited.stdout)
 
+    def test_record_stores_players_and_nokia_graphics(self):
+        classes = Path(self.folder.name)/'platform-classes'
+        javac([ROOT/'jvm/midlets/PlatformTest.java'], classes)
+        ours = subprocess.run([str(HOST), '-cp', f'{LIBRARY};{classes}', 'PlatformTest'],
+                              capture_output=True, text=True, encoding='utf-8', timeout=120)
+        self.assertEqual(ours.returncode, 0, ours.stderr)
+        lines = ours.stdout.splitlines()
+        self.assertEqual(lines[:12], [
+            'not found: missing', 'ids 1 2 records 2 next 4', 'first 5 second 1,2', 'deleted 3', 'sorted 2 1',
+            'reopened 2 stores 1', 'after delete null',
+            'state 100', 'volume 100', 'started true', 'stopped 300 audio/midi', 'closed 0'])
+        # Nokia flips and counter-clockwise rotations against PIL on the same 3x2 colour indexes.
+        from PIL import Image
+        source = Image.new('L', (3, 2))
+        source.putdata(range(6))
+        expected = {0: source, 0x2000: source.transpose(Image.FLIP_LEFT_RIGHT),
+                    0x4000: source.transpose(Image.FLIP_TOP_BOTTOM), 0x6000: source.transpose(Image.ROTATE_180),
+                    90: source.transpose(Image.ROTATE_90), 180: source.transpose(Image.ROTATE_180),
+                    270: source.transpose(Image.ROTATE_270)}
+        for line in lines[12:]:
+            name, *pixels = line.split()
+            self.assertEqual([int(v) for v in pixels], list(expected[int(name[1:])].getdata()), line)
+        self.assertEqual(len(lines), 12+len(expected))
+
     def test_small_heap_collects_and_survivors_stay_valid(self):
         ours = self.run_ours('GcStress', 160)
         self.assertEqual(ours.returncode, 0, ours.stderr)
-        collections = int(ours.stderr.split('collections')[1])
+        collections = int(ours.stderr.split('collections ')[1].split(',')[0])
         self.assertGreater(collections, 5)
 
     def test_uncaught_exception_reports_and_fails(self):

@@ -1,8 +1,10 @@
 """Build the B22 JVM for the phone and put it on an SD card image.
 
-Run as python -m tools.build_java_phone [--app apps/java/Hello.java] [--card IMG].
+Run as python -m tools.build_java_phone [--app apps/java/Hello.java | --jar game.jar]
+[--card IMG].
 Produces analysis/jvm/phone/: JAVA.B22 (the VM as a B22N program), JAVALIB.JAR
-(class library) and APP.JAR (the application, Main-Class in its manifest).
+(class library) and APP.JAR (the application: compiled from --app, or a ready
+MIDlet JAR given with --jar).
 Without --card the files go to the card of the current content-removal PS.
 """
 import argparse
@@ -79,6 +81,7 @@ def main():
     parser.add_argument('--app', type=Path, default=ROOT/'apps/java/Hello.java')
     parser.add_argument('--main', help='Main class (default: the source file name)')
     parser.add_argument('--midlet', action='store_true', help='Package the class as MIDlet-1')
+    parser.add_argument('--jar', type=Path, help='Install a ready application JAR instead of --app')
     parser.add_argument('--card', type=Path)
     args = parser.parse_args()
     try:
@@ -87,7 +90,7 @@ def main():
         vm = build_vm()
         library = DIRECTORY/'JAVALIB.JAR'
         zip_directory(LIBRARY, library)
-        app = build_app([args.app], args.main or args.app.stem, args.midlet)
+        app = args.jar.read_bytes() if args.jar else build_app([args.app], args.main or args.app.stem, args.midlet)
         (DIRECTORY/'JAVA.B22').write_bytes(vm)
         (DIRECTORY/'APP.JAR').write_bytes(app)
         card = args.card or default_card()

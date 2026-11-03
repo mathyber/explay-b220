@@ -71,7 +71,7 @@ typedef struct Key { uint32_t at; int code; int released; } Key;
 
 int main(int argc, char **argv) {
     Host h = {0};
-    uint32_t heap_kb = 1024, meta_kb = 384, run_ms = 0;
+    uint32_t heap_kb = 1024, meta_kb = 512, run_ms = 0;
     const char *main_class = 0, *shot = 0;
     Key keys[64];
     int key_count = 0;
@@ -135,6 +135,6 @@ int main(int argc, char **argv) {
     }
     if (shot && !save_frame(shot)) { fprintf(stderr, "cannot write %s\n", shot); return 73; }
     if (getenv("B22JVM_STATS"))
-        fprintf(stderr, "heap used %u, collections %u\n", jvm_heap_used(vm), jvm_gc_count(vm));
+        fprintf(stderr, "heap used %u, collections %u, metadata used %u\n", jvm_heap_used(vm), jvm_gc_count(vm), jvm_meta_used(vm));
     return jvm_uncaught(vm) ? 1 : 0;
 }

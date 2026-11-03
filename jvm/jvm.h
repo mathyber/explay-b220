@@ -57,6 +57,7 @@ const char *jvm_error(Jvm *vm);
 /* Diagnostics. */
 uint32_t jvm_heap_used(Jvm *vm);
 uint32_t jvm_gc_count(Jvm *vm);
+uint32_t jvm_meta_used(Jvm *vm);
 /* Threads that ended with an uncaught exception. */
 uint32_t jvm_uncaught(Jvm *vm);
 /* Queue a MIDP event (type, value such as a key code); returns 0 if the queue is full. */
