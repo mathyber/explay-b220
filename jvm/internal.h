@@ -138,8 +138,9 @@ typedef struct Monitor {
 #define MAX_MONITORS 64
 #define MAX_TEMP_ROOTS 32
 #define MAX_INTERNED 1024
-#define THREAD_SLOTS 8192
+#define THREAD_SLOTS 4096  /* 16 KB of Java stack per thread */
 #define THREAD_FRAMES 256
+#define MAX_EVENTS 64
 
 struct Jvm {
     JvmHost host;
@@ -159,6 +160,12 @@ struct Jvm {
     u32 interned_count;
     int status;
     char error[96];
+    /* MIDP event queue and the thread sleeping in Events.poll. */
+    i32 events[MAX_EVENTS][2];
+    u32 event_head, event_tail;
+    Thread *event_waiter;
+    Class *image_class;
+    u32 image_pixels, image_alpha, image_width, image_height;
     /* Frequently used classes and fields. */
     Class *object_class, *string_class, *class_class, *thread_class, *char_array;
     Class *primitive_arrays[12];
@@ -208,6 +215,9 @@ Thread *new_thread(Jvm *vm, Object *object);
 Monitor *monitor_for(Jvm *vm, Object *o, int create);
 int monitor_enter(Thread *t, Object *o);
 int monitor_exit(Thread *t, Object *o);
+
+/* midp.c */
+Native midp_native_for(Utf8 class_name, Utf8 name, Utf8 desc);
 
 /* native.c */
 Native native_for(Jvm *vm, Class *c, Utf8 name, Utf8 desc);

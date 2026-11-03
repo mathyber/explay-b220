@@ -36,12 +36,19 @@ def zip_directory(directory, path, manifest=None):
                 archive.write(item, item.relative_to(directory).as_posix())
 
 
-def build_app(sources, main):
+def build_app(sources, main, midlet=False):
+    """Main-Class program, or a MIDlet (MIDlet-1 in the manifest)."""
     with tempfile.TemporaryDirectory() as folder:
         classes = Path(folder)/'classes'
         javac(sources, classes)
         path = Path(folder)/'APP.JAR'
-        zip_directory(classes, path, f'Manifest-Version: 1.0\r\nMain-Class: {main}\r\n')
+        if midlet:
+            manifest = (f'Manifest-Version: 1.0\r\nMIDlet-1: {main}, , {main}\r\nMIDlet-Name: {main}\r\n'
+                        'MIDlet-Vendor: B22\r\nMIDlet-Version: 1.0\r\nMicroEdition-Profile: MIDP-2.0\r\n'
+                        'MicroEdition-Configuration: CLDC-1.1\r\n')
+        else:
+            manifest = f'Manifest-Version: 1.0\r\nMain-Class: {main}\r\n'
+        zip_directory(classes, path, manifest)
         return path.read_bytes()
 
 
@@ -71,6 +78,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--app', type=Path, default=ROOT/'apps/java/Hello.java')
     parser.add_argument('--main', help='Main class (default: the source file name)')
+    parser.add_argument('--midlet', action='store_true', help='Package the class as MIDlet-1')
     parser.add_argument('--card', type=Path)
     args = parser.parse_args()
     try:
@@ -79,7 +87,7 @@ def main():
         vm = build_vm()
         library = DIRECTORY/'JAVALIB.JAR'
         zip_directory(LIBRARY, library)
-        app = build_app([args.app], args.main or args.app.stem)
+        app = build_app([args.app], args.main or args.app.stem, args.midlet)
         (DIRECTORY/'JAVA.B22').write_bytes(vm)
         (DIRECTORY/'APP.JAR').write_bytes(app)
         card = args.card or default_card()

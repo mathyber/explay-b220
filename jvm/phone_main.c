@@ -1,8 +1,10 @@
 /* JAVA.B22: the B22 JVM as a native SD application.
 
 Classes come from E:\JAVALIB.JAR (the class library) and E:\APP.JAR (the
-application, Main-Class from its manifest). The VM runs a bounded slice on
-every window timer tick; System.out is shown as a console. */
+application). A manifest with MIDlet-1 starts b22.Launcher, which runs the
+MIDlet and owns the screen; otherwise Main-Class runs with System.out shown as
+a console. The VM runs a bounded slice on every window timer tick; phone keys
+are posted to the MIDP event queue. */
 #include "b22n.h"
 #include "jvm.h"
 #include "jar.h"
@@ -11,7 +13,7 @@ typedef uint32_t u32;
 
 #define SLICE 20000          /* bytecodes per timer tick */
 #define TICK_MS 20
-#define META_BYTES (256*1024)
+#define META_BYTES (384*1024)
 #define RESERVE (64*1024)    /* App Heap left to the firmware */
 #define LINES 9
 #define COLUMNS 28
@@ -21,10 +23,16 @@ static Jvm *vm;
 static void *block;
 static Jar library, application;
 static u32 library_file, application_file;
-static int finished;
+static int finished, midp;
 static char console[LINES][COLUMNS+1];
 static u32 row, column;
 static int dirty;
+
+static int is_launcher(const char *name) {
+    const char *launcher = "b22/Launcher";
+    while (*name && *name == *launcher) { name++; launcher++; }
+    return *name == *launcher;
+}
 
 /* ---------- console ---------- */
 
@@ -93,30 +101,35 @@ static void host_write(void *context, int stream, const char *bytes, uint32_t le
 }
 
 static uint32_t host_ms(void *context) { (void)context; return api->ms(); }
+static uint16_t *host_screen(void *context) { (void)context; return api->screen(); }
+static void host_flush(void *context, int x, int y, int w, int h) { (void)context; api->flush((u32)x, (u32)y, (u32)w, (u32)h); }
 
-/* Main-Class from the manifest, as "pkg/Name". */
-static int main_class(char *name, u32 capacity) {
-    u32 size = 0;
-    uint8_t *manifest = jar_read(&application, "META-INF/MANIFEST.MF", &size);
-    if (!manifest) return 0;
-    static const char key[] = "Main-Class:";
-    int found = 0;
-    for (u32 i = 0; i+sizeof(key)-1 <= size && !found; i++) {
-        if ((i && manifest[i-1] != '\n') ) continue;
-        u32 k = 0;
-        while (key[k] && manifest[i+k] == (uint8_t)key[k]) k++;
-        if (key[k]) continue;
-        u32 p = i+k, n = 0;
-        while (p < size && manifest[p] == ' ') p++;
-        while (p < size && manifest[p] != '\r' && manifest[p] != '\n' && n+1 < capacity) {
-            name[n++] = manifest[p] == '.' ? '/' : (char)manifest[p];
-            p++;
-        }
-        name[n] = 0;
-        found = n > 0;
+/* Phone key code to a MIDP key code (0 when unmapped). */
+static int midp_key(u32 code) {
+    switch (code) {
+    case B22N_UP: return JVM_KEY_UP;
+    case B22N_DOWN: return JVM_KEY_DOWN;
+    case B22N_LEFT: return JVM_KEY_LEFT;
+    case B22N_RIGHT: return JVM_KEY_RIGHT;
+    case B22N_OK: return JVM_KEY_FIRE;
+    case B22N_SOFT_LEFT: return JVM_KEY_SOFT_LEFT;
+    case B22N_SOFT_RIGHT: return JVM_KEY_SOFT_RIGHT;
+    case B22N_STAR: return '*';
+    case B22N_HASH: return '#';
+    case B22N_0: return '0';
+    default: return code >= B22N_1 && code <= B22N_9 ? (int)('1'+code-B22N_1) : 0;
     }
-    api->free(manifest);
-    return found;
+}
+
+static void key(u32 message) {
+    int code = midp_key(B22N_CODE(message)), type = 0;
+    switch (B22N_KIND(message)) {
+    case B22N_PRESS: type = JVM_KEY_PRESSED; break;
+    case B22N_RELEASE: case B22N_LONG_RELEASE: type = JVM_KEY_RELEASED; break;
+    case B22N_REPEAT: type = JVM_KEY_REPEATED; break;
+    default: break;
+    }
+    if (code && type) jvm_post_event(vm, type, code);
 }
 
 static void shutdown(void) {
@@ -128,14 +141,17 @@ static void shutdown(void) {
 }
 
 static void start(void) {
-    static const JvmHost host = {host_read, host_release, host_write, host_ms, 0};
+    static const JvmHost host = {host_read, host_release, host_write, host_ms, 0, host_screen, host_flush};
     row = column = 0;
     for (u32 i = 0; i < LINES; i++) console[i][0] = 0;
     finished = 0;
+    midp = 0;
     if (!open_archive(&library, &library_file, "E:\\JAVALIB.JAR")) { say("No E:\\JAVALIB.JAR\n"); finished = 1; return; }
     if (!open_archive(&application, &application_file, "E:\\APP.JAR")) { say("No E:\\APP.JAR\n"); finished = 1; return; }
     char name[128];
-    if (!main_class(name, sizeof(name))) { say("No Main-Class\n"); finished = 1; return; }
+    if (!jvm_main_class(&host, name, sizeof(name))) { say("No MIDlet-1 or Main-Class\n"); finished = 1; return; }
+    midp = is_launcher(name);
+    if (midp) say("Loading MIDlet...\n");
     u32 available = api->heap_free();
     if (available < META_BYTES+RESERVE+128*1024) { say("Not enough memory\n"); finished = 1; return; }
     u32 bytes = available-RESERVE;
@@ -149,7 +165,10 @@ static void start(void) {
 static void tick(void) {
     if (!vm || finished) return;
     int status = jvm_run(vm, SLICE);
-    if (status == JVM_DONE) { say("[finished]\n"); finished = 1; api->timer(0, 0); }
+    /* An uncaught exception or VM error brings the console back over the MIDlet. */
+    if (midp && (status == JVM_ERROR || jvm_uncaught(vm))) { midp = 0; dirty = 1; }
+    if (status == JVM_DONE && midp) { finished = 1; api->timer(0, 0); api->exit(); }
+    else if (status == JVM_DONE) { say("[finished]\n"); finished = 1; api->timer(0, 0); }
     else if (status == JVM_ERROR) { say("VM: "); say(jvm_error(vm)); put('\n'); finished = 1; api->timer(0, 0); }
 }
 
@@ -161,7 +180,10 @@ u32 b22n_main(const B22Api *program_api, u32 message, u32 parameter) {
     if (message == B22N_CLOSE) { shutdown(); return 1; }
     if (message == B22N_OPEN) { start(); draw(); return 1; }
     if (message == B22N_TIMER) tick();
+    else if (B22N_IS_KEY(message) && vm && !finished) key(message);
     else if (message == B22N_KEY_OK && finished) { api->exit(); return 1; }
+    else if (message == B22N_PAINT && midp && vm && !finished) jvm_post_event(vm, JVM_REPAINT, 1);
+    if (midp && !finished) return 1;  /* the MIDlet owns the screen */
     if (dirty || message == B22N_PAINT) draw();
     return 1;
 }

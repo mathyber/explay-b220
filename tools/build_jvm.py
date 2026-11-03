@@ -17,7 +17,7 @@ SOURCES = ROOT/'jvm'
 JDK = ROOT/'analysis/toolchains/jdk-25.0.5+8/bin'
 LIBRARY = DIRECTORY/'lib'
 HOST = DIRECTORY/'b22jvm.exe'
-VM_FILES = ('class.c', 'heap.c', 'interp.c', 'native.c', 'jar.c')
+VM_FILES = ('class.c', 'heap.c', 'interp.c', 'native.c', 'jar.c', 'midp.c')
 
 
 def run(command, **options):
@@ -43,6 +43,8 @@ def build_library():
     LIBRARY.mkdir(parents=True)
     sources = sorted((SOURCES/'lib').rglob('*.java'))
     javac(sources, LIBRARY, classpath=LIBRARY)
+    from .build_font import build_fonts
+    build_fonts(LIBRARY)
     return len(sources)
 
 

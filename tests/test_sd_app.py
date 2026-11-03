@@ -164,6 +164,7 @@ class NativeVmTests(unittest.TestCase):
             uc.hook_add(UC_HOOK_CODE,stub,begin=pc,end=pc)
         class Guest:pass
         guest=Guest();guest.uc=uc
+        self.last_uc=uc
         def event(msg,entrypoint=None,param=0):
             uc.reg_write(UC_ARM_REG_CPSR,0x2f3)
             uc.reg_write(UC_ARM_REG_SP,0x4000e000)
@@ -262,6 +263,36 @@ class NativeVmTests(unittest.TestCase):
         event(0xfa1b);event(0xf022)  # OK after the end exits; closing frees everything
         self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))
         self.assertEqual(calls['closed'],len([o for o in calls['opens'] if o[0]!='E:\\MISSING']))
+
+    @unittest.skipUnless(JAVA_TOOLS,'Local JDK required')
+    def test_java_vm_runs_a_midlet_with_keys(self):
+        from tools.build_java_phone import build_app,build_vm,zip_directory
+        from tools.build_jvm import LIBRARY,build_library
+        build_library()
+        with TemporaryDirectory() as folder:
+            library=Path(folder)/'JAVALIB.JAR'
+            zip_directory(LIBRARY,library)
+            files={'E:\\APPS.LST':b'JAVA.B22\r\n','E:\\JAVA.B22':build_vm(),
+                   'E:\\JAVALIB.JAR':library.read_bytes(),
+                   'E:\\APP.JAR':build_app([ROOT/'apps/java/Bounce.java'],'Bounce',True)}
+        event,calls=self.fixture(b'',files=files,budget=2000000000)
+        event(0xf021);event(0xfa1b)
+        self.assertIn('Loading MIDlet...',calls['texts'])
+        for _ in range(120):
+            event(0xf020,param=0x40000100)
+            if len(calls['flushes'])>=3:break
+        self.assertGreaterEqual(len(calls['flushes']),3)
+        # Frame buffer: navy background and white title glyphs (GameCanvas, flushGraphics).
+        frame=struct.unpack('>%dH'%(176*220),bytes(self.last_uc.mem_read(0x04280200,176*220*2)))
+        self.assertEqual(frame[100*176+5],0x10c7)
+        self.assertGreater(sum(1 for p in frame[:176*16] if p==0xffff),30)
+        before=len(calls['flushes'])
+        event(0xfa04);event(0xfb04)  # right press and release go to the MIDlet
+        for _ in range(10):event(0xf020,param=0x40000100)
+        self.assertGreater(len(calls['flushes']),before)
+        event(0xfc17)  # long right soft key: back to the list, B22N_CLOSE frees the VM
+        event(0xf022)
+        self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))
 
     def test_invalid_native_programs_are_rejected(self):
         program=compile_native(ROOT/'apps/card_native.c')

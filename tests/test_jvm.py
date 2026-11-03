@@ -89,6 +89,68 @@ class JvmTests(unittest.TestCase):
         self.assertEqual(ours.returncode, 0, ours.stderr)
         self.assertEqual(ours.stdout, expected.stdout)
 
+    def midlet_jar(self, path):
+        """DrawTest with a PNG sprite: opaque red, opaque blue and transparent quadrants (RGBA)."""
+        import zipfile
+        from PIL import Image
+        classes = Path(self.folder.name)/'midlet-classes'
+        javac([ROOT/'jvm/midlets/DrawTest.java'], classes)
+        sprite = Image.new('RGBA', (20, 20), (0, 0, 0, 0))
+        for x in range(20):
+            for y in range(20):
+                if x < 10 and y < 10: sprite.putpixel((x, y), (255, 0, 0, 255))
+                elif x >= 10 and y < 10: sprite.putpixel((x, y), (0, 0, 255, 255))
+        import io
+        png = io.BytesIO()
+        sprite.save(png, 'PNG')
+        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
+            z.writestr('META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\r\nMIDlet-1: Draw Test, /icon.png, DrawTest\r\n'
+                       'MIDlet-Name: Draw Test\r\nMIDlet-Vendor: B22\r\nMIDlet-Version: 1.0\r\n'
+                       'MicroEdition-Profile: MIDP-2.0\r\nMicroEdition-Configuration: CLDC-1.1\r\n')
+            for item in sorted(classes.rglob('*.class')):
+                z.write(item, item.relative_to(classes).as_posix())
+            z.writestr('sprite.png', png.getvalue())
+
+    def run_midlet(self, keys, run_ms):
+        root = Path(self.folder.name)
+        jar, shot = root/'midlet.jar', root/f'shot-{len(keys)}.ppm'
+        if not jar.exists():
+            self.midlet_jar(jar)
+        command = [str(HOST), '-cp', str(LIBRARY), '-jar', str(jar), '-run', str(run_ms), '-shot', str(shot)]
+        if keys:
+            command[1:1] = ['-keys', ','.join(f'{at}:{code}' for at, code in keys)]
+        result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', timeout=120)
+        from PIL import Image
+        return result, Image.open(shot).convert('RGB')
+
+    def test_midlet_draws_and_handles_keys(self):
+        result, image = self.run_midlet([], 1500)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('startApp Draw Test', result.stdout)
+        px = image.getpixel
+        self.assertEqual(px((5, 5)), (0, 0, 128))          # background
+        self.assertEqual(px((20, 20)), (248, 0, 0))        # fillRect (RGB565)
+        self.assertEqual(px((90, 60)), (248, 252, 248))    # drawLine
+        self.assertEqual(px((120, 20)), (248, 252, 0))     # fillTriangle
+        text = [px((x, y)) for x in range(20, 156) for y in range(70, 90)]
+        self.assertGreater(text.count((248, 252, 248)), 40)  # "Привет, B220!" glyphs
+        self.assertEqual(px((12, 102)), (248, 0, 0))       # PNG opaque red
+        self.assertEqual(px((22, 102)), (0, 0, 248))       # PNG opaque blue
+        self.assertEqual(px((12, 112)), (0, 0, 128))       # PNG transparent -> background
+        # 8x4 arrow rotated 90 degrees clockwise: 4 wide, 8 tall, green end at the top.
+        self.assertEqual(px((61, 100)), (0, 252, 0))
+        self.assertEqual(px((61, 107)), (248, 0, 0))
+        r, g, b = px((105, 105))                           # 50% white over navy
+        self.assertTrue(120 <= r <= 136 and 120 <= g <= 136 and 184 <= b <= 200, (r, g, b))
+        self.assertEqual(px((135, 105)), (0, 252, 248))    # clipped translated fill
+        self.assertEqual(px((145, 105)), (0, 0, 128))      # outside the clip
+        self.assertEqual(px((2, 210)), (32, 32, 32))       # command bar
+        _, pressed = self.run_midlet([(700, -5)], 1500)
+        self.assertEqual(pressed.getpixel((5, 5)), (0, 128, 0))
+        exited, _ = self.run_midlet([(700, -7)], 3000)
+        self.assertEqual(exited.returncode, 0, exited.stderr)
+        self.assertIn('destroyApp', exited.stdout)
+
     def test_small_heap_collects_and_survivors_stay_valid(self):
         ours = self.run_ours('GcStress', 160)
         self.assertEqual(ours.returncode, 0, ours.stderr)
