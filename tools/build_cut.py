@@ -248,6 +248,70 @@ def cut_links(image, output):
     return changes, []
 
 
+# Texts of the main resource module: header +0x24 is the offset of a block that
+# starts with two (table offset, u32) language entries; each table holds one u32
+# offset per text, relative to the module. A text is u16 0x8000, u16 byte length,
+# UTF-16BE characters, zero padding to 4 bytes. Language 0 is English, 1 Russian.
+MAIN_MODULE = 0x2884
+GAMES_TEXT = 0x40000027
+# The menu dispatcher (0x25e7f8) sends menu id 0xc0002, compared with the
+# literal at 0x25eab0, straight to the SD Apps entry (0x25ea00 -> 0x60eee9);
+# Games' own id 0x37 would open the Games list first.
+SD_APPS_MENU_ID, SD_APPS_ID_LITERAL = 0xc0002, 0x25eab0
+SD_APPS_LABEL = 'SD Apps'
+# Social networks' grid icons (images main/342 and main/351) become SD Apps'.
+SD_APPS_ICONS = (0x40000157, 0x40000160)
+
+
+def text_slot(image, text, language):
+    block, count = struct.unpack_from('>II', image, MAIN_MODULE+0x24)
+    table = struct.unpack_from('>I', image, MAIN_MODULE+block+language*8)[0]
+    number = (text & 0xffff)-1
+    if text >> 16 != 0x4000 or not 0 <= number < count-1:
+        raise ValueError(f'Text {text:#x} is not in the main module')
+    start, end = struct.unpack_from('>II', image, MAIN_MODULE+table+number*4)
+    if struct.unpack_from('>H', image, MAIN_MODULE+start)[0] != 0x8000:
+        raise ValueError(f'Unexpected text record for {text:#x}')
+    return MAIN_MODULE+start, end-start
+
+
+def rewrite_text(image, output, text, value):
+    changes = []
+    for language in (0, 1):
+        address, size = text_slot(image, text, language)
+        data = struct.pack('>HH', 0x8000, len(value)*2)+value.encode('utf-16-be')
+        if len(data) > size:
+            raise ValueError(f'"{value}" does not fit text {text:#x}')
+        output[address:address+size] = data+bytes(size-len(data))
+        changes.append(dict(start=hex(address), size=size, kind=f'text {text:#x} language {language}: "{value}"'))
+    return changes
+
+
+def sd_apps_in_main_menu(output):
+    """Games leaves Multimedia; SD Apps becomes the ninth main menu item: a menu
+    id that opens the SD Apps list, the former Social networks text and grid icons."""
+    current = bytes(output)
+    if struct.unpack_from('>I', current, SD_APPS_ID_LITERAL)[0] != SD_APPS_MENU_ID:
+        raise ValueError('Unexpected menu dispatcher')
+    changes, _, _ = remove_item(current, output, (MULTIMEDIA,), GAMES_TEXT, 'Multimedia without Games')
+    items, count = group(current, MAIN_MENU[0])
+    if count != 8 or any(current[items+count*ITEM_SIZE:items+(count+1)*ITEM_SIZE]):
+        raise ValueError('Main menu: expected 8 items and a free ninth slot')
+    item = bytearray(current[items:items+ITEM_SIZE])
+    struct.pack_into('>I', item, 0, SD_APPS_MENU_ID)
+    struct.pack_into('>I', item, 0x14, SOCIAL_TEXT)
+    slot = items+count*ITEM_SIZE
+    output[slot:slot+ITEM_SIZE] = item
+    changes.append(dict(start=hex(slot), size=ITEM_SIZE, kind=f'main menu item 9: SD Apps (menu id {SD_APPS_MENU_ID:#x})'))
+    for address in MAIN_MENU:
+        struct.pack_into('>H', output, address+GROUP_COUNT, count+1)
+        changes.append(dict(start=hex(address+GROUP_COUNT), size=2, kind='main menu: 8 -> 9 items'))
+    for table, icon in zip(MAIN_ICONS, SD_APPS_ICONS):
+        struct.pack_into('>I', output, table+count*4, icon)
+        changes.append(dict(start=hex(table+count*4), size=4, kind=f'main menu icon 9: {icon:#x}'))
+    return changes+rewrite_text(current, output, SOCIAL_TEXT, SD_APPS_LABEL)
+
+
 ICONS = ROOT/'icons'
 
 
@@ -316,6 +380,7 @@ def build(image, icons=ICONS):
     output = bytearray(image)
     changes, free = cut_wallpapers(image, output)
     more, extra = cut_links(image, output)
+    more += sd_apps_in_main_menu(output)
     changes += more; free += extra
     more, extra = cut_boot_animation(image, output)
     changes += more; free += extra
@@ -329,7 +394,7 @@ def build(image, icons=ICONS):
         allowed.update(range(start, start+change['size']))
     if len(output) != len(image) or any(i not in allowed for i, (a, b) in enumerate(zip(image, output)) if a != b):
         raise ValueError('Changes outside declared regions')
-    steps = ['wallpapers', 'media library', 'social networks', 'power-on animation', 'world time']+(['icons'] if placed else [])
+    steps = ['wallpapers', 'media library', 'social networks', 'SD Apps in the main menu', 'power-on animation', 'world time']+(['icons'] if placed else [])
     return bytes(output), dict(format='b220-cut', version=1, steps=steps, source_sha256=sha(image),
                                output_sha256=sha(output), size=len(output), changes=changes, icons=placed, free_rom=free,
                                free_rom_bytes=sum(f['size'] for f in free),
@@ -337,20 +402,22 @@ def build(image, icons=ICONS):
 
 
 def carry_card(card, previous):
-    """A new firmware gets the previous build's SD card (files, games) instead of an empty one."""
+    """A new firmware gets the previous build's SD card (files, games) instead of an
+    empty one. Returns 0 when that card is in use: then no card is made yet."""
     if card.exists() or not previous:
-        return
+        return 1
     old = ROOT/'analysis/emulator/experiments'/previous/'sd-card.img'
     if not old.exists():
-        return
+        return 1
     try:
         data = old.read_bytes()
     except OSError:
-        print(f'Previous SD card is in use, the new firmware starts with an empty one: {old}')
-        return
+        print(f'The previous SD card is in use: close the emulator and run this again to carry it over ({old})')
+        return 0
     card.parent.mkdir(parents=True, exist_ok=True)
     card.write_bytes(data)
     print(f'SD card of the previous build copied: {old} -> {card}')
+    return 1
 
 
 def main():
@@ -379,9 +446,9 @@ def main():
         if args.prepare_card:
             from .install_sd_app import install
             card = ROOT/'analysis/emulator/experiments'/sha(output)/'sd-card.img'
-            carry_card(card, manifest.get('previous_output_sha256'))
-            for name in ('card_demo.b22asm', 'card_second.b22asm', 'card_native.c', 'card_screen.c'):
-                install(ROOT/'apps'/name, card, ensure=True)
+            if carry_card(card, manifest.get('previous_output_sha256')):
+                for name in ('card_demo.b22asm', 'card_second.b22asm', 'card_native.c', 'card_screen.c'):
+                    install(ROOT/'apps'/name, card, ensure=True)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     print(json.dumps(dict(image=str(paths[1].resolve()), sha256=sha(output), steps=manifest['steps'],

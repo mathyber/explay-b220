@@ -11,7 +11,7 @@ from tools.build_cut import (BLACK_ID, BLACK_SIZE, BOOT_END, BOOT_HEADER, BOOT_S
                              DOTS_Y, GROUP_COUNT, ITEM_SIZE, MAIN_ICONS, MAIN_MENU,
                              MEDIA_LIBRARY_TEXT, MULTIMEDIA, SD_APPS_ENTRY, SHORTCUT_ACTIONS, SLOTS_END,
                              SOCIAL_SHORTCUT, SOCIAL_TEXT, OTHERS, TOOLS, WALLPAPER_IDS, WORLD_MAP, WORLD_TIME_TEXT,
-                             build)
+                             GAMES_TEXT, SD_APPS_MENU_ID, build, text_slot)
 from tools.build_green_theme import bitmap_resources
 from tools.map_resources import WALLPAPERS, WALLPAPER_KEPT
 
@@ -60,18 +60,26 @@ class CutTests(unittest.TestCase):
             count = struct.unpack_from('>H', self.output, group+GROUP_COUNT)[0]
             return [struct.unpack_from('>I', self.output, items+i*ITEM_SIZE+0x14)[0] for i in range(count)]
         multimedia = texts(MULTIMEDIA)
-        self.assertEqual(len(multimedia), 8)
+        self.assertEqual(len(multimedia), 7)
         self.assertNotIn(MEDIA_LIBRARY_TEXT, multimedia)
+        self.assertNotIn(GAMES_TEXT, multimedia)
         for group in MAIN_MENU:
             main = texts(group)
-            self.assertEqual(len(main), 8)
-            self.assertNotIn(SOCIAL_TEXT, main)
+            self.assertEqual(len(main), 9)
+            # The ninth item is SD Apps: the old Social networks text now says so.
+            self.assertEqual(main.index(SOCIAL_TEXT), 8)
+        items = struct.unpack_from('>I', self.output, MAIN_MENU[0])[0]
+        self.assertEqual(struct.unpack_from('>I', self.output, items+8*ITEM_SIZE)[0], SD_APPS_MENU_ID)
+        for language in (0, 1):
+            address, _ = text_slot(self.output, SOCIAL_TEXT, language)
+            length = struct.unpack_from('>H', self.output, address+2)[0]
+            self.assertEqual(self.output[address+4:address+4+length].decode('utf-16-be'), 'SD Apps')
 
     def test_main_menu_icons_follow_items(self):
         for table in MAIN_ICONS:
             before = struct.unpack_from('>9I', self.source, table)
             after = struct.unpack_from('>9I', self.output, table)
-            self.assertEqual(after, before[:1]+before[2:]+before[-1:])
+            self.assertEqual(after, before[:1]+before[2:]+(before[1],))  # SD Apps takes Social networks' icon
 
     def test_social_shortcut_opens_sd_apps(self):
         address = SHORTCUT_ACTIONS+SOCIAL_SHORTCUT*4
