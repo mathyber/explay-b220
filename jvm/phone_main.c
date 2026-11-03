@@ -309,7 +309,17 @@ __attribute__((used, section(".entry")))
 u32 b22n_main(const B22Api *program_api, u32 message, u32 parameter) {
     (void)parameter;
     api = program_api;
-    if (api->version != B22N_API_VERSION || api->size < sizeof(B22Api)) return 0;
+    if (api->version != B22N_API_VERSION) return 0;
+    /* Older loaders lack file search and UCS-2 calls; text and exit always exist. */
+    if (api->size < sizeof(B22Api)) {
+        if (message == B22N_OPEN || message == B22N_PAINT) {
+            api->fill(0, 0, 176, 176, 0);
+            api->text(50, "JAVA.B22 needs", 0xffff);
+            api->text(72, "a newer firmware", 0xffff);
+            api->text(110, "OK: back", 0x07ff);
+        } else if (message == B22N_KEY_OK) api->exit();
+        return 1;
+    }
     if (message == B22N_CLOSE) { shutdown(); return 1; }
     if (message == B22N_OPEN) { open_list(); return 1; }
     if (choosing) {
