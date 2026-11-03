@@ -111,12 +111,20 @@ Java-машина в RAM ──► API загрузчика и функции п
 * **Нативные методы** возвращают результат или просят интерпретатор либо
   продолжить после поставленного ими Java-кадра (`newInstance` вызывает
   конструктор), либо повторить вызов после `<clinit>` (`Class.forName`).
+* **JAR.** [jar.c](jvm/jar.c): центральный каталог ZIP и свой inflate
+  (RFC 1951: несжатые блоки, фиксированные и динамические коды Хаффмана).
+  Архив читается через функцию «прочитать по смещению», поэтому в памяти
+  держатся только каталог и извлекаемая запись. Ядро машины получает классы
+  и ресурсы одинаково — через `host.read(путь)`; поиск в библиотеке и архиве
+  делает платформа. `Class.getResourceAsStream` (абсолютные и относительные пути).
 * **Без libc.** Своё `memcpy`/`memset`, точный `fmod` (по образцу musl),
   форматирование чисел; float и double на телефоне — программные из compiler-rt.
 * **Библиотека** — свои `java.lang`/`java.io`/`java.util` по API CLDC 1.1:
   строки, обёртки чисел, `Math`, `Thread`, `Class.forName`/`newInstance`,
   `Vector`, `Stack`, `Hashtable`, `Random` (тот же генератор, что в JDK), `Date`,
-  `Timer`/`TimerTask`; плюс `StringBuilder` для склейки строк. Собирается локальным JDK 25:
+  `Timer`/`TimerTask`; `java.io`: `InputStream`, `ByteArrayInput/OutputStream`,
+  `DataInput/OutputStream`, `InputStreamReader`/`OutputStreamWriter` (UTF-8,
+  ISO-8859-1), `Reader`/`Writer`; плюс `StringBuilder` для склейки строк. Собирается локальным JDK 25:
   `javac -source 8 -target 8 -bootclasspath <наша библиотека>`, формат классов 52.
   Принимаются классы версий 45–52, то есть и старые MIDlet.
 
@@ -136,13 +144,19 @@ long/float/double и преобразования, строки, массивы,
 `Threads` проверяет передачу через `wait`/`notify`, `join`, прерывание сна,
 общий счётчик под `synchronized` у трёх потоков, `wait` с таймаутом,
 `Class.forName` с инициализацией, `newInstance`, `Timer`. `Collections` —
-`Vector`, `Stack`, `Hashtable`, `Random(42)`. Ядро машины
+`Vector`, `Stack`, `Hashtable`, `Random(42)`. `Resources` запускается из
+`.jar`, который тест собирает сам: сжатые и несжатые записи, текст UTF-8
+с кириллицей, двоичные данные через `DataInputStream`, файл 200 КБ
+с динамическими кодами Хаффмана, относительный и отсутствующий ресурс.
+
+Программа для Windows: `b22jvm [-heap КБ] [-meta КБ] [-cp каталоги] [-jar архив] Класс`. Ядро машины
 компилируется и под телефон (Thumb big-endian, без libc).
 
 ### Дальше
 
 1. ~~Потоки, `wait`/`notify`, `java.util`, `Class.forName`/`newInstance`~~ — готово.
-2. Чтение `.jar`: ZIP и inflate, `getResourceAsStream`, манифест и JAD.
+2. ~~Чтение `.jar`: ZIP, inflate, `getResourceAsStream`~~ — готово; манифест
+   и JAD разбираются вместе с MIDP.
 3. Перенос в программу B22N: платформа поверх API загрузчика, квант на сообщение
    таймера.
 4. MIDP: `MIDlet`, `Display`, `Canvas`, `Graphics`, `Image` (PNG), `Font` —

@@ -13,6 +13,19 @@ public final class Class {
     public native boolean isArray();
     public native boolean isInterface();
 
+    private static native byte[] readResource(String path);
+
+    public java.io.InputStream getResourceAsStream(String name) {
+        if (name.startsWith("/")) name = name.substring(1);
+        else {
+            String className = getName();
+            int dot = className.lastIndexOf('.');
+            if (dot >= 0) name = className.substring(0, dot + 1).replace('.', '/') + name;
+        }
+        byte[] data = readResource(name);
+        return data == null ? null : new java.io.ByteArrayInputStream(data);
+    }
+
     public String toString() {
         return (isInterface() ? "interface " : "class ") + getName();
     }

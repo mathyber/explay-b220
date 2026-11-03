@@ -13,7 +13,8 @@ from emulator.firmware import ROOT
 from tools.build_jvm import HOST, JDK, LIBRARY, build_host, build_library, javac
 from tools.setup_arm_toolchain import EXECUTABLE as ZIG
 
-TESTS = sorted((ROOT/'jvm/tests').glob('*.java'))
+# Resources needs its JAR and runs in its own test.
+TESTS = sorted(p for p in (ROOT/'jvm/tests').glob('*.java') if p.stem != 'Resources')
 HEAP_KB = {'GcStress': 160}
 
 
@@ -28,7 +29,7 @@ class JvmTests(unittest.TestCase):
         cls.ours, cls.reference = root/'ours', root/'reference'
         javac(TESTS, cls.ours)
         cls.reference.mkdir()
-        subprocess.run([str(JDK/'javac.exe'), '--release', '8', '-nowarn', '-Xlint:-options', '-d', str(cls.reference),
+        subprocess.run([str(JDK/'javac.exe'), '--release', '8', '-nowarn', '-Xlint:-options', '-encoding', 'UTF-8', '-d', str(cls.reference),
                         *map(str, TESTS)], check=True, capture_output=True)
 
     @classmethod
@@ -52,6 +53,41 @@ class JvmTests(unittest.TestCase):
                 ours = self.run_ours(name, HEAP_KB.get(name))
                 self.assertEqual(ours.returncode, 0, ours.stderr)
                 self.assertEqual(ours.stdout, expected.stdout)
+
+    def make_jar(self, classes, path):
+        """Classes deflated, small resources stored and deflated, a large one deflated (dynamic codes)."""
+        import random, struct, zipfile
+        rnd = random.Random(7)
+        words = ['alpha', 'beta', 'gamma', 'delta', 'кот', 'дом', '\n']
+        big = ''.join(rnd.choice(words) + ' ' for _ in range(40000)).encode('utf-8')[:200000]
+        utf = 'Нокиа'.encode('utf-8')
+        data = struct.pack('>ih', 123456, -7) + struct.pack('>H', len(utf)) + utf + struct.pack('>q', -9000000000) + b'\x01\xfe'
+        with zipfile.ZipFile(path, 'w') as z:
+            z.writestr('META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\r\nMain-Class: Resources\r\n', zipfile.ZIP_STORED)
+            for item in sorted(classes.rglob('*.class')):
+                z.write(item, item.relative_to(classes).as_posix(), zipfile.ZIP_DEFLATED)
+            z.writestr('res/hello.txt', 'Привет, B220! Hello from the JAR.\n'.encode('utf-8'), zipfile.ZIP_DEFLATED)
+            z.writestr('local.txt', b'relative resource\n', zipfile.ZIP_STORED)
+            z.writestr('res/data.bin', data, zipfile.ZIP_STORED)
+            z.writestr('res/big.txt', big, zipfile.ZIP_DEFLATED, compresslevel=9)
+
+    def test_resources_from_a_jar_match_the_jdk(self):
+        root = Path(self.folder.name)
+        ours_classes, reference_classes = root/'jar-ours', root/'jar-reference'
+        source = ROOT/'jvm/tests/Resources.java'
+        javac([source], ours_classes)
+        reference_classes.mkdir(exist_ok=True)
+        subprocess.run([str(JDK/'javac.exe'), '--release', '8', '-nowarn', '-Xlint:-options', '-encoding', 'UTF-8',
+                        '-d', str(reference_classes), str(source)], check=True, capture_output=True)
+        self.make_jar(ours_classes, root/'ours.jar')
+        self.make_jar(reference_classes, root/'reference.jar')
+        expected = subprocess.run([str(JDK/'java.exe'), '-Dstdout.encoding=UTF-8', '-cp', str(root/'reference.jar'), 'Resources'],
+                                  capture_output=True, text=True, encoding='utf-8', timeout=120)
+        self.assertEqual(expected.returncode, 0, expected.stderr)
+        ours = subprocess.run([str(HOST), '-cp', str(LIBRARY), '-jar', str(root/'ours.jar'), 'Resources'],
+                              capture_output=True, text=True, encoding='utf-8', timeout=120)
+        self.assertEqual(ours.returncode, 0, ours.stderr)
+        self.assertEqual(ours.stdout, expected.stdout)
 
     def test_small_heap_collects_and_survivors_stay_valid(self):
         ours = self.run_ours('GcStress', 160)

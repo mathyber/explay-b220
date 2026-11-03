@@ -1,12 +1,22 @@
-/* Windows test host: b22jvm [-heap KB] [-meta KB] -cp dir;dir MainClass */
+/* Windows test host: b22jvm [-heap KB] [-meta KB] [-cp dir;dir] [-jar app.jar] MainClass */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <windows.h>
 #include "jvm.h"
+#include "jar.h"
 
-typedef struct Host { char paths[16][260]; int count; } Host;
+typedef struct Host { char paths[16][260]; int count; FILE *archive; Jar jar; int has_jar; } Host;
+
+static uint32_t archive_read(void *context, uint32_t offset, void *buffer, uint32_t length) {
+    Host *h = context;
+    if (fseek(h->archive, (long)offset, SEEK_SET)) return 0;
+    return (uint32_t)fread(buffer, 1, length, h->archive);
+}
+
+static void *archive_alloc(void *context, uint32_t size) { (void)context; return malloc(size); }
+static void archive_release(void *context, void *block) { (void)context; free(block); }
 
 static uint8_t *host_read(void *context, const char *name, uint32_t *size) {
     Host *h = context;
@@ -25,7 +35,7 @@ static uint8_t *host_read(void *context, const char *name, uint32_t *size) {
         *size = (uint32_t)length;
         return data;
     }
-    return 0;
+    return h->has_jar ? jar_read(&h->jar, name, size) : 0;
 }
 
 static void host_release(void *context, uint8_t *buffer) { (void)context; free(buffer); }
@@ -48,6 +58,13 @@ int main(int argc, char **argv) {
             char *list = argv[++i];
             for (char *part = strtok(list, ";"); part && h.count < 16; part = strtok(0, ";"))
                 snprintf(h.paths[h.count++], sizeof(h.paths[0]), "%s", part);
+        } else if (!strcmp(argv[i], "-jar") && i+1 < argc) {
+            h.archive = fopen(argv[++i], "rb");
+            if (!h.archive) { fprintf(stderr, "cannot open %s\n", argv[i]); return 66; }
+            fseek(h.archive, 0, SEEK_END);
+            JarIo io = {archive_read, archive_alloc, archive_release, &h, (uint32_t)ftell(h.archive)};
+            if (!jar_open(&h.jar, &io)) { fprintf(stderr, "not a JAR: %s\n", argv[i]); return 66; }
+            h.has_jar = 1;
         } else if (!strcmp(argv[i], "-heap") && i+1 < argc) heap_kb = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "-meta") && i+1 < argc) meta_kb = (uint32_t)atoi(argv[++i]);
         else main_class = argv[i];

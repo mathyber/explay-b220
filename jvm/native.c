@@ -463,6 +463,24 @@ static int class_new_instance(Thread *t, u32 *args, u32 *result) {
     return invoke_method(t, init, call) ? NATIVE_PUSHED : 1;
 }
 
+static int class_read_resource(Thread *t, u32 *args, u32 *result) {
+    Jvm *vm = thread_vm(t);
+    Object *name = ARG_REF(0);
+    if (!name) { throw_new(t, "java/lang/NullPointerException", 0); return 1; }
+    char path[256];
+    u32 n = string_utf8(vm, name, path, sizeof(path)-1);
+    path[n] = 0;
+    u32 size = 0;
+    u8 *data = vm->host.read(vm->host.context, path, &size);
+    if (!data) { RETURN_REF(0); return 0; }
+    Array *bytes = new_array(vm, primitive_array(vm, 'B'), size);
+    if (bytes) jvm_memcpy(ARRAY_DATA(bytes), data, size);
+    vm->host.release(vm->host.context, data);
+    if (!bytes) { throw_new(t, "java/lang/OutOfMemoryError", 0); return 1; }
+    RETURN_REF(bytes);
+    return 0;
+}
+
 typedef struct NativeEntry { const char *cls, *name, *desc; Native fn; } NativeEntry;
 
 static const NativeEntry natives[] = {
@@ -502,6 +520,7 @@ static const NativeEntry natives[] = {
     {"java/lang/Object", "notifyAll", "()V", object_notify_all},
     {"java/lang/Class", "forName", "(Ljava/lang/String;)Ljava/lang/Class;", class_for_name},
     {"java/lang/Class", "newInstance", "()Ljava/lang/Object;", class_new_instance},
+    {"java/lang/Class", "readResource", "(Ljava/lang/String;)[B", class_read_resource},
 };
 
 Native native_for(Jvm *vm, Class *c, Utf8 name, Utf8 desc) {
