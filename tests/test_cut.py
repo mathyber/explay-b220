@@ -1,5 +1,6 @@
 """Check the content-removal PS built on top of the white-clock image."""
 import io
+from pathlib import Path
 import struct
 import unittest
 
@@ -20,7 +21,7 @@ class CutTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = DEFAULT_SOURCE.read_bytes()
-        cls.output, cls.manifest = build(cls.source)
+        cls.output, cls.manifest = build(cls.source, icons=None)
 
     def test_only_declared_regions_change(self):
         self.assertEqual(len(self.output), len(self.source))
@@ -113,7 +114,50 @@ class CutTests(unittest.TestCase):
         broken = bytearray(self.source)
         broken[0x1c9ade:0x1c9ae0] = b'\x21\x07'
         with self.assertRaises(ValueError):
-            build(bytes(broken))
+            build(bytes(broken), icons=None)
+
+
+@unittest.skipUnless(DEFAULT_SOURCE.exists(), 'Built white-clock PS required')
+class IconTests(unittest.TestCase):
+    def test_icons_replace_images_in_place_or_in_freed_rom(self):
+        from tempfile import TemporaryDirectory
+        from tools.extract_images import catalog, decode
+        source = DEFAULT_SOURCE.read_bytes()
+        entries = {(e['module'], e['index']): e for e in catalog(source)}
+        small, large = entries[('main', 6)], entries[('main', 302)]  # MB battery, ABMP calendar
+        with TemporaryDirectory() as folder:
+            icons = Path(folder)/'main'
+            icons.mkdir()
+            Image.new('RGBA', (small['width'], small['height']), (0, 255, 0, 255)).save(icons/'006.png')
+            # Noise does not compress: heavier than the original, so it must move.
+            noisy = Image.new('RGBA', (large['width'], large['height']))
+            noisy.putdata([((i*37) % 256, (i*91) % 256, (i*53) % 256, 255 if i % 3 else 128)
+                           for i in range(large['width']*large['height'])])
+            noisy.save(icons/'302.png')
+            output, manifest = build(source, icons=Path(folder))
+        self.assertEqual(manifest['steps'][-1], 'icons')
+        placed = {p['icon']: p for p in manifest['icons']}
+        self.assertNotIn('moved_from', placed['main/6'])
+        self.assertEqual(placed['main/302']['moved_from'], large['address'])
+        moved = {(e['module'], e['index']): e for e in catalog(output)}
+        self.assertNotEqual(moved[('main', 302)]['address'], large['address'])
+        self.assertEqual(moved[('main', 6)]['address'], small['address'])
+        self.assertEqual(set(decode(output, moved[('main', 6)]).getdata()), {(0, 255, 0, 255)})
+        self.assertEqual(decode(output, moved[('main', 302)]).getpixel((1, 0))[3], 255)
+        self.assertTrue(all(int(f['start'], 0) % 4 == 0 for f in manifest['free_rom']))
+        declared = set()
+        for change in manifest['changes']:
+            start = int(change['start'], 0)
+            declared.update(range(start, start+change['size']))
+        self.assertTrue(all(i in declared for i, (a, b) in enumerate(zip(source, output)) if a != b))
+
+    def test_wrong_icon_size_is_rejected(self):
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as folder:
+            (Path(folder)/'main').mkdir()
+            Image.new('RGBA', (5, 5)).save(Path(folder)/'main'/'006.png')
+            with self.assertRaisesRegex(ValueError, 'the slot is 14x11'):
+                build(DEFAULT_SOURCE.read_bytes(), icons=Path(folder))
 
 
 if __name__ == '__main__':

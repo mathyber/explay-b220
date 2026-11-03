@@ -9,6 +9,8 @@ Steps 2-3: Media library leaves Multimedia, Social networks leaves the main menu
 The power-on GIF becomes a black screen with dots; World time leaves Tools
 and its world map becomes a small black bitmap.
 Freed regions are listed in the manifest for later code or data.
+Last, icons/<module>/<index>.png (tools.icon_studio) replace firmware images;
+one heavier than the original moves into freed ROM (ICONS_RU.md).
 """
 import argparse
 import hashlib
@@ -246,7 +248,71 @@ def cut_links(image, output):
     return changes, []
 
 
-def build(image):
+ICONS = ROOT/'icons'
+
+
+def take_free(free, size, low):
+    """4-aligned space from the freed regions at or above low (offsets in a module are unsigned)."""
+    for region in sorted(free, key=lambda r: int(r['start'], 16)):
+        start, end = (int(region['start'], 16)+3) & ~3, int(region['end'], 16)
+        if start >= low and end-start >= size:
+            rest = min(end, (start+size+3) & ~3)
+            region['start'] = hex(rest)
+            region['size'] = end-rest
+            return start
+    raise ValueError(f'No free ROM for {size} bytes')
+
+
+def replace_icons(image, output, free, directory=ICONS):
+    """icons/<module>/<index>.png (from tools.icon_studio) replace firmware images of the same size.
+    An image that fits stays in its slot; a larger one moves to freed ROM and the module's offset
+    table and record size are updated."""
+    from .extract_images import catalog
+    from .image_codec import ENCODERS
+    if not directory.exists():
+        return [], []
+    entries = {(e['module'], e['index']): e for e in catalog(image)}
+    modules = {}
+    for start in range(0, len(image)-0x80, 4):
+        if struct.unpack_from('>I', image, start)[0] == 0x60 and struct.unpack_from('>I', image, start+0x60)[0] == 0x68:
+            modules.setdefault(start, None)
+    changes, placed = [], []
+    for path in sorted(directory.glob('*/*.png')):
+        key = (path.parent.name, int(path.stem))
+        entry = entries.get(key)
+        if not entry or entry['type'] not in ENCODERS:
+            raise ValueError(f'{path}: no MB or ABMP image {key[0]}/{key[1]} in the firmware')
+        picture = Image.open(path).convert('RGBA')
+        if picture.size != (entry['width'], entry['height']):
+            raise ValueError(f'{path}: {picture.size[0]}x{picture.size[1]}, the slot is {entry["width"]}x{entry["height"]}')
+        data = ENCODERS[entry['type']](picture)
+        address, size = int(entry['address'], 16), entry['size']
+        name = f'icon {key[0]}/{key[1]}'
+        if len(data) <= size:
+            output[address:address+size] = data+b'\xff'*(size-len(data))
+            changes.append(dict(start=hex(address), size=size, kind=f'{name}: {len(data)} bytes in place of {size}'))
+            placed.append(dict(icon=f'{key[0]}/{key[1]}', bytes=len(data), old_bytes=size, address=hex(address)))
+            continue
+        # The module that holds this image: the closest module header below it.
+        module = max(m for m in modules if m <= address)
+        index = key[1]
+        table = module+struct.unpack_from('>I', image, module+0x64)[0]
+        record = module+0x68+index*12
+        if struct.unpack_from('>I', image, table+index*4)[0] != address-module:
+            raise ValueError(f'{name}: offset table does not point at the image')
+        target = take_free(free, len(data), module)
+        output[target:target+len(data)] = data
+        struct.pack_into('>I', output, table+index*4, target-module)
+        struct.pack_into('>I', output, record+8, len(data))
+        changes += [dict(start=hex(target), size=len(data), kind=f'{name}: {len(data)} bytes moved from {address:#x}'),
+                    dict(start=hex(table+index*4), size=4, kind=f'{name}: offset table entry'),
+                    dict(start=hex(record+8), size=4, kind=f'{name}: record size')]
+        placed.append(dict(icon=f'{key[0]}/{key[1]}', bytes=len(data), old_bytes=size, address=hex(target), moved_from=hex(address)))
+    return changes, placed
+
+
+def build(image, icons=ICONS):
+    """icons: folder of replacement icons (None or a missing folder: none)."""
     output = bytearray(image)
     changes, free = cut_wallpapers(image, output)
     more, extra = cut_links(image, output)
@@ -255,16 +321,36 @@ def build(image):
     changes += more; free += extra
     more, extra = cut_world_time(image, output)
     changes += more; free += extra
+    more, placed = replace_icons(image, output, free, icons) if icons else ([], [])
+    changes += more
     allowed = set()
     for change in changes:
         start = int(change['start'], 0)
         allowed.update(range(start, start+change['size']))
     if len(output) != len(image) or any(i not in allowed for i, (a, b) in enumerate(zip(image, output)) if a != b):
         raise ValueError('Changes outside declared regions')
-    return bytes(output), dict(format='b220-cut', version=1, steps=['wallpapers', 'media library', 'social networks', 'power-on animation', 'world time'], source_sha256=sha(image),
-                               output_sha256=sha(output), size=len(output), changes=changes, free_rom=free,
+    steps = ['wallpapers', 'media library', 'social networks', 'power-on animation', 'world time']+(['icons'] if placed else [])
+    return bytes(output), dict(format='b220-cut', version=1, steps=steps, source_sha256=sha(image),
+                               output_sha256=sha(output), size=len(output), changes=changes, icons=placed, free_rom=free,
                                free_rom_bytes=sum(f['size'] for f in free),
                                changed_bytes=sum(a != b for a, b in zip(image, output)))
+
+
+def carry_card(card, previous):
+    """A new firmware gets the previous build's SD card (files, games) instead of an empty one."""
+    if card.exists() or not previous:
+        return
+    old = ROOT/'analysis/emulator/experiments'/previous/'sd-card.img'
+    if not old.exists():
+        return
+    try:
+        data = old.read_bytes()
+    except OSError:
+        print(f'Previous SD card is in use, the new firmware starts with an empty one: {old}')
+        return
+    card.parent.mkdir(parents=True, exist_ok=True)
+    card.write_bytes(data)
+    print(f'SD card of the previous build copied: {old} -> {card}')
 
 
 def main():
@@ -280,6 +366,11 @@ def main():
         protect_outputs(profile, identity, paths)
         output, manifest = build(image)
         manifest['source'] = str(args.source.resolve())
+        # Remember the build before this one: its SD card moves to the new firmware.
+        old = json.loads(paths[2].read_text(encoding='utf-8')) if paths[2].exists() else {}
+        previous = old.get('output_sha256')
+        manifest['previous_output_sha256'] = (old.get('previous_output_sha256') if previous == manifest['output_sha256']
+                                              else previous)
         args.directory.mkdir(parents=True, exist_ok=True)
         paths[0].write_bytes(image); paths[1].write_bytes(output)
         paths[2].write_text(json.dumps(manifest, indent=2)+'\n', encoding='utf-8')
@@ -288,6 +379,7 @@ def main():
         if args.prepare_card:
             from .install_sd_app import install
             card = ROOT/'analysis/emulator/experiments'/sha(output)/'sd-card.img'
+            carry_card(card, manifest.get('previous_output_sha256'))
             for name in ('card_demo.b22asm', 'card_second.b22asm', 'card_native.c', 'card_screen.c'):
                 install(ROOT/'apps'/name, card, ensure=True)
     except (OSError, ValueError) as exc:
