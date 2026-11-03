@@ -67,10 +67,11 @@ def boot_to_sd_apps(firmware, snapshot):
 
 class Allocator:
     """Injected calls from a saved MMI-task context; host writes only the tag string and rollbacks."""
-    def __init__(self, board):
+    def __init__(self, board, key='down'):
+        """key must make the current window redraw through the native fill call."""
         self.board, self.uc = board, board.uc
         debugger = Debugger(board, [MMI_FILL])
-        board.keypad.key('down', True); board.keypad.key('down', False)
+        board.keypad.key(key, True); board.keypad.key(key, False)
         result = debugger.run(80000000, 600)
         if result['stop']['reason'] != 'breakpoint':
             raise ValueError(f'MMI task was not reached: {result["stop"]}')

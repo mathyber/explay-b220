@@ -288,7 +288,7 @@ def main():
         if args.prepare_card:
             from .install_sd_app import install
             card = ROOT/'analysis/emulator/experiments'/sha(output)/'sd-card.img'
-            for name in ('card_demo.b22asm', 'card_second.b22asm'):
+            for name in ('card_demo.b22asm', 'card_second.b22asm', 'card_native.c'):
                 install(ROOT/'apps'/name, card, ensure=True)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))

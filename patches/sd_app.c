@@ -1,10 +1,14 @@
-/* B22V interpreter. All file I/O, allocation and drawing execute in the PS. */
+/* SD Apps: B22V interpreter and B22N native loader. File I/O, allocation and drawing execute in the PS. */
+#include "b22n.h"
 typedef unsigned int u32;
 typedef signed int s32;
 typedef unsigned short u16;
 typedef unsigned char u8;
 #define FN(a,t) ((t)(a))
 #define MAGIC 0x53444150u
+/* Allocator heap type: large requests with any other value assert and reboot. */
+#define APP_HEAP 0x44444444u
+#define EXIT_REQUESTED 10
 typedef struct {
     u32 magic,code,size,status,loads,pc,r[8],steps,checksum,event,mode,catalog,io_count;
 } State;
@@ -28,6 +32,26 @@ typedef u32 (*Create)(u32,u32);
 __attribute__((used,section(".launch")))
 u32 launch_sd_apps(void) { return FN(0x4d7da3,Create)(0x70d150,0)&255; }
 
+/* Dynamic App Heap is a ThreadX byte pool. A request that does not fit makes
+   the firmware allocator assert and reboot instead of returning 0, so every
+   allocation first walks the pool for the largest free block (marker 0xFFFFEEEE). */
+#define APP_POOL ((volatile u32 *)0x042c4d50u)
+#define POOL_MARGIN 128
+static u32 largest_free(void) {
+    if (APP_POOL[0]!=0x42595445u) return 0;
+    u32 start=APP_POOL[6],end=start+APP_POOL[7],block=start,best=0;
+    for (u32 n=0;n<4096 && block>=start && block+8<=end;n++) {
+        u32 next=*(volatile u32 *)block,mark=*(volatile u32 *)(block+4);
+        if (next<=block || next>end) break;
+        if (mark==0xffffeeeeu && next-block-8>best) best=next-block-8;
+        block=next;
+    }
+    return best;
+}
+static void *heap_alloc(u32 size,const char *tag) {
+    if (!size || size>0x01000000u || largest_free()<size+POOL_MARGIN) return 0;
+    return FN(0x6a5439,Alloc)(size,APP_HEAP,tag,0);
+}
 static u32 be16(const u8 *p) { return ((u32)p[0]<<8)|p[1]; }
 static u32 be32(const u8 *p) { return (be16(p)<<16)|be16(p+2); }
 static u32 point(u32 x,u32 y) { return (x<<16)|y; }
@@ -72,7 +96,7 @@ static void error(u32 status) {
     text(120,"F1: RELOAD",0xffff);
 }
 static int validate(const u8 *p,u32 size) {
-    if (size<16 || be32(p)!=0x42323256 || be16(p+4)!=1 || be16(p+6)!=16 || be16(p+10)) return 0;
+    if (size<16 || size>4096 || be32(p)!=0x42323256 || be16(p+4)!=1 || be16(p+6)!=16 || be16(p+10)) return 0;
     u32 count=be16(p+8),data=16+count*8;
     if (!count || count>256 || data>size || be32(p+12)!=size-data) return 0;
     for (u32 n=0;n<count;n++) {
@@ -105,7 +129,7 @@ static u8 *read_file(const char *name,u32 minimum,u32 maximum,u32 *length,u32 *r
     if (result || size<minimum || size>maximum) {
         FN(0x5ee485,Close)(handle); *reason=2; return 0;
     }
-    u8 *buffer=FN(0x6a5439,Alloc)(size,0,"B22V",0);
+    u8 *buffer=heap_alloc(size,"B22V");
     if (!buffer) { FN(0x5ee485,Close)(handle); *reason=3; return 0; }
     result=FN(0x5ee49f,Read)(handle,buffer,size,&actual,0);
     S->io_count=actual;
@@ -141,7 +165,7 @@ static void menu(void) {
 }
 static void refresh(void) {
     release_all(); S->mode=0; S->status=0;
-    Catalog *catalog=FN(0x6a5439,Alloc)(sizeof(Catalog),0,"B22V catalog",0);
+    Catalog *catalog=heap_alloc(sizeof(Catalog),"B22V catalog");
     if (!catalog) { S->status=3; menu(); return; }
     catalog->count=0; catalog->selected=0; S->catalog=(u32)catalog;
     u32 size=0,reason=0;
@@ -166,26 +190,87 @@ static void refresh(void) {
     if (reason) { catalog->count=0; S->status=reason; }
     menu();
 }
+static void *api_alloc(u32 size) { return heap_alloc(size,"B22N"); }
+static u32 api_heap_free(void) { u32 free=largest_free(); return free>POOL_MARGIN?free-POOL_MARGIN:0; }
+static void api_free(void *block) { if (block) FN(0x6a5469,Free)(block); }
+static u32 api_open(const char *ascii) {
+    u16 path[64]; u32 i=0;
+    while (i<63 && ascii[i]) { path[i]=(u8)ascii[i]; i++; }
+    path[i]=0;
+    return FN(0x5edc5f,Open)(path,0x31,0,0);
+}
+static u32 api_size(u32 handle) {
+    u32 size=0;
+    return FN(0x5ee59f,Size)(handle,&size)?0xffffffffu:size;
+}
+static u32 api_read(u32 handle,void *buffer,u32 size) {
+    u32 actual=0;
+    return FN(0x5ee49f,Read)(handle,buffer,size,&actual,0)?0xffffffffu:actual;
+}
+static void api_close(u32 handle) { FN(0x5ee485,Close)(handle); }
+static void api_text(u32 y,const char *ascii,u32 color) { text(y,ascii,color); }
+static void api_exit(void) { S->status=EXIT_REQUESTED; }
+static const B22Api api={B22N_API_VERSION,sizeof(B22Api),api_alloc,api_free,api_open,api_size,api_read,
+                         api_close,fill,api_text,api_exit,api_heap_free};
+/* Relocate a B22N file in place: the image starts after the 32-byte header,
+   .bss follows the image and may overwrite the already applied table.
+   Takes ownership of the file buffer and frees it on failure. */
+static u8 *reject(u8 *file) { FN(0x6a5469,Free)(file); return 0; }
+static u8 *prepare_native(u8 *file,u32 size) {
+    if (size<32 || be16(file+4)!=B22N_VERSION || be16(file+6)!=32 || be32(file+24) || be32(file+28)) return reject(file);
+    u32 length=be32(file+8),bss=be32(file+12),entry=be32(file+16),count=be32(file+20);
+    if (!length || length>B22N_MAX_FILE || bss>B22N_MAX_FILE || !(entry&1) || (entry&~1u)>=length ||
+        count>(B22N_MAX_FILE>>2) || 32+length+count*4!=size) return reject(file);
+    u32 need=32+length+bss;
+    if (need>size) {
+        u8 *bigger=heap_alloc(need,"B22N");
+        if (!bigger) return reject(file);
+        for (u32 i=0;i<size;i++) bigger[i]=file[i];
+        FN(0x6a5469,Free)(file); file=bigger;
+    }
+    u8 *image=file+32; const u8 *table=image+length;
+    for (u32 i=0;i<count;i++) {
+        u32 at=be32(table+i*4);
+        if (at&3 || at+4>length) return reject(file);
+    }
+    for (u32 i=0;i<count;i++) {
+        u32 *word=(u32 *)(image+be32(table+i*4));
+        *word+=(u32)image;
+    }
+    for (u32 i=0;i<bss;i++) image[length+i]=0;
+    S->pc=(u32)image+entry;
+    return file;
+}
 static int load(void) {
     release(); S->mode=1; S->loads++; S->pc=0; S->steps=0; S->status=0;
     S->checksum=0; S->size=0; S->io_count=0;
     for (u32 i=0;i<8;i++) S->r[i]=0;
     clear_panel();
     u32 size=0,reason=0;
-    u8 *buffer=read_file(CAT->names[CAT->selected],16,4096,&size,&reason);
+    u8 *buffer=read_file(CAT->names[CAT->selected],16,B22N_MAX_FILE,&size,&reason);
     S->size=size;
     if (!buffer) { error(reason); return 0; }
-    if (!validate(buffer,size)) {
+    u32 sum=2166136261u;
+    for (u32 i=0;i<size;i++) sum=(sum^buffer[i])*16777619u;
+    if (be32(buffer)==B22N_MAGIC) {
+        u8 *ready=prepare_native(buffer,size);
+        if (!ready) { S->pc=0; error(5); return 0; }
+        buffer=ready; S->mode=2;
+    } else if (!validate(buffer,size)) {
         FN(0x6a5469,Free)(buffer); error(5); return 0;
     }
     S->code=(u32)buffer;
-    u32 sum=2166136261u;
-    for (u32 i=0;i<size;i++) sum=(sum^buffer[i])*16777619u;
     S->checksum=sum; S->status=0;
     return 1;
 }
 static void run(u32 event) {
     if (!S->code || S->status) return;
+    if (S->mode==2) {
+        S->event=event; S->steps++;
+        FN(S->pc,B22Entry)(&api,event,0);
+        if (S->status==EXIT_REQUESTED) { release(); S->mode=0; S->status=0; menu(); }
+        return;
+    }
     const u8 *p=(const u8 *)S->code;
     u32 count=be16(p+8),data=16+count*8;
     S->event=event;

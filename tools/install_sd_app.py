@@ -1,4 +1,4 @@
-"""Install independent B22V programs and rebuild their on-card application catalog."""
+"""Install independent B22V/B22N programs and rebuild their on-card application catalog."""
 import argparse
 import hashlib
 import re
@@ -35,9 +35,19 @@ def update_catalog(volume):
     volume.replace_file('APPS.LST',('\r\n'.join(names)+'\r\n').encode('ascii'))
 
 
+def program_bytes(source):
+    """B22V assembly, B22N C source or an already built .B22 file."""
+    suffix=source.suffix.lower()
+    if suffix=='.c':
+        from .build_native_app import compile_native
+        return compile_native(source)
+    if suffix=='.b22':return source.read_bytes()
+    return assemble(source.read_text(encoding='utf-8-sig'))
+
+
 def install(source,card,ensure=False,name=None):
     name=application_name(source,name)
-    program=assemble(source.read_text(encoding='utf-8-sig'))
+    program=program_bytes(source)
     card.parent.mkdir(parents=True,exist_ok=True)
     if not card.exists():
         volume=Fat16(create_image());volume.add_file(name,program);update_catalog(volume)
@@ -63,7 +73,7 @@ def main():
     try:
         card=args.card or default_card()
         if args.examples:
-            for source in (ROOT/'apps/card_demo.b22asm',ROOT/'apps/card_second.b22asm'):
+            for source in (ROOT/'apps/card_demo.b22asm',ROOT/'apps/card_second.b22asm',ROOT/'apps/card_native.c'):
                 install(source,card,ensure=True)
             result='examples ready'
         else:result=install(args.source,card,args.ensure,args.name)

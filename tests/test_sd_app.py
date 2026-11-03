@@ -10,6 +10,7 @@ from emulator.board import ROOT
 from tools.b22asm import assemble
 from tools.build_catch_game import compile_game
 from tools.build_sd_app import build
+from tools.build_native_app import compile_native
 from tools.prove_sd_app import state,catalog_state
 from tools.setup_arm_toolchain import EXECUTABLE
 from tools.sd_image import Fat16,create_image
@@ -99,14 +100,19 @@ class NativeVmTests(unittest.TestCase):
             payload,cls.entry,_=compile_game(Path(folder),'patches/sd_app.c')
         cls.image,cls.manifest=build(original,payload,cls.entry)
 
-    def fixture(self,program,missing=False,short_read=False,files=None):
+    def fixture(self,program,missing=False,short_read=False,files=None,pool_free=0x180000):
         # This deliberately substitutes SFS/graphics/allocator for fast CPU unit
         # tests. tools.prove_sd_app uses actual firmware APIs and SD/SPI instead.
         uc=Uc(UC_ARCH_ARM,UC_MODE_ARM|UC_MODE_BIG_ENDIAN)
         uc.ctl_set_cpu_model(UC_CPU_ARM_926)
         uc.mem_map(0,0x800000);uc.mem_write(0,self.image)
         uc.mem_map(0x04000000,0x400000);uc.mem_map(0x40000000,0x10000)
-        calls=dict(opens=[],closed=0,freed=[],rects=[],texts=[],allocation_sizes=[],allocated=[],creates=[])
+        # Dynamic App Heap as a ThreadX byte pool with one free 1.5 MiB block;
+        # only its headers are read, allocations come from the stub below.
+        pool_start,pool_size=0x04300000,pool_free
+        uc.mem_write(0x042c4d50,struct.pack('>8I',0x42595445,0,0,0,0,0,pool_start,pool_size))
+        uc.mem_write(pool_start,struct.pack('>II',pool_start+pool_size,0xffffeeee))
+        calls=dict(opens=[],closed=0,freed=[],rects=[],texts=[],allocation_sizes=[],allocated=[],creates=[],heaps=[])
         if files is None:
             files={'E:\\APPS.LST':b'DEMO.B22\r\nSECOND.B22\r\n','E:\\DEMO.B22':program,
                    'E:\\SECOND.B22':assemble((ROOT/'apps/card_second.b22asm').read_text())}
@@ -124,7 +130,7 @@ class NativeVmTests(unittest.TestCase):
                     result=len(handles)+1;handles[result]=name
             elif pc==0x5ee59e:uc.mem_write(r1,len(files[handles[r0]]).to_bytes(4,'big'))
             elif pc==0x6a5438:
-                calls['allocation_sizes'].append(r0);result=heap_next
+                calls['allocation_sizes'].append(r0);calls['heaps'].append(r1);result=heap_next
                 calls['allocated'].append(result);heap_next+=(r0+7)&~7
             elif pc==0x5ee49e:
                 data=files[handles[r0]];self.assertEqual(r2,len(data))
@@ -156,6 +162,56 @@ class NativeVmTests(unittest.TestCase):
             result=state(guest);result['catalog_state']=catalog_state(guest)
             return result
         return event,calls
+
+    def test_every_allocation_uses_the_app_heap(self):
+        # Any other heap type makes a large request assert and reboot the phone.
+        event,calls=self.fixture(assemble((ROOT/'apps/card_demo.b22asm').read_text()))
+        event(0xf021);event(0xfa1b);event(0xfa17)
+        self.assertTrue(calls['heaps'])
+        self.assertEqual(set(calls['heaps']),{0x44444444})
+
+    def test_native_program_runs_from_the_heap_and_returns_to_list(self):
+        program=compile_native(ROOT/'apps/card_native.c')
+        event,calls=self.fixture(program)
+        event(0xf021)
+        loaded=event(0xfa1b)
+        self.assertEqual((loaded['mode'],loaded['status']),(2,0))
+        self.assertIn(1<<20,calls['allocation_sizes'])
+        self.assertEqual(set(calls['heaps']),{0x44444444})
+        for line in ('NATIVE B22N','HEAP 1024 KB','APPS.LST 22','KEYS 0'):
+            self.assertIn(line,calls['texts'])
+        event(0xfa04);event(0xfa04);event(0xfa02)
+        self.assertIn('KEYS 3',calls['texts'])
+        self.assertEqual(calls['rects'][-1],(((84)<<16)|94,((107)<<16)|117,0x07ff))
+        done=event(0xfa1b)
+        self.assertEqual((done['mode'],done['code'],done['status']),(0,0,0))
+        event(0xf022)
+        self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))
+
+    def test_allocation_that_does_not_fit_is_refused_before_the_firmware(self):
+        program=compile_native(ROOT/'apps/card_native.c')
+        event,calls=self.fixture(program,pool_free=0x80000)
+        event(0xf021);loaded=event(0xfa1b)
+        self.assertEqual(loaded['mode'],2)
+        self.assertNotIn(1<<20,calls['allocation_sizes'])
+        self.assertIn('HEAP FAILED',calls['texts'])
+        event,calls=self.fixture(program,pool_free=0x400)
+        event(0xf021);self.assertEqual(event(0xfa1b)['status'],3)
+
+    def test_invalid_native_programs_are_rejected(self):
+        program=compile_native(ROOT/'apps/card_native.c')
+        length=struct.unpack_from('>I',program,8)[0]
+        broken=[program[:-1],bytearray(program),bytearray(program),bytearray(program)]
+        struct.pack_into('>I',broken[1],16,0)                 # ARM-mode entry
+        struct.pack_into('>I',broken[2],32+length,2)          # unaligned relocation
+        struct.pack_into('>I',broken[3],32+length,length)     # relocation outside the image
+        for data in broken:
+            with self.subTest(data=len(data)):
+                event,calls=self.fixture(bytes(data))
+                event(0xf021);result=event(0xfa1b)
+                self.assertEqual((result['status'],result['code']),(5,0))
+                event(0xf022)
+                self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))
 
     def test_original_launch_entry_tail_calls_direct_game_window(self):
         event,calls=self.fixture(assemble('halt'))
