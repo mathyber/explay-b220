@@ -6,6 +6,8 @@ and the four resource slots become free ROM (0xFF after a copy of the black SJPG
 Image records keep their sizes, so every following resource stays in place.
 Steps 2-3: Media library leaves Multimedia, Social networks leaves the main menu
 (items and position icons move up), and its idle shortcut opens SD Apps.
+The power-on GIF becomes a black screen with dots; World time leaves Tools
+and its world map becomes a small black bitmap.
 Freed regions are listed in the manifest for later code or data.
 """
 import argparse
@@ -198,6 +200,43 @@ def cut_boot_animation(image, output):
             [dict(start=hex(tail), end=hex(BOOT_END), size=BOOT_END-tail, origin='power-on animation')])
 
 
+# World time: Tools item (menu id 0x6d) and the same item in the "Others" group.
+TOOLS, OTHERS = 0x6db168, 0x6db264
+WORLD_TIME_TEXT = 0x400003bf
+# World map, MB RLE 176x80 in the Tools resource module; used only by the
+# world time window (image list at 0x3cae38).
+WORLD_MAP, WORLD_MAP_SIZE = 0x15e70c, 22850
+
+
+def solid_mb(header, width, height, color=0):
+    """MB RLE bitmap of one color: per row one (repeat=width, literal=0) packet and 00 00."""
+    if width > 255:
+        raise ValueError('Row too wide for one RLE packet')
+    rows = (bytes((width, 0))+struct.pack('>H', color)+b'\0\0')*height
+    data = bytearray(header)+rows
+    struct.pack_into('>I', data, 2, len(data))
+    struct.pack_into('>I', data, 34, len(rows))
+    return bytes(data)
+
+
+def cut_world_time(image, output):
+    changes = []
+    for address in (TOOLS, OTHERS):
+        more, _, _ = remove_item(image, output, (address,), WORLD_TIME_TEXT, f'menu {address:#x} without World time')
+        changes += more
+    header = image[WORLD_MAP:WORLD_MAP+66]
+    if struct.unpack_from('>2sI', header) != (b'MB', WORLD_MAP_SIZE) or struct.unpack_from('>II', header, 18) != (176, 80):
+        raise ValueError('Unexpected world map bitmap')
+    small = solid_mb(header, 176, 80)
+    end = WORLD_MAP+len(small)
+    output[WORLD_MAP:end] = small
+    output[end:WORLD_MAP+WORLD_MAP_SIZE] = b'\xff'*(WORLD_MAP+WORLD_MAP_SIZE-end)
+    tail = (end+3) & ~3
+    changes.append(dict(start=hex(WORLD_MAP), size=WORLD_MAP_SIZE, kind=f'world map: black {len(small)}-byte MB + free tail'))
+    return changes, [dict(start=hex(tail), end=hex(WORLD_MAP+WORLD_MAP_SIZE),
+                          size=WORLD_MAP+WORLD_MAP_SIZE-tail, origin='world map')]
+
+
 def cut_links(image, output):
     changes, _, _ = remove_item(image, output, (MULTIMEDIA,), MEDIA_LIBRARY_TEXT, 'Multimedia without Media library')
     reason = 'Main menu without Social networks'
@@ -214,13 +253,15 @@ def build(image):
     changes += more; free += extra
     more, extra = cut_boot_animation(image, output)
     changes += more; free += extra
+    more, extra = cut_world_time(image, output)
+    changes += more; free += extra
     allowed = set()
     for change in changes:
         start = int(change['start'], 0)
         allowed.update(range(start, start+change['size']))
     if len(output) != len(image) or any(i not in allowed for i, (a, b) in enumerate(zip(image, output)) if a != b):
         raise ValueError('Changes outside declared regions')
-    return bytes(output), dict(format='b220-cut', version=1, steps=['wallpapers', 'media library', 'social networks', 'power-on animation'], source_sha256=sha(image),
+    return bytes(output), dict(format='b220-cut', version=1, steps=['wallpapers', 'media library', 'social networks', 'power-on animation', 'world time'], source_sha256=sha(image),
                                output_sha256=sha(output), size=len(output), changes=changes, free_rom=free,
                                free_rom_bytes=sum(f['size'] for f in free),
                                changed_bytes=sum(a != b for a, b in zip(image, output)))

@@ -9,7 +9,9 @@ from PIL import Image
 from tools.build_cut import (BLACK_ID, BLACK_SIZE, BOOT_END, BOOT_HEADER, BOOT_SLOT, DEFAULT_SOURCE, DOT_STATES,
                              DOTS_Y, GROUP_COUNT, ITEM_SIZE, MAIN_ICONS, MAIN_MENU,
                              MEDIA_LIBRARY_TEXT, MULTIMEDIA, SD_APPS_ENTRY, SHORTCUT_ACTIONS, SLOTS_END,
-                             SOCIAL_SHORTCUT, SOCIAL_TEXT, WALLPAPER_IDS, build)
+                             SOCIAL_SHORTCUT, SOCIAL_TEXT, OTHERS, TOOLS, WALLPAPER_IDS, WORLD_MAP, WORLD_TIME_TEXT,
+                             build)
+from tools.build_green_theme import bitmap_resources
 from tools.map_resources import WALLPAPERS, WALLPAPER_KEPT
 
 
@@ -92,6 +94,20 @@ class CutTests(unittest.TestCase):
         free = next(f for f in self.manifest['free_rom'] if f['origin'] == 'power-on animation')
         self.assertGreater(free['size'], 67000)
         self.assertEqual(set(self.output[int(free['start'], 0):BOOT_END]), {0xff})
+
+    def test_world_time_is_gone(self):
+        def texts(group):
+            items = struct.unpack_from('>I', self.output, group)[0]
+            count = struct.unpack_from('>H', self.output, group+GROUP_COUNT)[0]
+            return [struct.unpack_from('>I', self.output, items+i*ITEM_SIZE+0x14)[0] for i in range(count)]
+        self.assertEqual(len(texts(TOOLS)), 5)
+        self.assertEqual(len(texts(OTHERS)), 2)
+        self.assertNotIn(WORLD_TIME_TEXT, texts(TOOLS)+texts(OTHERS))
+        maps = [b for b in bitmap_resources(self.output) if b['start'] == WORLD_MAP]
+        self.assertEqual([(m['width'], m['height'], m['size']) for m in maps], [(176, 80, 546)])
+        self.assertEqual(sum(1 for _ in bitmap_resources(self.output)), sum(1 for _ in bitmap_resources(self.source)))
+        free = next(f for f in self.manifest['free_rom'] if f['origin'] == 'world map')
+        self.assertEqual(set(self.output[int(free['start'], 0):int(free['end'], 0)]), {0xff})
 
     def test_wrong_source_is_rejected(self):
         broken = bytearray(self.source)
