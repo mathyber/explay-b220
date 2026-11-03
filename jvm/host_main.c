@@ -7,7 +7,7 @@
 #include "jvm.h"
 #include "jar.h"
 
-typedef struct Host { char paths[16][260]; int count; FILE *archive; Jar jar; int has_jar; } Host;
+typedef struct Host { char paths[16][260]; int count; FILE *archive; Jar jar; int has_jar; Jvm *vm; } Host;
 
 static uint32_t archive_read(void *context, uint32_t offset, void *buffer, uint32_t length) {
     Host *h = context;
@@ -15,8 +15,16 @@ static uint32_t archive_read(void *context, uint32_t offset, void *buffer, uint3
     return (uint32_t)fread(buffer, 1, length, h->archive);
 }
 
-static void *archive_alloc(void *context, uint32_t size) { (void)context; return malloc(size); }
-static void archive_release(void *context, void *block) { (void)context; free(block); }
+/* Like the phone: once the VM runs, JAR entries are extracted into its heap. */
+static void *archive_alloc(void *context, uint32_t size) {
+    Host *h = context;
+    void *data = h->vm ? jvm_scratch_alloc(h->vm, size) : 0;
+    return data ? data : malloc(size);
+}
+static void archive_release(void *context, void *block) {
+    Host *h = context;
+    if (!h->vm || !jvm_scratch_release(h->vm, block)) free(block);
+}
 
 static uint8_t *host_read(void *context, const char *name, uint32_t *size) {
     Host *h = context;
@@ -38,7 +46,13 @@ static uint8_t *host_read(void *context, const char *name, uint32_t *size) {
     return h->has_jar ? jar_read(&h->jar, name, size) : 0;
 }
 
-static void host_release(void *context, uint8_t *buffer) { (void)context; free(buffer); }
+static void host_release(void *context, uint8_t *buffer) { archive_release(context, buffer); }
+
+/* Large resources of the application JAR are streamed (class path folders are read whole). */
+static int host_stream(void *context, const char *path, JarStream *stream, uint32_t *size) {
+    Host *h = context;
+    return h->has_jar && jar_stream_open(&h->jar, path, stream, size);
+}
 
 static void host_write(void *context, int stream, const char *bytes, uint32_t length) {
     (void)context;
@@ -68,6 +82,48 @@ static int save_frame(const char *path) {
 }
 
 typedef struct Key { uint32_t at; int code; int released; } Key;
+
+typedef struct Usage { char name[64]; uint32_t bytes, count; } Usage;
+static Usage usage[256];
+static uint32_t usage_count;
+
+static void count_object(void *context, const char *name, uint32_t length, uint32_t bytes) {
+    (void)context;
+    if (length > sizeof(usage[0].name)-1) length = sizeof(usage[0].name)-1;
+    uint32_t i = 0;
+    while (i < usage_count && (strlen(usage[i].name) != length || memcmp(usage[i].name, name, length))) i++;
+    if (i == usage_count) {
+        if (usage_count == sizeof(usage)/sizeof(usage[0])) return;
+        memcpy(usage[i].name, name, length);
+        usage[i].name[length] = 0;
+        usage_count++;
+    }
+    usage[i].bytes += bytes;
+    usage[i].count++;
+}
+
+static int by_bytes(const void *a, const void *b) {
+    uint32_t x = ((const Usage *)a)->bytes, y = ((const Usage *)b)->bytes;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+/* B22JVM_STATS: totals; B22JVM_HEAP: live objects by class after a collection. */
+static void stats(Jvm *vm) {
+    if (getenv("B22JVM_STATS")) {
+        uint32_t parts[JVM_META_PARTS];
+        jvm_meta_parts(vm, parts);
+        fprintf(stderr, "heap used %u, collections %u, peak live %u, largest free %u, metadata used %u\n", jvm_heap_used(vm),
+                jvm_gc_count(vm), jvm_heap_peak(vm), jvm_heap_largest_free(vm), jvm_meta_used(vm));
+        fprintf(stderr, "metadata: threads %u, %u classes: constants %u, methods/fields %u, bytecode %u\n",
+                parts[0], parts[1], parts[2], parts[3], parts[4]);
+    }
+    if (!getenv("B22JVM_HEAP")) return;
+    jvm_heap_walk(vm, count_object, 0);
+    qsort(usage, usage_count, sizeof(usage[0]), by_bytes);
+    fprintf(stderr, "live heap %u bytes\n", jvm_heap_used(vm));
+    for (uint32_t i = 0; i < usage_count && i < 15; i++)
+        fprintf(stderr, "%9u %6u %s\n", usage[i].bytes, usage[i].count, usage[i].name);
+}
 
 int main(int argc, char **argv) {
     Host h = {0};
@@ -103,7 +159,7 @@ int main(int argc, char **argv) {
             }
         } else main_class = argv[i];
     }
-    JvmHost host = {host_read, host_release, host_write, host_ms, &h, host_screen, host_flush};
+    JvmHost host = {host_read, host_release, host_write, host_ms, &h, host_screen, host_flush, host_stream};
     char manifest_main[128];
     if (!main_class && jvm_main_class(&host, manifest_main, sizeof(manifest_main))) main_class = manifest_main;
     if (!main_class) { fprintf(stderr, "usage: b22jvm [-heap KB] [-meta KB] [-cp dirs] [-jar app.jar] [-run ms] [-keys ms:code,...] [-shot file.ppm] [Main]\n"); return 64; }
@@ -111,6 +167,7 @@ int main(int argc, char **argv) {
     uint32_t bytes = (heap_kb+meta_kb)*1024;
     void *memory = malloc(bytes);
     Jvm *vm = jvm_create(&host, memory, bytes, meta_kb*1024);
+    h.vm = vm;
     if (!vm) { fprintf(stderr, "VM creation failed\n"); return 70; }
     if (!jvm_start_main(vm, main_class)) { fprintf(stderr, "VM error: %s\n", jvm_error(vm)); return 70; }
     uint32_t start = host_ms(0);
@@ -123,7 +180,7 @@ int main(int argc, char **argv) {
         }
         if (run_ms && elapsed >= run_ms) break;
         int status = jvm_run(vm, 200000);
-        if (status == JVM_ERROR) { fprintf(stderr, "VM error: %s\n", jvm_error(vm)); return 70; }
+        if (status == JVM_ERROR) { fprintf(stderr, "VM error: %s\n", jvm_error(vm)); stats(vm); return 70; }
         if (status == JVM_DONE) break;
         if (status == JVM_IDLE) {
             uint32_t wake = jvm_next_wake(vm);
@@ -134,7 +191,6 @@ int main(int argc, char **argv) {
         }
     }
     if (shot && !save_frame(shot)) { fprintf(stderr, "cannot write %s\n", shot); return 73; }
-    if (getenv("B22JVM_STATS"))
-        fprintf(stderr, "heap used %u, collections %u, metadata used %u\n", jvm_heap_used(vm), jvm_gc_count(vm), jvm_meta_used(vm));
+    stats(vm);
     return jvm_uncaught(vm) ? 1 : 0;
 }

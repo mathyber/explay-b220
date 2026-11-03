@@ -7,6 +7,9 @@ public class Object {
 
     public native int hashCode();
 
+    /* Arrays only (as on CLDC); other objects throw CloneNotSupportedException. */
+    protected native Object clone();
+
     public boolean equals(Object other) {
         return this == other;
     }

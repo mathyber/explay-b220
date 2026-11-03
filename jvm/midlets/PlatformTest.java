@@ -17,6 +17,57 @@ public class PlatformTest {
         records();
         media();
         direct();
+        sprites();
+        textInput();
+        lists();
+    }
+
+    /* Two 2x2 frames; sequence, reference pixel and a 90 degree turn. */
+    static void sprites() {
+        javax.microedition.lcdui.game.Sprite s =
+            new javax.microedition.lcdui.game.Sprite(Image.createImage(4, 2), 2, 2);
+        s.setFrameSequence(new int[] {1, 0, 1});
+        s.nextFrame();
+        s.nextFrame();
+        s.defineReferencePixel(1, 0);
+        s.setRefPixelPosition(10, 10);
+        System.out.println("sprite frames " + s.getRawFrameCount() + " frame " + s.getFrame() + " at " + s.getX() + "," + s.getY());
+        s.setTransform(javax.microedition.lcdui.game.Sprite.TRANS_ROT90);
+        System.out.println("turned at " + s.getX() + "," + s.getY() + " ref " + s.getRefPixelX() + "," + s.getRefPixelY());
+        javax.microedition.lcdui.game.Sprite other = new javax.microedition.lcdui.game.Sprite(s);
+        other.move(1, 1);
+        System.out.println("collides " + s.collidesWith(other, false));
+        other.move(5, 0);
+        System.out.println("collides " + s.collidesWith(other, false));
+    }
+
+    static void keys(javax.microedition.lcdui.TextBox box, String keys) {
+        for (int i = 0; i < keys.length(); i++) {
+            char k = keys.charAt(i);
+            if (k == 'L') box.b22Key(b22.Events.KEY_REPEATED, keys.charAt(i - 1));  // hold the previous key
+            else box.b22Key(b22.Events.KEY_PRESSED, k == '<' ? -3 : k);
+        }
+    }
+
+    /* Multi-tap: 22 = б, # upper case, * deletes, ## Latin, 444 = i, 0 space, held 5 = 5, left arrow moves. */
+    static void textInput() {
+        javax.microedition.lcdui.TextBox box = new javax.microedition.lcdui.TextBox("t", "", 20, 0);
+        keys(box, "22#2*##4440L5<<7");
+        System.out.println("text [" + box.getString() + "] caret " + box.getCaretPosition());
+        javax.microedition.lcdui.TextBox url = new javax.microedition.lcdui.TextBox("u", "", 20, 4);
+        keys(url, "2111");
+        System.out.println("url [" + url.getString() + "]");
+    }
+
+    static void lists() {
+        javax.microedition.lcdui.List list = new javax.microedition.lcdui.List("l", javax.microedition.lcdui.Choice.IMPLICIT);
+        list.append("a", null);
+        list.append("b", null);
+        list.append("c", null);
+        list.b22Key(b22.Events.KEY_PRESSED, -2);
+        list.b22Key(b22.Events.KEY_PRESSED, -2);
+        list.b22Key(b22.Events.KEY_PRESSED, -5);
+        System.out.println("list " + list.getSelectedIndex() + " " + list.getString(list.getSelectedIndex()));
     }
 
     static void records() throws Exception {

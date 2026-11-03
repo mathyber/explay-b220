@@ -31,14 +31,17 @@ void vm_fail(Jvm *vm, const char *message, Utf8 detail) {
     vm->error[n] = 0;
 }
 
-void *meta_alloc(Jvm *vm, u32 bytes) {
-    bytes = (bytes+7) & ~7u;
-    if ((u32)(vm->meta_end-vm->meta_top) < bytes) { vm_fail(vm, "out of metadata memory", 0); return 0; }
-    void *p = vm->meta_top;
-    vm->meta_top += bytes;
+/* Zeroed metadata; align 8 for structures, 1 for strings and bytecode. */
+static void *meta_take(Jvm *vm, u32 bytes, u32 align) {
+    u8 *p = (u8 *)(((uintptr_t)vm->meta_top+align-1) & ~(uintptr_t)(align-1));
+    if (p > vm->meta_end || (u32)(vm->meta_end-p) < bytes) { vm_fail(vm, "out of metadata memory", 0); return 0; }
+    vm->meta_top = p+bytes;
     jvm_memset(p, 0, bytes);
     return p;
 }
+
+void *meta_alloc(Jvm *vm, u32 bytes) { return meta_take(vm, bytes, 8); }
+void *meta_bytes(Jvm *vm, u32 bytes) { return meta_take(vm, bytes, 1); }
 
 u32 utf8_length(Utf8 a) { return rd16(a); }
 const char *utf8_bytes(Utf8 a) { return (const char *)a+2; }
@@ -49,7 +52,7 @@ int utf8_equals(Utf8 a, const char *c) {
 int utf8_same(Utf8 a, Utf8 b) { return a == b || (rd16(a) == rd16(b) && !jvm_memcmp(a+2, b+2, rd16(a))); }
 
 static Utf8 make_utf8(Jvm *vm, const u8 *bytes, u32 length) {
-    u8 *p = meta_alloc(vm, length+3);
+    u8 *p = meta_bytes(vm, length+3);  /* length, bytes, NUL */
     if (!p) return 0;
     p[0] = (u8)(length>>8); p[1] = (u8)length;
     jvm_memcpy(p+2, bytes, length);
@@ -85,7 +88,11 @@ static void add_class(Jvm *vm, Class *c) { c->next = vm->classes; vm->classes = 
 
 static int link_class(Jvm *vm, Class *c, Utf8 super_name);
 
-static Class *parse_class(Jvm *vm, u8 *data, u32 size) {
+/* Builds a class from a class file, copying only the strings and bytecode it
+   keeps (no attributes such as StackMap or LineNumberTable), so the file can
+   be released before linking. The super class index and ConstantValue
+   indices are returned for finish_class; interfaces[] holds pool indices. */
+static Class *parse_class(Jvm *vm, const u8 *data, u32 size, u32 *super_index_out, u16 **constant_values_out) {
     const u8 *p = data, *end = data+size;
 #define NEED(n) do { if ((u32)(end-p) < (u32)(n)) { vm_fail(vm, "truncated class file", 0); return 0; } } while (0)
     NEED(10);
@@ -104,12 +111,16 @@ static Class *parse_class(Jvm *vm, u8 *data, u32 size) {
         Constant *k = &c->constants[i];
         k->tag = *p++;
         switch (k->tag) {
-        case 1: NEED(2); k->u.utf8 = p; NEED(2+rd16(p)); p += 2+rd16(p); break;
+        case 1:
+            NEED(2); NEED(2+rd16(p));
+            if (!(k->u.utf8 = make_utf8(vm, p+2, rd16(p)))) return 0;
+            p += 2+rd16(p);
+            break;
         case 3: case 4: NEED(4); k->u.value = rd32(p); p += 4; break;
         case 5: case 6:
             NEED(8); k->u.value = rd32(p); c->constants[i+1].u.value = rd32(p+4); p += 8; i++; break;
         case 7: case 8: NEED(2); k->a = (u16)rd16(p); p += 2; break;
-        case 9: case 10: case 11: case 12: NEED(4); k->a = (u16)rd16(p); k->b = (u16)rd16(p+2); p += 4; break;
+        case 9: case 10: case 11: case 12: NEED(4); k->a = (u16)rd16(p); k->u.b = (u16)rd16(p+2); p += 4; break;
         case 15: NEED(3); p += 3; break;
         case 16: NEED(2); p += 2; break;
         case 18: NEED(4); p += 4; break;
@@ -121,11 +132,12 @@ static Class *parse_class(Jvm *vm, u8 *data, u32 size) {
     u32 this_index = rd16(p+2), super_index = rd16(p+4), interfaces = rd16(p+6);
     p += 8;
     c->name = c->constants[c->constants[this_index].a].u.utf8;
-    Utf8 super_name = super_index ? c->constants[c->constants[super_index].a].u.utf8 : 0;
+    *super_index_out = super_index;
     NEED(interfaces*2);
     c->interface_count = (u16)interfaces;
     c->interfaces = meta_alloc(vm, (interfaces+1)*sizeof(Class *));
-    const u8 *interface_indices = p;
+    if (!c->interfaces) return 0;
+    for (u32 i = 0; i < interfaces; i++) c->interfaces[i] = (Class *)(uintptr_t)rd16(p+i*2);
     p += interfaces*2;
 
     NEED(2);
@@ -133,6 +145,7 @@ static Class *parse_class(Jvm *vm, u8 *data, u32 size) {
     c->fields = meta_alloc(vm, (c->field_count+1)*sizeof(Field));
     u16 *constant_values = meta_alloc(vm, (c->field_count+1)*sizeof(u16));
     if (!c->fields || !constant_values) return 0;
+    *constant_values_out = constant_values;
     for (u32 i = 0; i < c->field_count; i++) {
         NEED(8);
         Field *f = &c->fields[i];
@@ -175,7 +188,11 @@ static Class *parse_class(Jvm *vm, u8 *data, u32 size) {
                 m->max_stack = (u16)rd16(q);
                 m->max_locals = (u16)rd16(q+2);
                 m->code_length = rd32(q+4);
-                m->code = q+8;
+                if (m->code_length > length-8) { vm_fail(vm, "truncated class file", 0); return 0; }
+                u8 *code = meta_bytes(vm, m->code_length ? m->code_length : 1);
+                if (!code) return 0;
+                jvm_memcpy(code, q+8, m->code_length);
+                m->code = code;
                 q += 8+m->code_length;
                 m->handler_count = (u16)rd16(q);
                 Handler *h = meta_alloc(vm, (m->handler_count+1)*sizeof(Handler));
@@ -192,12 +209,19 @@ static Class *parse_class(Jvm *vm, u8 *data, u32 size) {
         if (m->max_locals < m->arg_slots) m->max_locals = m->arg_slots;
     }
 #undef NEED
+    return c;
+}
+
+/* Resolves interfaces and the super class (which may load more classes),
+   links, then applies ConstantValue attributes. */
+static Class *finish_class(Jvm *vm, Class *c, u32 super_index, const u16 *constant_values) {
     add_class(vm, c);
-    for (u32 i = 0; i < interfaces; i++) {
-        u32 index = rd16(interface_indices+i*2);
+    for (u32 i = 0; i < c->interface_count; i++) {
+        u32 index = (u32)(uintptr_t)c->interfaces[i];
         c->interfaces[i] = resolve_class(vm, c, (u16)index);
         if (!c->interfaces[i]) return 0;
     }
+    Utf8 super_name = super_index ? c->constants[c->constants[super_index].a].u.utf8 : 0;
     if (!link_class(vm, c, super_name)) return 0;
     /* ConstantValue attributes initialise static finals before <clinit>. */
     for (u32 i = 0; i < c->field_count; i++) {
@@ -278,10 +302,11 @@ static Class *load_class(Jvm *vm, const u8 *name, u32 length) {
     u32 size = 0;
     u8 *raw = vm->host.read(vm->host.context, path, &size);
     if (!raw) return 0;
-    u8 *data = meta_alloc(vm, size);
-    if (data) jvm_memcpy(data, raw, size);
+    u32 super_index = 0;
+    u16 *constant_values = 0;
+    Class *c = parse_class(vm, raw, size, &super_index, &constant_values);
     vm->host.release(vm->host.context, raw);
-    return data ? parse_class(vm, data, size) : 0;
+    return c ? finish_class(vm, c, super_index, constant_values) : 0;
 }
 
 static Class *make_array_class(Jvm *vm, const u8 *name, u32 length) {
@@ -415,8 +440,8 @@ Field *resolve_field(Jvm *vm, Class *from, u16 index) {
     if (k->resolved) return k->u.field;
     Class *c = resolve_class(vm, from, k->a);
     if (!c) return 0;
-    Constant *nat = &from->constants[k->b];
-    Utf8 name = from->constants[nat->a].u.utf8, desc = from->constants[nat->b].u.utf8;
+    Constant *nat = &from->constants[k->u.b];
+    Utf8 name = from->constants[nat->a].u.utf8, desc = from->constants[nat->u.b].u.utf8;
     Field *f = find_field(c, name, desc);
     if (!f) { vm_fail(vm, "field not found", name); return 0; }
     k->u.field = f;
@@ -429,8 +454,8 @@ Method *resolve_method(Jvm *vm, Class *from, u16 index) {
     if (k->resolved) return k->u.method;
     Class *c = resolve_class(vm, from, k->a);
     if (!c) return 0;
-    Constant *nat = &from->constants[k->b];
-    Utf8 name = from->constants[nat->a].u.utf8, desc = from->constants[nat->b].u.utf8;
+    Constant *nat = &from->constants[k->u.b];
+    Utf8 name = from->constants[nat->a].u.utf8, desc = from->constants[nat->u.b].u.utf8;
     Method *m = find_method_utf8(c, name, desc);
     if (!m && (c->access & ACC_INTERFACE)) m = find_method_utf8(vm->object_class, name, desc);
     if (!m) { vm_fail(vm, "method not found", name); return 0; }

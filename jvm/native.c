@@ -1,5 +1,6 @@
 /* Native methods, strings, class mirrors, VM creation and the main launcher. */
 #include "internal.h"
+#include "jar.h"
 
 typedef union { u64 l; double d; u32 w[2]; } Wide;
 typedef union { u32 i; float f; } Narrow;
@@ -136,6 +137,20 @@ static u32 format_double(char *out, double v, int digits) {
 #define RETURN_REF(o) (result[0] = (u32)(uintptr_t)(o))
 
 static int object_hash(Thread *t, u32 *args, u32 *result) { (void)t; result[0] = args[0] >> 3; return 0; }
+
+static int object_clone(Thread *t, u32 *args, u32 *result) {
+    Jvm *vm = thread_vm(t);
+    Object *o = ARG_REF(0);
+    if (!o->cls->dimensions) { throw_new(t, "java/lang/CloneNotSupportedException", 0); return 1; }
+    Array *a = (Array *)o, *copy;
+    push_root(vm, o);
+    copy = new_array(vm, o->cls, a->length);
+    pop_roots(vm, 1);
+    if (!copy) { throw_new(t, "java/lang/OutOfMemoryError", 0); return 1; }
+    jvm_memcpy(ARRAY_DATA(copy), ARRAY_DATA(a), a->length*element_size(o->cls->element_type));
+    RETURN_REF(copy);
+    return 0;
+}
 static int object_class(Thread *t, u32 *args, u32 *result) {
     Jvm *vm = thread_vm(t);
     RETURN_REF(class_mirror(vm, ARG_REF(0)->cls));
@@ -481,10 +496,53 @@ static int class_read_resource(Thread *t, u32 *args, u32 *result) {
     return 0;
 }
 
+/* Large resources are read on demand (b22.ResourceStream): the JarStream lives
+   in a byte[] (heap objects never move) owned by the Java stream. */
+static int class_open_resource(Thread *t, u32 *args, u32 *result) {
+    Jvm *vm = thread_vm(t);
+    Object *name = ARG_REF(0);
+    if (!name) { throw_new(t, "java/lang/NullPointerException", 0); return 1; }
+    char path[256];
+    u32 n = string_utf8(vm, name, path, sizeof(path)-1), size = 0;
+    path[n] = 0;
+    if (!vm->host.stream || !vm->host.stream(vm->host.context, path, 0, &size) || size < JVM_STREAM_MIN) {
+        RETURN_REF(0);
+        return 0;
+    }
+    Array *state = new_array(vm, primitive_array(vm, 'B'), sizeof(JarStream));
+    if (!state) { throw_new(t, "java/lang/OutOfMemoryError", "resource stream"); return 1; }
+    if (!vm->host.stream(vm->host.context, path, (JarStream *)ARRAY_DATA(state), &size)) state = 0;
+    RETURN_REF(state);
+    return 0;
+}
+
+static int resource_read(Thread *t, u32 *args, u32 *result) {
+    Array *state = (Array *)ARG_REF(0), *buffer = (Array *)ARG_REF(1);
+    i32 offset = (i32)args[2], length = (i32)args[3];
+    if (!state || !buffer) { throw_new(t, "java/lang/NullPointerException", 0); return 1; }
+    if (offset < 0 || length < 0 || (u32)offset+(u32)length > buffer->length) {
+        throw_new(t, "java/lang/IndexOutOfBoundsException", 0);
+        return 1;
+    }
+    int n = jar_stream_read((JarStream *)ARRAY_DATA(state), ARRAY_DATA(buffer)+offset, (u32)length);
+    if (n < 0) { throw_new(t, "java/io/IOException", "damaged resource"); return 1; }
+    result[0] = (u32)n;
+    return 0;
+}
+
+static int resource_left(Thread *t, u32 *args, u32 *result) {
+    Array *state = (Array *)ARG_REF(0);
+    if (!state) { throw_new(t, "java/lang/NullPointerException", 0); return 1; }
+    JarStream *s = (JarStream *)ARRAY_DATA(state);
+    result[0] = s->size-s->produced;
+    return 0;
+}
+
 typedef struct NativeEntry { const char *cls, *name, *desc; Native fn; } NativeEntry;
 
 static const NativeEntry natives[] = {
     {"java/lang/Object", "hashCode", "()I", object_hash},
+    {"java/lang/Object", "clone", "()Ljava/lang/Object;", object_clone},
     {"java/lang/Object", "getClass", "()Ljava/lang/Class;", object_class},
     {"java/lang/System", "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V", system_arraycopy},
     {"java/lang/System", "currentTimeMillis", "()J", system_time},
@@ -521,6 +579,9 @@ static const NativeEntry natives[] = {
     {"java/lang/Class", "forName", "(Ljava/lang/String;)Ljava/lang/Class;", class_for_name},
     {"java/lang/Class", "newInstance", "()Ljava/lang/Object;", class_new_instance},
     {"java/lang/Class", "readResource", "(Ljava/lang/String;)[B", class_read_resource},
+    {"java/lang/Class", "openResource", "(Ljava/lang/String;)[B", class_open_resource},
+    {"b22/ResourceStream", "read0", "([B[BII)I", resource_read},
+    {"b22/ResourceStream", "left", "([B)I", resource_left},
 };
 
 Native native_for(Jvm *vm, Class *c, Utf8 name, Utf8 desc) {
@@ -591,8 +652,10 @@ int jvm_start_main(Jvm *vm, const char *class_name) {
     Method *m = find_method(c, "main", "([Ljava/lang/String;)V");
     if (!m || !(m->access & ACC_STATIC)) { vm_fail(vm, "no static main(String[])", c->name); return 0; }
     Class *array = array_class(vm, vm->string_class);
-    Array *arguments = array ? new_array(vm, array, 0) : 0;
+    /* The thread first: its stack is allocated in the heap and could collect
+       an arguments array that nothing holds yet. */
     Thread *t = new_thread(vm, 0);
+    Array *arguments = array && t ? new_array(vm, array, 0) : 0;
     if (!arguments || !t) { vm_fail(vm, "cannot start main", 0); return 0; }
     u32 args[1] = {(u32)(uintptr_t)arguments};
     if (!invoke_method(t, m, args) || !initialize_class(t, c)) return 0;
@@ -603,5 +666,23 @@ int jvm_start_main(Jvm *vm, const char *class_name) {
 const char *jvm_error(Jvm *vm) { return vm->error; }
 uint32_t jvm_heap_used(Jvm *vm) { return vm->used; }
 uint32_t jvm_gc_count(Jvm *vm) { return vm->gc_count; }
+uint32_t jvm_heap_peak(Jvm *vm) { return vm->peak_live; }
+uint32_t jvm_heap_largest_free(Jvm *vm) {
+    u32 best = 0;
+    for (Object *f = vm->free_list; f; f = *(Object **)(f+1)) if ((f->info >> 2)*GRANULE > best) best = (f->info >> 2)*GRANULE;
+    return best;
+}
 uint32_t jvm_meta_used(Jvm *vm) { return (uint32_t)(vm->meta_top-vm->meta); }
+
+void jvm_meta_parts(Jvm *vm, uint32_t parts[JVM_META_PARTS]) {
+    jvm_memset(parts, 0, JVM_META_PARTS*sizeof(uint32_t));
+    for (Thread *t = vm->threads; t; t = t->next) parts[0] += sizeof(Thread)+THREAD_FRAMES*sizeof(Frame);
+    for (Class *c = vm->classes; c; c = c->next) {
+        parts[1]++;
+        parts[2] += c->constant_count*sizeof(Constant);
+        parts[3] += (c->method_count+1)*sizeof(Method)+(c->field_count+1)*(sizeof(Field)+2)+c->vtable_size*4;
+        for (u32 i = 0; i < c->method_count; i++)
+            parts[4] += c->methods[i].code_length+(c->methods[i].handler_count+1)*sizeof(Handler);
+    }
+}
 uint32_t jvm_uncaught(Jvm *vm) { return vm->uncaught; }

@@ -11,6 +11,8 @@ stays in the block, which lets the phone port answer every window message quickl
 
 #include <stdint.h>
 
+struct JarStream;
+
 typedef struct JvmHost {
     /* Read a whole resource such as "java/lang/Object.class"; the buffer is
        released with release(). Returns 0 when it does not exist. */
@@ -25,7 +27,14 @@ typedef struct JvmHost {
        and a call that shows a changed rectangle. Both may be 0 without a display. */
     uint16_t *(*screen)(void *context);
     void (*flush)(void *context, int x, int y, int width, int height);
+    /* Optional: open a resource for reading on demand (see jar.h); with
+       stream 0 only report its size. Returns 0 when it does not exist. */
+    int (*stream)(void *context, const char *path, struct JarStream *stream, uint32_t *size);
 } JvmHost;
+
+/* Resources at least this large are streamed when the host can; smaller ones
+   are read whole. */
+#define JVM_STREAM_MIN (40*1024)
 
 #define JVM_SCREEN_WIDTH 176
 #define JVM_SCREEN_HEIGHT 220
@@ -57,9 +66,24 @@ const char *jvm_error(Jvm *vm);
 /* Diagnostics. */
 uint32_t jvm_heap_used(Jvm *vm);
 uint32_t jvm_gc_count(Jvm *vm);
+/* Largest live heap seen right after a collection. */
+uint32_t jvm_heap_peak(Jvm *vm);
+/* Size of the largest free block in the heap right now. */
+uint32_t jvm_heap_largest_free(Jvm *vm);
 uint32_t jvm_meta_used(Jvm *vm);
+/* Approximate metadata by kind: thread stacks, classes (count), constant
+   pools, methods/fields/vtables, bytecode with handlers. */
+#define JVM_META_PARTS 5
+void jvm_meta_parts(Jvm *vm, uint32_t parts[JVM_META_PARTS]);
+/* Collect garbage, then report every live object: its class name and size in bytes. */
+void jvm_heap_walk(Jvm *vm, void (*visit)(void *context, const char *name, uint32_t length, uint32_t bytes), void *context);
 /* Threads that ended with an uncaught exception. */
 uint32_t jvm_uncaught(Jvm *vm);
+/* Scratch memory inside the Java heap for host buffers (class files and
+   resources while they are read); 0 when it does not fit. Release returns 0
+   for a block that is not scratch memory. */
+void *jvm_scratch_alloc(Jvm *vm, uint32_t size);
+int jvm_scratch_release(Jvm *vm, void *data);
 /* Queue a MIDP event (type, value such as a key code); returns 0 if the queue is full. */
 int jvm_post_event(Jvm *vm, int type, int value);
 /* Main class for an application JAR, read through host->read: "b22/Launcher"

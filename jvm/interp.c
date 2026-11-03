@@ -28,20 +28,49 @@ static u32 compare(double a, double b, int nan) { return (u32)(a < b ? -1 : a > 
 
 /* ---------- threads and monitors ---------- */
 
+/* Java stacks are int[] in the heap, so a thread only takes what it uses. A
+   stack that is too small is replaced by one twice as large and the frames'
+   pointers are moved to it; needed is the number of slots from the start. */
+static int grow_stack(Thread *t, u32 needed) {
+    Jvm *vm = thread_vm(t);
+    u32 old = t->slots ? (u32)(t->slots_end-t->slots) : 0, capacity = old ? old*2 : THREAD_SLOTS_FIRST;
+    while (capacity < needed) capacity *= 2;
+    if (capacity > THREAD_SLOTS_MAX) return 0;
+    Array *a = new_array(vm, primitive_array(vm, 'I'), capacity);
+    if (!a) return 0;
+    u32 *slots = (u32 *)ARRAY_DATA(a);
+    if (old) {
+        jvm_memcpy(slots, t->slots, old*4);
+        for (u32 i = 0; i < t->depth; i++) {
+            Frame *f = &t->frames[i];
+            f->locals = slots+(f->locals-t->slots);
+            f->stack = slots+(f->stack-t->slots);
+            f->sp = slots+(f->sp-t->slots);
+        }
+    }
+    t->stack = &a->header;
+    t->slots = slots;
+    t->slots_end = slots+capacity;
+    return 1;
+}
+
 Thread *new_thread(Jvm *vm, Object *object) {
     Thread *t = 0;
     for (Thread *k = vm->threads; k; k = k->next) if (k->state == THREAD_DEAD) { t = k; break; }
     if (!t) {
         t = meta_alloc(vm, sizeof(Thread));
         if (!t) return 0;
-        t->slots = meta_alloc(vm, THREAD_SLOTS*4);
         t->frames = meta_alloc(vm, THREAD_FRAMES*sizeof(Frame));
-        if (!t->slots || !t->frames) return 0;
-        t->slots_end = t->slots+THREAD_SLOTS;
+        if (!t->frames) return 0;
         t->max_depth = THREAD_FRAMES;
+        t->state = THREAD_DEAD;  /* no stack yet: the collector skips it */
         t->next = vm->threads;
         vm->threads = t;
-    } else jvm_memset(t->slots, 0, THREAD_SLOTS*4);
+    }
+    t->depth = 0;
+    t->stack = 0;
+    t->slots = t->slots_end = 0;
+    if (!grow_stack(t, THREAD_SLOTS_FIRST)) return 0;
     t->object = object;
     t->exception = 0;
     t->depth = 0;
@@ -64,6 +93,17 @@ Monitor *monitor_for(Jvm *vm, Object *o, int create) {
     return empty;
 }
 
+/* One unlock by the owner. The last one frees the table entry unless a thread
+   is blocked on or waiting for the object, so the 64 entries only hold
+   monitors in use (they used to stay until the next collection). */
+static void release_monitor(Jvm *vm, Monitor *m) {
+    if (--m->count) return;
+    m->owner = 0;
+    for (Thread *k = vm->threads; k; k = k->next)
+        if (k->waiting_on == m->object && (k->state == THREAD_BLOCKED || k->state == THREAD_WAITING)) return;
+    m->object = 0;
+}
+
 int monitor_enter(Thread *t, Object *o) {
     Monitor *m = monitor_for(thread_vm(t), o, 1);
     if (!m) return 0;
@@ -78,7 +118,7 @@ int monitor_enter(Thread *t, Object *o) {
 int monitor_exit(Thread *t, Object *o) {
     Monitor *m = monitor_for(thread_vm(t), o, 0);
     if (!m || m->owner != t) { throw_new(t, "java/lang/IllegalMonitorStateException", 0); return 0; }
-    if (!--m->count) m->owner = 0;
+    release_monitor(thread_vm(t), m);
     return 1;
 }
 
@@ -101,7 +141,7 @@ void throw_new(Thread *t, const char *class_name, const char *message) {
     t->exception = e;
 }
 
-static void report_uncaught(Thread *t) {
+static void report_uncaught(Thread *t, const char *trace, u32 trace_length) {
     Jvm *vm = thread_vm(t);
     Object *e = t->exception;
     char text[160];
@@ -117,6 +157,7 @@ static void report_uncaught(Thread *t) {
     }
     text[n++] = '\n';
     vm->host.write(vm->host.context, 2, text, n);
+    if (trace_length) vm->host.write(vm->host.context, 2, trace, trace_length);
 }
 
 /* Find a handler in the current frames; the top frame's pc is the throwing
@@ -124,6 +165,8 @@ static void report_uncaught(Thread *t) {
 static int handle_exception(Thread *t, int top_is_exact) {
     Jvm *vm = thread_vm(t);
     Object *e = t->exception;
+    char trace[256];  /* frames left without a handler, for the report */
+    u32 traced = 0;
     while (t->depth) {
         Frame *f = &t->frames[t->depth-1];
         Method *m = f->method;
@@ -144,13 +187,26 @@ static int handle_exception(Thread *t, int top_is_exact) {
         }
         if (f->monitor) {
             Monitor *mon = monitor_for(vm, f->monitor, 0);
-            if (mon && mon->owner == t && !--mon->count) mon->owner = 0;
+            if (mon && mon->owner == t) release_monitor(vm, mon);
         }
         if ((m->access & ACC_STATIC) && m->name[2] == '<') m->owner->state = CLASS_INITIALIZED;
+        if (traced+80 < sizeof(trace)) {
+            const char *at = "  at ";
+            while (*at) trace[traced++] = *at++;
+            for (u32 i = 0; i < utf8_length(m->owner->name) && i < 30; i++) trace[traced++] = utf8_bytes(m->owner->name)[i];
+            trace[traced++] = '.';
+            for (u32 i = 0; i < utf8_length(m->name) && i < 30; i++) trace[traced++] = utf8_bytes(m->name)[i];
+            trace[traced++] = ' ';
+            char digits[10];
+            u32 v = offset, d = 0;
+            do { digits[d++] = (char)('0'+v%10); v /= 10; } while (v);
+            while (d) trace[traced++] = digits[--d];
+            trace[traced++] = '\n';
+        }
         t->depth--;
         top_is_exact = 0;
     }
-    report_uncaught(t);
+    report_uncaught(t, trace, traced);
     vm->uncaught++;
     t->exception = 0;
     t->state = THREAD_DEAD;
@@ -162,10 +218,12 @@ static int handle_exception(Thread *t, int top_is_exact) {
 /* Push a frame whose arguments already sit at args (on the caller's stack, or
    at the start of an empty thread stack). Returns 0 with an exception pending. */
 static int push_frame(Thread *t, Method *m, u32 *args) {
-    if (t->depth >= t->max_depth || args+m->max_locals+m->max_stack+4 > t->slots_end) {
+    u32 offset = (u32)(args-t->slots), needed = offset+m->max_locals+m->max_stack+4;
+    if (t->depth >= t->max_depth || (t->slots+needed > t->slots_end && !grow_stack(t, needed))) {
         throw_new(t, "java/lang/StackOverflowError", 0);
         return 0;
     }
+    args = t->slots+offset;
     Frame *f = &t->frames[t->depth++];
     f->method = m;
     f->pc = m->code;
@@ -178,7 +236,12 @@ static int push_frame(Thread *t, Method *m, u32 *args) {
 
 /* Used by natives and the launcher to start Java code on a thread. */
 int invoke_method(Thread *t, Method *m, u32 *args) {
-    u32 *base = t->depth ? t->frames[t->depth-1].sp : t->slots;
+    u32 offset = t->depth ? (u32)(t->frames[t->depth-1].sp-t->slots) : 0;
+    if (t->slots+offset+m->arg_slots > t->slots_end && !grow_stack(t, offset+m->arg_slots)) {
+        throw_new(t, "java/lang/StackOverflowError", 0);
+        return 0;
+    }
+    u32 *base = t->slots+offset;
     for (u32 i = 0; i < m->arg_slots; i++) base[i] = args[i];
     return push_frame(t, m, base);
 }
@@ -474,7 +537,7 @@ int execute(Jvm *vm, Thread *t, u32 budget) {
             u32 *result = sp-slots;
             if (f->monitor) {
                 Monitor *mon = monitor_for(vm, f->monitor, 0);
-                if (mon && mon->owner == t && !--mon->count) mon->owner = 0;
+                if (mon && mon->owner == t) release_monitor(vm, mon);
             }
             if ((m->access & ACC_STATIC) && m->name[2] == '<') m->owner->state = CLASS_INITIALIZED;
             u32 *target = f->locals;
@@ -562,7 +625,7 @@ int execute(Jvm *vm, Thread *t, u32 budget) {
                 if (target->access & ACC_SYNCHRONIZED) {
                     Object *lock = target->access & ACC_STATIC ? target->owner->mirror : REF(args[0]);
                     Monitor *mon = monitor_for(vm, lock, 0);
-                    if (mon && mon->owner == t && !--mon->count) mon->owner = 0;
+                    if (mon && mon->owner == t) release_monitor(vm, mon);
                 }
                 CHECK_VM();
                 if (t->exception) goto exception_exact;
@@ -615,7 +678,20 @@ int execute(Jvm *vm, Thread *t, u32 budget) {
             CHECK_VM();
             if (count < 0) THROW("java/lang/NegativeArraySizeException", 0);
             Array *a = new_array(vm, c, (u32)count);
-            if (!a) THROW("java/lang/OutOfMemoryError", 0);
+            if (!a) {
+                /* Say what did not fit: "<descriptor> length <count>". */
+                char text[48];
+                u32 n = 0, length = utf8_length(c->name);
+                for (u32 i = 0; i < length && n < 24; i++) text[n++] = utf8_bytes(c->name)[i];
+                const char *word = " length ";
+                while (*word) text[n++] = *word++;
+                char digits[12];
+                u32 d = 0, v = (u32)count;
+                do { digits[d++] = (char)('0'+v%10); v /= 10; } while (v);
+                while (d) text[n++] = digits[--d];
+                text[n] = 0;
+                THROW("java/lang/OutOfMemoryError", text);
+            }
             PUSH((uintptr_t)a);
             break;
         }

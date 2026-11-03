@@ -64,11 +64,13 @@ struct Method {
 
 enum { CLASS_LOADED, CLASS_LINKED, CLASS_INITIALIZING, CLASS_INITIALIZED, CLASS_ERROR };
 
-/* Resolved constant pool entry. */
+/* Constant pool entry, 8 bytes. Indices a and u.b (class, name-and-type,
+   name, descriptor) are read only until the entry is resolved: then u holds
+   the class, field, method or string. */
 typedef struct Constant {
     u8 tag, resolved;
-    u16 a, b;   /* indices for refs/name-and-type */
-    union { u32 value; const u8 *utf8; Class *cls; Field *field; Method *method; Object *string; } u;
+    u16 a;
+    union { u32 value; const u8 *utf8; Class *cls; Field *field; Method *method; Object *string; u16 b; } u;
 } Constant;
 
 struct Class {
@@ -120,6 +122,7 @@ struct Thread {
     Thread *next;
     Object *object;      /* java.lang.Thread */
     Object *exception;   /* pending exception */
+    Object *stack;       /* int[] in the heap holding the slots below */
     u32 *slots, *slots_end;
     Frame *frames;
     u32 depth, max_depth;
@@ -138,7 +141,8 @@ typedef struct Monitor {
 #define MAX_MONITORS 64
 #define MAX_TEMP_ROOTS 32
 #define MAX_INTERNED 1024
-#define THREAD_SLOTS 4096  /* 16 KB of Java stack per thread */
+#define THREAD_SLOTS_FIRST 256   /* a new Java stack: 1 KB in the heap, */
+#define THREAD_SLOTS_MAX 8192    /* doubled on demand up to 32 KB */
 #define THREAD_FRAMES 256
 #define MAX_EVENTS 64
 
@@ -150,7 +154,7 @@ struct Jvm {
     u32 *marks_stack;
     u32 marks_capacity;
     Object *free_list;
-    u32 used, gc_count, uncaught;
+    u32 used, gc_count, uncaught, peak_live;
     Class *classes;
     Thread *threads, *current;
     Monitor monitors[MAX_MONITORS];
@@ -190,6 +194,7 @@ Field *resolve_field(Jvm *vm, Class *from, u16 index);
 Method *resolve_method(Jvm *vm, Class *from, u16 index);
 Object *resolve_string(Jvm *vm, Class *from, u16 index);
 void *meta_alloc(Jvm *vm, u32 bytes);
+void *meta_bytes(Jvm *vm, u32 bytes);
 int utf8_equals(Utf8 a, const char *c);
 int utf8_same(Utf8 a, Utf8 b);
 u32 utf8_length(Utf8 a);

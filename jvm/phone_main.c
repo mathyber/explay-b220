@@ -16,7 +16,8 @@ typedef uint16_t u16;
 
 #define SLICE 20000          /* bytecodes per timer tick */
 #define TICK_MS 20
-#define META_BYTES (512*1024)
+#define META_BASE (176*1024) /* MIDP library classes, threads, collector tables */
+#define HEAP_MIN (128*1024)
 #define RESERVE (64*1024)    /* App Heap left to the firmware */
 #define LINES 9
 #define COLUMNS 28
@@ -158,8 +159,17 @@ static u32 archive_read(void *context, u32 offset, void *buffer, u32 length) {
     u32 n = api->read(handle, buffer, length);
     return n == 0xffffffffu ? 0 : n;
 }
-static void *archive_alloc(void *context, u32 size) { (void)context; return api->alloc(size); }
-static void archive_release(void *context, void *data) { (void)context; api->free(data); }
+/* Once the VM runs, entries (class files, resources) are extracted into its
+   heap: outside it only RESERVE is left, less than a large class file. */
+static void *archive_alloc(void *context, u32 size) {
+    (void)context;
+    void *data = vm ? jvm_scratch_alloc(vm, size) : 0;
+    return data ? data : api->alloc(size);
+}
+static void archive_release(void *context, void *data) {
+    (void)context;
+    if (!vm || !jvm_scratch_release(vm, data)) api->free(data);
+}
 
 static int open_archive(Jar *jar, u32 *handle, const u16 *path) {
     u32 h = api->open_wide(path);
@@ -177,7 +187,13 @@ static uint8_t *host_read(void *context, const char *path, uint32_t *size) {
     if (!data && application_file) data = jar_read(&application, path, size);
     return data;
 }
-static void host_release(void *context, uint8_t *data) { (void)context; api->free(data); }
+static void host_release(void *context, uint8_t *data) { archive_release(context, data); }
+
+static int host_stream(void *context, const char *path, JarStream *stream, uint32_t *size) {
+    (void)context;
+    return (library_file && jar_stream_open(&library, path, stream, size)) ||
+           (application_file && jar_stream_open(&application, path, stream, size));
+}
 
 static void host_write(void *context, int stream, const char *bytes, uint32_t length) {
     (void)context; (void)stream;
@@ -229,7 +245,7 @@ static void shutdown(void) {
 }
 
 static void start(const u16 *path) {
-    static const JvmHost host = {host_read, host_release, host_write, host_ms, 0, host_screen, host_flush};
+    static const JvmHost host = {host_read, host_release, host_write, host_ms, 0, host_screen, host_flush, host_stream};
     u16 library_path[20];
     row = column = 0;
     for (u32 i = 0; i < LINES; i++) console[i][0] = 0;
@@ -243,11 +259,14 @@ static void start(const u16 *path) {
     if (!jvm_main_class(&host, name, sizeof(name))) { say("No MIDlet-1 or Main-Class\n"); finished = 1; return; }
     midp = is_launcher(name);
     if (midp) say("Loading MIDlet...\n");
+    /* Metadata grows with the application's classes (measured: about 1.4 bytes
+       per class file byte plus the library); the heap gets the rest. */
+    u32 meta = META_BASE+jar_class_bytes(&application)/5*7;
     u32 available = api->heap_free();
-    if (available < META_BYTES+RESERVE+128*1024) { say("Not enough memory\n"); finished = 1; return; }
+    if (available < meta+RESERVE+HEAP_MIN) { say("Not enough memory\n"); finished = 1; return; }
     u32 bytes = available-RESERVE;
     block = api->alloc(bytes);
-    vm = block ? jvm_create(&host, block, bytes, META_BYTES) : 0;
+    vm = block ? jvm_create(&host, block, bytes, meta) : 0;
     if (!vm) { say("VM creation failed\n"); finished = 1; return; }
     if (!jvm_start_main(vm, name)) { say("VM: "); say(jvm_error(vm)); put('\n'); finished = 1; return; }
     api->timer(TICK_MS, 1);

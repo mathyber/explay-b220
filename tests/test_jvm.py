@@ -170,16 +170,40 @@ class JvmTests(unittest.TestCase):
                     0x4000: source.transpose(Image.FLIP_TOP_BOTTOM), 0x6000: source.transpose(Image.ROTATE_180),
                     90: source.transpose(Image.ROTATE_90), 180: source.transpose(Image.ROTATE_180),
                     270: source.transpose(Image.ROTATE_270)}
-        for line in lines[12:]:
+        for line in lines[12:12+len(expected)]:
             name, *pixels = line.split()
             self.assertEqual([int(v) for v in pixels], list(expected[int(name[1:])].getdata()), line)
-        self.assertEqual(len(lines), 12+len(expected))
+        # Sprite: the reference pixel stays put through a turn; TextBox multi-tap
+        # (see PlatformTest.textInput for the keys); IMPLICIT List selection.
+        self.assertEqual(lines[12+len(expected):], [
+            'sprite frames 2 frame 2 at 9,10', 'turned at 9,9 ref 10,10', 'collides true', 'collides false',
+            'text [бIP0J] caret 3', 'url [a?]', 'list 2 c'])
 
     def test_small_heap_collects_and_survivors_stay_valid(self):
         ours = self.run_ours('GcStress', 160)
         self.assertEqual(ours.returncode, 0, ours.stderr)
         collections = int(ours.stderr.split('collections ')[1].split(',')[0])
         self.assertGreater(collections, 5)
+
+    def test_dead_local_does_not_keep_objects(self):
+        # Opera Mini probes memory this way: fill a Vector until OutOfMemoryError,
+        # then call on with the Vector left in a dead local.
+        source = Path(self.folder.name)/'DeadLocal.java'
+        source.write_text('import java.util.Vector;\n'
+                          'public class DeadLocal {\n'
+                          '  static int probe() {\n'
+                          '    Vector v = new Vector();\n'
+                          '    try { while (true) v.addElement(new byte[8192]); } catch (OutOfMemoryError e) {}\n'
+                          '    int n = v.size();\n'
+                          '    return n + after();\n'
+                          '  }\n'
+                          '  static int after() { byte[] b = new byte[100000]; return b.length; }\n'
+                          '  public static void main(String[] a) { System.out.println(probe() > 100000 ? "ok" : "bad"); }\n'
+                          '}\n', encoding='utf-8')
+        javac([source], self.ours)
+        ours = self.run_ours('DeadLocal', 300)
+        self.assertEqual(ours.returncode, 0, ours.stderr)
+        self.assertEqual(ours.stdout.strip(), 'ok')
 
     def test_uncaught_exception_reports_and_fails(self):
         source = Path(self.folder.name)/'Thrower.java'
@@ -189,6 +213,7 @@ class JvmTests(unittest.TestCase):
         ours = self.run_ours('Thrower')
         self.assertEqual(ours.returncode, 1)
         self.assertIn('Uncaught exception: java.lang.IllegalStateException: bad state', ours.stderr)
+        self.assertIn('  at Thrower.main ', ours.stderr)
 
 
 if __name__ == '__main__':

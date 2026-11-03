@@ -14,6 +14,8 @@ public final class Class {
     public native boolean isInterface();
 
     private static native byte[] readResource(String path);
+    /* Stream state for a large resource, or null: read it whole instead. */
+    private static native byte[] openResource(String path);
 
     public java.io.InputStream getResourceAsStream(String name) {
         if (name.startsWith("/")) name = name.substring(1);
@@ -22,6 +24,8 @@ public final class Class {
             int dot = className.lastIndexOf('.');
             if (dot >= 0) name = className.substring(0, dot + 1).replace('.', '/') + name;
         }
+        byte[] state = openResource(name);
+        if (state != null) return new b22.ResourceStream(state);
         byte[] data = readResource(name);
         return data == null ? null : new java.io.ByteArrayInputStream(data);
     }
