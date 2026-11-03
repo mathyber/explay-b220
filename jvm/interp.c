@@ -547,8 +547,13 @@ int execute(Jvm *vm, Thread *t, u32 budget) {
             }
             if (target->access & ACC_NATIVE) {
                 if (!target->native) {
+                    char name[64];
+                    u32 length = utf8_length(target->name);
+                    if (length > sizeof(name)-1) length = sizeof(name)-1;
+                    jvm_memcpy(name, utf8_bytes(target->name), length);
+                    name[length] = 0;
                     f->pc = start; f->sp = sp;
-                    throw_new(t, "java/lang/UnsatisfiedLinkError", utf8_bytes(target->name));
+                    throw_new(t, "java/lang/UnsatisfiedLinkError", name);
                     goto exception_exact;
                 }
                 u32 result[2] = {0, 0};
@@ -561,7 +566,11 @@ int execute(Jvm *vm, Thread *t, u32 budget) {
                 }
                 CHECK_VM();
                 if (t->exception) goto exception_exact;
-                if (status == 2) { RELOAD(); break; }  /* the native pushed a Java frame */
+                /* NATIVE_PUSHED: the native set this frame's sp and pushed a Java
+                   frame whose return completes the call. NATIVE_RETRY: it pushed
+                   <clinit> frames; the invoke runs again once they return. */
+                if (status == NATIVE_PUSHED) { f->pc = pc; RELOAD(); break; }
+                if (status == NATIVE_RETRY) { RELOAD(); break; }
                 sp = args;
                 for (u32 i = 0; i < target->return_slots; i++) PUSH(result[i]);
                 f->pc = pc; f->sp = sp;

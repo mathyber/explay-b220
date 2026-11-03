@@ -45,7 +45,9 @@ typedef struct Field {
 
 typedef struct Handler { u16 start, end, handler, type; } Handler;
 
+/* Natives return 0 (result filled), 1 (exception pending), NATIVE_PUSHED or NATIVE_RETRY. */
 typedef int (*Native)(Thread *t, u32 *args, u32 *result);
+enum { NATIVE_PUSHED = 2, NATIVE_RETRY = 3 };
 
 struct Method {
     Class *owner;

@@ -6,6 +6,8 @@ public final class Class {
 
     private Class() {}
 
+    public static native Class forName(String name) throws ClassNotFoundException;
+    public native Object newInstance() throws InstantiationException, IllegalAccessException;
     public native String getName();
     public native boolean isInstance(Object o);
     public native boolean isArray();

@@ -289,6 +289,7 @@ static int thread_sleep(Thread *t, u32 *args, u32 *result) {
     Wide v; v.w[0] = args[0]; v.w[1] = args[1];
     i64 ms = (i64)v.l;
     if (ms < 0) { throw_new(t, "java/lang/IllegalArgumentException", "timeout value is negative"); return 1; }
+    if (t->interrupted) { t->interrupted = 0; throw_new(t, "java/lang/InterruptedException", 0); return 1; }
     if (ms > 0x3fffffff) ms = 0x3fffffff;
     t->wake = vm->host.ms(vm->host.context)+(u32)ms;
     t->state = THREAD_SLEEPING;
@@ -300,6 +301,166 @@ static int thread_yield(Thread *t, u32 *args, u32 *result) {
     t->wake = thread_vm(t)->host.ms(thread_vm(t)->host.context);
     t->state = THREAD_SLEEPING;
     return 0;
+}
+
+/* ---------- threads and monitors ---------- */
+
+static Thread *vm_thread(Jvm *vm, Object *o) {
+    Thread *t = (Thread *)(uintptr_t)((u32 *)o)[vm->thread_vmdata/4];
+    return t && t->object == o ? t : 0;
+}
+
+static int thread_start(Thread *t, u32 *args, u32 *result) {
+    (void)result;
+    Jvm *vm = thread_vm(t);
+    Object *self = ARG_REF(0);
+    if (vm_thread(vm, self)) { throw_new(t, "java/lang/IllegalThreadStateException", 0); return 1; }
+    Method *run = find_method(self->cls, "run", "()V");
+    Thread *started = new_thread(vm, self);
+    if (!run || !started) { vm_fail(vm, "cannot start thread", 0); return 1; }
+    u32 call[1] = {args[0]};
+    if (!invoke_method(started, run, call)) return 1;
+    ((u32 *)self)[vm->thread_vmdata/4] = (u32)(uintptr_t)started;
+    started->state = THREAD_RUNNABLE;
+    return 0;
+}
+
+static int thread_current(Thread *t, u32 *args, u32 *result) {
+    (void)args;
+    Jvm *vm = thread_vm(t);
+    if (!t->object) {
+        Object *o = new_object(vm, vm->thread_class);
+        if (!o) { throw_new(t, "java/lang/OutOfMemoryError", 0); return 1; }
+        ((u32 *)o)[vm->thread_vmdata/4] = (u32)(uintptr_t)t;
+        t->object = o;
+    }
+    RETURN_REF(t->object);
+    return 0;
+}
+
+static int thread_alive(Thread *t, u32 *args, u32 *result) {
+    Thread *k = vm_thread(thread_vm(t), ARG_REF(0));
+    result[0] = k && k->state != THREAD_DEAD && k->state != THREAD_NEW;
+    return 0;
+}
+
+static int thread_interrupt(Thread *t, u32 *args, u32 *result) {
+    (void)result;
+    Thread *k = vm_thread(thread_vm(t), ARG_REF(0));
+    if (!k || k->state == THREAD_DEAD) return 0;
+    if (k->state == THREAD_SLEEPING || k->state == THREAD_WAITING) {
+        throw_new(k, "java/lang/InterruptedException", 0);
+        k->state = k->state == THREAD_SLEEPING ? THREAD_RUNNABLE : THREAD_BLOCKED;
+        k->interrupted = 0;
+    } else k->interrupted = 1;
+    return 0;
+}
+
+static int thread_interrupted(Thread *t, u32 *args, u32 *result) {
+    (void)args;
+    result[0] = t->interrupted;
+    t->interrupted = 0;
+    return 0;
+}
+
+static int thread_is_interrupted(Thread *t, u32 *args, u32 *result) {
+    Thread *k = vm_thread(thread_vm(t), ARG_REF(0));
+    result[0] = k && k->interrupted;
+    return 0;
+}
+
+static int thread_count(Thread *t, u32 *args, u32 *result) {
+    (void)args;
+    u32 n = 0;
+    for (Thread *k = thread_vm(t)->threads; k; k = k->next) n += k->state != THREAD_DEAD && k->state != THREAD_NEW;
+    result[0] = n;
+    return 0;
+}
+
+static Monitor *owned_monitor(Thread *t, Object *o) {
+    Monitor *m = monitor_for(thread_vm(t), o, 0);
+    if (!m || m->owner != t) { throw_new(t, "java/lang/IllegalMonitorStateException", 0); return 0; }
+    return m;
+}
+
+static int object_wait(Thread *t, u32 *args, u32 *result) {
+    (void)result;
+    Jvm *vm = thread_vm(t);
+    Object *o = ARG_REF(0);
+    Wide w; w.w[0] = args[1]; w.w[1] = args[2];
+    i64 ms = (i64)w.l;
+    if (ms < 0) { throw_new(t, "java/lang/IllegalArgumentException", "timeout value is negative"); return 1; }
+    Monitor *m = owned_monitor(t, o);
+    if (!m) return 1;
+    if (t->interrupted) { t->interrupted = 0; throw_new(t, "java/lang/InterruptedException", 0); return 1; }
+    t->saved_count = m->count;
+    m->owner = 0;
+    m->count = 0;
+    t->waiting_on = o;
+    if (ms > 0x3fffffff) ms = 0x3fffffff;
+    t->wake = ms ? vm->host.ms(vm->host.context)+(u32)ms : 0;
+    if (ms && !t->wake) t->wake = 1;
+    t->state = THREAD_WAITING;
+    return 0;
+}
+
+static int notify_waiters(Thread *t, u32 *args, int all) {
+    Object *o = ARG_REF(0);
+    if (!owned_monitor(t, o)) return 1;
+    for (Thread *k = thread_vm(t)->threads; k; k = k->next)
+        if (k->state == THREAD_WAITING && k->waiting_on == o) {
+            k->state = THREAD_BLOCKED;
+            if (!all) break;
+        }
+    return 0;
+}
+
+static int object_notify(Thread *t, u32 *args, u32 *result) { (void)result; return notify_waiters(t, args, 0); }
+static int object_notify_all(Thread *t, u32 *args, u32 *result) { (void)result; return notify_waiters(t, args, 1); }
+
+/* ---------- reflection ---------- */
+
+static int class_for_name(Thread *t, u32 *args, u32 *result) {
+    Jvm *vm = thread_vm(t);
+    Object *name = ARG_REF(0);
+    if (!name) { throw_new(t, "java/lang/NullPointerException", 0); return 1; }
+    char text[256];
+    u32 n = string_utf8(vm, name, text, sizeof(text)-1);
+    text[n] = 0;
+    for (u32 i = 0; i < n; i++) if (text[i] == '.') text[i] = '/';
+    Class *c = find_class(vm, (const u8 *)text, n);
+    if (vm->status == JVM_ERROR) return 1;
+    if (!c) {
+        for (u32 i = 0; i < n; i++) if (text[i] == '/') text[i] = '.';
+        throw_new(t, "java/lang/ClassNotFoundException", text);
+        return 1;
+    }
+    if (c->state < CLASS_INITIALIZING) { initialize_class(t, c); return NATIVE_RETRY; }
+    RETURN_REF(class_mirror(vm, c));
+    return 0;
+}
+
+static int class_new_instance(Thread *t, u32 *args, u32 *result) {
+    (void)result;
+    Jvm *vm = thread_vm(t);
+    Class *c = mirror_class(vm, ARG_REF(0));
+    Method *init = 0;
+    for (u32 i = 0; i < c->method_count; i++)
+        if (utf8_equals(c->methods[i].name, "<init>") && utf8_equals(c->methods[i].desc, "()V")) init = &c->methods[i];
+    if (!init || c->dimensions || (c->access & (ACC_INTERFACE|ACC_ABSTRACT))) {
+        throw_new(t, "java/lang/InstantiationException", 0);
+        return 1;
+    }
+    if ((init->access & ACC_PRIVATE) || !(c->access & ACC_PUBLIC)) { throw_new(t, "java/lang/IllegalAccessException", 0); return 1; }
+    if (c->state < CLASS_INITIALIZING) { initialize_class(t, c); return NATIVE_RETRY; }
+    Object *o = new_object(vm, c);
+    if (!o) { throw_new(t, "java/lang/OutOfMemoryError", 0); return 1; }
+    /* The object replaces the receiver as the call's result; the constructor
+       runs on top of it and returns void. */
+    args[0] = (u32)(uintptr_t)o;
+    t->frames[t->depth-1].sp = args+1;
+    u32 call[1] = {args[0]};
+    return invoke_method(t, init, call) ? NATIVE_PUSHED : 1;
 }
 
 typedef struct NativeEntry { const char *cls, *name, *desc; Native fn; } NativeEntry;
@@ -329,6 +490,18 @@ static const NativeEntry natives[] = {
     {"java/lang/Long", "toString", "(J)Ljava/lang/String;", long_string},
     {"java/lang/Thread", "sleep", "(J)V", thread_sleep},
     {"java/lang/Thread", "yield", "()V", thread_yield},
+    {"java/lang/Thread", "start", "()V", thread_start},
+    {"java/lang/Thread", "currentThread", "()Ljava/lang/Thread;", thread_current},
+    {"java/lang/Thread", "isAlive", "()Z", thread_alive},
+    {"java/lang/Thread", "interrupt", "()V", thread_interrupt},
+    {"java/lang/Thread", "interrupted", "()Z", thread_interrupted},
+    {"java/lang/Thread", "isInterrupted", "()Z", thread_is_interrupted},
+    {"java/lang/Thread", "activeCount", "()I", thread_count},
+    {"java/lang/Object", "wait", "(J)V", object_wait},
+    {"java/lang/Object", "notify", "()V", object_notify},
+    {"java/lang/Object", "notifyAll", "()V", object_notify_all},
+    {"java/lang/Class", "forName", "(Ljava/lang/String;)Ljava/lang/Class;", class_for_name},
+    {"java/lang/Class", "newInstance", "()Ljava/lang/Object;", class_new_instance},
 };
 
 Native native_for(Jvm *vm, Class *c, Utf8 name, Utf8 desc) {
@@ -377,7 +550,8 @@ Jvm *jvm_create(const JvmHost *host, void *memory, uint32_t bytes, uint32_t meta
     vm->class_class = find_class_c(vm, "java/lang/Class");
     vm->char_array = primitive_array(vm, 'C');
     Class *throwable = find_class_c(vm, "java/lang/Throwable");
-    if (!vm->object_class || !vm->string_class || !vm->class_class || !vm->char_array || !throwable) {
+    vm->thread_class = find_class_c(vm, "java/lang/Thread");
+    if (!vm->object_class || !vm->string_class || !vm->class_class || !vm->char_array || !throwable || !vm->thread_class) {
         if (vm->status != JVM_ERROR) vm_fail(vm, "core classes missing", 0);
         return vm;
     }
@@ -386,6 +560,7 @@ Jvm *jvm_create(const JvmHost *host, void *memory, uint32_t bytes, uint32_t meta
     vm->string_count = field_offset(vm, vm->string_class, "count", "I");
     vm->class_vmdata = field_offset(vm, vm->class_class, "vmClass", "I");
     vm->throwable_message = field_offset(vm, throwable, "detailMessage", "Ljava/lang/String;");
+    vm->thread_vmdata = field_offset(vm, vm->thread_class, "vmThread", "I");
     return vm;
 }
 
