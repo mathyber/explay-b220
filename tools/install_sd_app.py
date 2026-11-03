@@ -73,7 +73,7 @@ def main():
     try:
         card=args.card or default_card()
         if args.examples:
-            for source in (ROOT/'apps/card_demo.b22asm',ROOT/'apps/card_second.b22asm',ROOT/'apps/card_native.c'):
+            for source in (ROOT/'apps/card_demo.b22asm',ROOT/'apps/card_second.b22asm',ROOT/'apps/card_native.c',ROOT/'apps/card_screen.c'):
                 install(source,card,ensure=True)
             result='examples ready'
         else:result=install(args.source,card,args.ensure,args.name)

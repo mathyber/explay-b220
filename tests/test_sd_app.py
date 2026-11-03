@@ -112,7 +112,7 @@ class NativeVmTests(unittest.TestCase):
         pool_start,pool_size=0x04300000,pool_free
         uc.mem_write(0x042c4d50,struct.pack('>8I',0x42595445,0,0,0,0,0,pool_start,pool_size))
         uc.mem_write(pool_start,struct.pack('>II',pool_start+pool_size,0xffffeeee))
-        calls=dict(opens=[],closed=0,freed=[],rects=[],texts=[],allocation_sizes=[],allocated=[],creates=[],heaps=[])
+        calls=dict(opens=[],closed=0,freed=[],rects=[],texts=[],allocation_sizes=[],allocated=[],creates=[],heaps=[],timers=[],stopped=[],repaints=[],flushes=[])
         if files is None:
             files={'E:\\APPS.LST':b'DEMO.B22\r\nSECOND.B22\r\n','E:\\DEMO.B22':program,
                    'E:\\SECOND.B22':assemble((ROOT/'apps/card_second.b22asm').read_text())}
@@ -143,19 +143,25 @@ class NativeVmTests(unittest.TestCase):
                 count=int.from_bytes(uc.mem_read(uc.reg_read(UC_ARM_REG_SP),4),'big')
                 calls['texts'].append(bytes(uc.mem_read(r3,count*2)).decode('utf-16-be'))
             elif pc==0x4d7da2:calls['creates'].append((r0,r1));result=1
+            elif pc==0x1f55ee:calls['timers'].append((r0,r1,r2));result=7
+            elif pc==0x1f5640:calls['stopped'].append(r0);result=1
+            elif pc==0x4d67d2:calls['repaints'].append(r0);result=1
+            elif pc==0x1d081e:calls['flushes'].append((r1,r2))
             uc.reg_write(UC_ARM_REG_R0,result)
             uc.reg_write(UC_ARM_REG_PC,uc.reg_read(UC_ARM_REG_LR))
-        for pc in (0x60f74e,0x4c5b68,0x5edc5e,0x5ee59e,0x6a5438,0x5ee49e,0x5ee484,0x6a5468,0x4c65ac,0x4cf432,0x4d7da2):
+        for pc in (0x60f74e,0x4c5b68,0x5edc5e,0x5ee59e,0x6a5438,0x5ee49e,0x5ee484,0x6a5468,0x4c65ac,0x4cf432,0x4d7da2,
+                   0x1f55ee,0x1f5640,0x4d67d2,0x1d081e):
             uc.hook_add(UC_HOOK_CODE,stub,begin=pc,end=pc)
         class Guest:pass
         guest=Guest();guest.uc=uc
-        def event(msg,entrypoint=None):
+        def event(msg,entrypoint=None,param=0):
             uc.reg_write(UC_ARM_REG_CPSR,0x2f3)
             uc.reg_write(UC_ARM_REG_SP,0x4000e000)
             uc.reg_write(UC_ARM_REG_LR,0x4000f001)
             uc.reg_write(UC_ARM_REG_R0,0x160002)
             uc.reg_write(UC_ARM_REG_R0+1,msg)
-            uc.reg_write(UC_ARM_REG_R0+2,0)
+            uc.reg_write(UC_ARM_REG_R0+2,param)
+            if msg==0xf020:uc.mem_write(param,bytes([7]))  # stub timer id
             uc.emu_start(entrypoint or self.entry,0x4000f000,count=500000)
             self.assertEqual(uc.reg_read(UC_ARM_REG_PC),0x4000f000)
             self.assertEqual(uc.reg_read(UC_ARM_REG_SP),0x4000e000)
@@ -197,6 +203,28 @@ class NativeVmTests(unittest.TestCase):
         self.assertIn('HEAP FAILED',calls['texts'])
         event,calls=self.fixture(program,pool_free=0x400)
         event(0xf021);self.assertEqual(event(0xfa1b)['status'],3)
+
+    def test_native_timer_screen_flush_and_repaint(self):
+        program=compile_native(ROOT/'apps/card_screen.c')
+        event,calls=self.fixture(program)
+        event(0xf021);event(0xfa1b)
+        self.assertEqual(calls['flushes'][-1],(0,(175<<16)|219))
+        self.assertEqual(calls['timers'],[(0x160002,500,1)])
+        uc_ticks=event(0xf020,param=0x40000100)  # parameter points to the timer id byte
+        self.assertEqual(uc_ticks['mode'],2)
+        event(0xfa1b)
+        self.assertEqual(calls['stopped'],[7])
+        self.assertEqual(calls['repaints'],[2])
+
+    def test_native_program_gets_soft_keys_and_long_right_soft_returns(self):
+        event,calls=self.fixture(compile_native(ROOT/'apps/card_native.c'))
+        event(0xf021);event(0xfa1b)
+        for message in (0xfa16,0xfa17,0xfb17,0xfe01,0xfd01):
+            result=event(message)
+            self.assertEqual((result['mode'],result['event']),(2,message))
+        back=event(0xfc17)
+        self.assertEqual((back['mode'],back['code']),(0,0))
+        self.assertEqual(calls['repaints'],[2])
 
     def test_invalid_native_programs_are_rejected(self):
         program=compile_native(ROOT/'apps/card_native.c')

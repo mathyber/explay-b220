@@ -27,6 +27,7 @@ typedef void (*Fill)(u32 *,u32,u32,u32);
 typedef u32 (*Text)(u32 *,u32,u32,const u16 *,u32,u32,u32,u32,u32,u32);
 typedef u32 (*Label)(u32,const void *,u32);
 typedef u32 (*Create)(u32,u32);
+typedef u32 (*Invalidate)(u32 *,u32,u32);
 
 /* First payload section: replace only the Games menu's launch callback. */
 __attribute__((used,section(".launch")))
@@ -73,7 +74,22 @@ static void text(u32 y,const char *ascii,u32 color) {
     buffer[count]=0;
     FN(0x4cf433,Text)(dev,point(0,y),point(175,y+19),buffer,count,0,color&65535,6,8,0);
 }
+/* Native mode keeps its window and timer in the unused B22V registers. */
+#define NATIVE_TIMER S->r[6]
+#define NATIVE_WINDOW S->r[7]
+#define NATIVE_PERIODIC S->r[5]
+#define MSG_TIMER 0xf020u  /* parameter points to the expired timer id byte */
+typedef u32 (*CreateTimer)(u32,u32,u32);
+typedef u32 (*StopTimer)(u32);
+static void stop_timer(void) {
+    if (S->mode==2 && NATIVE_TIMER) { FN(0x1f5641,StopTimer)(NATIVE_TIMER); NATIVE_TIMER=0; }
+}
+/* The program may have drawn over the soft key bar: ask MMK for a full
+   repaint of the window stack (PostUpdateScreenMsg, 2 = full). */
+typedef u32 (*PostUpdate)(u32);
+static void repaint_all(void) { FN(0x4d67d3,PostUpdate)(2); }
 static void release(void) {
+    stop_timer();
     if (S->magic==MAGIC && S->code) {
         FN(0x6a5469,Free)((void *)S->code);
         S->code=0;
@@ -210,8 +226,34 @@ static u32 api_read(u32 handle,void *buffer,u32 size) {
 static void api_close(u32 handle) { FN(0x5ee485,Close)(handle); }
 static void api_text(u32 y,const char *ascii,u32 color) { text(y,ascii,color); }
 static void api_exit(void) { S->status=EXIT_REQUESTED; }
+/* One window timer per program: MMK_CreateWinTimer(window, ms, periodic). */
+static u32 api_timer(u32 ms,u32 periodic) {
+    stop_timer();
+    if (!ms) return 0;
+    NATIVE_PERIODIC=periodic?1:0;
+    NATIVE_TIMER=FN(0x1f55ef,CreateTimer)(NATIVE_WINDOW,ms,NATIVE_PERIODIC)&255;
+    return NATIVE_TIMER;
+}
+/* Main LCD layer buffer (ROM literal at 0x3aa01c) and the GUI call that merges
+   a rectangle into the pending LCD update; both are used by the stock fill. */
+#define SCREEN ((unsigned short *)0x04280200u)
+static unsigned short *api_screen(void) { return SCREEN; }
+static void api_flush(u32 x,u32 y,u32 w,u32 h) {
+    if (x>=B22N_SCREEN_WIDTH || y>=B22N_SCREEN_HEIGHT || !w || !h) return;
+    if (w>B22N_SCREEN_WIDTH-x) w=B22N_SCREEN_WIDTH-x;
+    if (h>B22N_SCREEN_HEIGHT-y) h=B22N_SCREEN_HEIGHT-y;
+    u32 dev[2]={0,0};
+    FN(0x1d081f,Invalidate)(dev,point(x,y),point(x+w-1,y+h-1));
+}
+/* RAM word incremented by the 1 ms system tick (measured against virtual time). */
+#define MS_COUNTER (*(volatile u32 *)0x042ccec0u)
+static u32 api_ms(void) { return MS_COUNTER; }
+/* SFS_SetFilePointer(handle, 64-bit offset in r1:r2 (ADS order: high, low), origin 0 = begin). */
+typedef u32 (*Seek)(u32,u32,u32,u32);
+static u32 api_seek(u32 handle,u32 offset) { return FN(0x5ee527,Seek)(handle,0,offset,0); }
 static const B22Api api={B22N_API_VERSION,sizeof(B22Api),api_alloc,api_free,api_open,api_size,api_read,
-                         api_close,fill,api_text,api_exit,api_heap_free};
+                         api_close,fill,api_text,api_exit,api_heap_free,api_screen,api_flush,
+                         api_timer,api_ms,api_seek};
 /* Relocate a B22N file in place: the image starts after the 32-byte header,
    .bss follows the image and may overwrite the already applied table.
    Takes ownership of the file buffer and frees it on failure. */
@@ -263,12 +305,12 @@ static int load(void) {
     S->checksum=sum; S->status=0;
     return 1;
 }
-static void run(u32 event) {
+static void run(u32 win,u32 event,u32 param) {
     if (!S->code || S->status) return;
     if (S->mode==2) {
-        S->event=event; S->steps++;
-        FN(S->pc,B22Entry)(&api,event,0);
-        if (S->status==EXIT_REQUESTED) { release(); S->mode=0; S->status=0; menu(); }
+        S->event=event; S->steps++; NATIVE_WINDOW=win;
+        FN(S->pc,B22Entry)(&api,event,param);
+        if (S->status==EXIT_REQUESTED) { release(); S->mode=0; S->status=0; menu(); repaint_all(); }
         return;
     }
     const u8 *p=(const u8 *)S->code;
@@ -319,17 +361,29 @@ u32 game_handler(u32 win,u32 msg,u32 param) {
         if (S->catalog && CAT->count) {
             if (msg==0xfa01) { if (CAT->selected) CAT->selected--; menu(); return 1; }
             if (msg==0xfa02) { if (CAT->selected+1<CAT->count) CAT->selected++; menu(); return 1; }
-            if (msg==0xfa1b) { if (load()) run(0xf021); return 1; }
+            if (msg==0xfa1b) { if (load()) run(win,0xf021,0); return 1; }
         }
         if (msg==0xf024 || msg==0xf025 || msg==0x40000014) { menu(); return 1; }
         if ((msg>=0xfa00 && msg<0xfa17) || msg==0xfa1b || msg==0xf001) return 1;
         return original(win,msg,param);
     }
-    if (msg==0xfa17) { release(); S->mode=0; S->status=0; menu(); return 1; }
-    if (msg==0xfa16) { if (load()) run(0xf021); return 1; }
+    if (S->mode==2 && !S->status) {
+        /* Native programs get every key, soft keys included; a long press
+           of the right soft key is the loader's way back to the list. */
+        if (msg==0xfc17) { release(); S->mode=0; menu(); repaint_all(); return 1; }
+        if (msg>=0xfa00 && msg<0xff00) { run(win,msg,0); return 1; }
+    }
+    if (msg==0xfa17) { u32 native=S->mode==2; release(); S->mode=0; S->status=0; menu(); if (native) repaint_all(); return 1; }
+    if (msg==0xfa16) { if (load()) run(win,0xf021,0); return 1; }
     if (msg==0xf024 || msg==0xf025 || msg==0x40000014 || (msg>=0xfa00 && msg<0xfa17) || msg==0xfa1b) {
         if (S->status && S->status<9) error(S->status);
-        else run(msg);
+        else run(win,msg,0);
+        return 1;
+    }
+    if (msg==MSG_TIMER && S->mode==2 && NATIVE_TIMER && param && *(const u8 *)param==NATIVE_TIMER) {
+        u32 id=NATIVE_TIMER;
+        if (!NATIVE_PERIODIC) NATIVE_TIMER=0;  /* the firmware already deleted a one-shot timer */
+        run(win,msg,id);
         return 1;
     }
     if (msg==0xf001) return 1;
