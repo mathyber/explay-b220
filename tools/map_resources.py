@@ -21,8 +21,9 @@ DIRECTORY = ROOT/'analysis/firmware-resources'
 # Image record type field in module tables; 0x30c and 0xff are not decoded yet.
 TYPES = {0x1:'MB RLE bitmap',0x20a:'SJPG',0x20d:'JFIF JPEG',0x108:'SGIF',0xf:'unknown 0xf',
          0x30c:'packed bitmap 0x30c',0xff:'unknown 0xff'}
-# First distinctive UTF-16 strings of each module identify its owner.
-LABELS = (('Sokoban','games: Sokoban'),('World time','tools: calculator, world time, USB, memory'),
+# First distinctive UTF-16 strings of each module identify its owner (the SD Apps
+# build renamed Sokoban's title, so its module is also known by "Select level").
+LABELS = (('Sokoban','games: Sokoban'),('Select level','games: Sokoban'),('World time','tools: calculator, world time, USB, memory'),
           ('Mmi Ui-Test','engineering test'),('Camera Select','camera'),('FM Radio','FM radio'),
           ('eBook reader','ebook'),('Audio player','audio player'),('Alarm1','alarm, schedule'),
           ('Input method','input method'),('WAP settings','browser'),('Write message','SMS'),

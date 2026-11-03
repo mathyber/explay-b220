@@ -30,6 +30,9 @@ GROUP_NAMES = {
     'audio-player': 'аудиоплеер',
     'clock-digits': 'цифры часов',
 }
+# Modules not offered for redrawing: Sokoban's walls, boxes and snail are no
+# longer reachable (its window is reused by SD Apps, which draws its own list).
+HIDDEN = ('games',)
 FORMATS = {'0x1': 'MB: прозрачность только да/нет', '0x30c': 'ABMP: плавная прозрачность'}
 EDITOR = 440   # editor canvas side, pixels
 THUMB = 52
@@ -84,7 +87,7 @@ class Studio:
         self.grab = None
         self.keep_aspect = tk.BooleanVar(value=True)
         self.smooth = tk.BooleanVar(value=True)
-        self.over = tk.BooleanVar(value=False)
+        self.over = tk.BooleanVar(value=True)  # keep the drawing under a pasted picture
         self.build()
         self.fill_groups()
 
@@ -196,7 +199,7 @@ class Studio:
     def fill_groups(self):
         self.groups = [(f'main: {GROUP_NAMES[g]}', lambda e, g=g: e.get('group') == g) for g in GROUP_NAMES]
         self.groups.append(('main: остальное', lambda e: e['module'] == 'main' and 'group' not in e))
-        for module in dict.fromkeys(e['module'] for e in self.entries if e['module'] != 'main'):
+        for module in dict.fromkeys(e['module'] for e in self.entries if e['module'] not in ('main',)+HIDDEN):
             self.groups.append((module, lambda e, m=module: e['module'] == m))
         self.group['values'] = [name for name, _ in self.groups]
         self.group.current(0)
