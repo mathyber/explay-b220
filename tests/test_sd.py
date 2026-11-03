@@ -165,6 +165,24 @@ class SdStorageTests(unittest.TestCase):
             volume.add_file('TEST.JPG',b'bad')
         self.assertEqual(volume.unique_name('a long name.jpg'),'FILE0001.JPG')
 
+    def test_fat16_folder_with_long_names_and_replacement(self):
+        # The firmware's SFS_FindFirstFile reads these names back (checked in the emulator).
+        volume = Fat16(create_image())
+        volume.add_file('JAVA/Игра.jar',b'first')
+        volume.add_file('JAVA/Long Game Name 2.jar',b'x'*5000)
+        volume.add_file('JAVA/GAZILA.JAR',b'plain')
+        folder = next(e for e in volume.entries() if e['name']=='JAVA')
+        self.assertTrue(folder['directory'])
+        listing = {e['name']:e['size'] for e in volume.folder(folder['cluster'])}
+        self.assertEqual(listing,{'Игра.jar':5,'Long Game Name 2.jar':5000,'GAZILA.JAR':5})
+        short = {bytes(volume.image[s:s+11]) for e in volume.folder(folder['cluster']) for s in e['slots'][-1:]}
+        self.assertEqual(short,{b'FILE~1  JAR',b'LONGGA~1JAR',b'GAZILA  JAR'})
+        free_before = volume.image[volume.fat:volume.root].count(b'\0\0')
+        volume.replace_file('JAVA/игра.JAR',b'second version')
+        listing = {e['name']:e['size'] for e in volume.folder(folder['cluster'])}
+        self.assertEqual(listing,{'игра.JAR':14,'Long Game Name 2.jar':5000,'GAZILA.JAR':5})
+        self.assertEqual(volume.image[volume.fat:volume.root].count(b'\0\0'),free_before)
+
     def test_exclusive_image_owner_persists_guest_sectors(self):
         with TemporaryDirectory() as folder:
             path = Path(folder)/'sd.img'

@@ -69,16 +69,25 @@ class Fat16:
         return result
 
     def add_file(self,name,data):
+        """Root 8.3 file; 'DIR/Any name.ext' adds a file to a one-cluster subdirectory with a long name."""
+        if '/' in name:
+            folder,_,leaf = name.partition('/')
+            slots = self.slots(self.directory(folder.upper()))
+            self.write_entry(slots,leaf,0x20,self.store(data),len(data))
+            return
         name = name.upper()
         if not re.fullmatch(r'[A-Z0-9_]{1,8}(\.[A-Z0-9_]{1,3})?',name):
             raise ValueError('Use an ASCII 8.3 file name')
         if any(item['name']==name for item in self.entries()):
             raise ValueError(f'File already exists: {name}')
+        self.write_entry(range(self.root,self.root_end,32),name,0x20,self.store(data),len(data))
+
+    def store(self,data):
+        """Write data to free clusters; returns the first cluster (0 for empty data)."""
         needed = (len(data)+self.cluster_bytes-1)//self.cluster_bytes
         free = [c for c in range(2,self.clusters+2) if self.image[self.fat+2*c:self.fat+2*c+2]==b'\0\0'][:needed]
-        entry = next((i for i in range(self.root,self.root_end,32) if self.image[i] in (0,0xe5)),None)
-        if len(free)!=needed or entry is None:
-            raise ValueError('Not enough free clusters or root directory entries')
+        if len(free)!=needed:
+            raise ValueError('Not enough free clusters')
         for i,cluster in enumerate(free):
             next_cluster = free[i+1] if i+1<len(free) else 0xffff
             for fat_index in range(2):
@@ -86,12 +95,66 @@ class Fat16:
             position = self.data+(cluster-2)*self.cluster_bytes
             chunk = data[i*self.cluster_bytes:(i+1)*self.cluster_bytes]
             self.image[position:position+self.cluster_bytes] = chunk+bytes(self.cluster_bytes-len(chunk))
-        base,_,ext = name.partition('.')
+        return free[0] if free else 0
+
+    def slots(self,cluster):
+        position = self.data+(cluster-2)*self.cluster_bytes
+        return range(position,position+self.cluster_bytes,32)
+
+    def directory(self,name):
+        """First cluster of a root subdirectory, created when missing."""
+        for item in self.entries():
+            if item['name']==name and item['directory']:
+                return item['cluster']
+        cluster = self.store(bytes(self.cluster_bytes))
+        self.write_entry(range(self.root,self.root_end,32),name,0x10,cluster,0)
+        dots = bytearray(64)
+        dots[0:11],dots[32:43] = b'.'.ljust(11),b'..'.ljust(11)
+        dots[11] = dots[43] = 0x10
+        struct.pack_into('<H',dots,26,cluster)
+        position = self.data+(cluster-2)*self.cluster_bytes
+        self.image[position:position+64] = dots
+        return cluster
+
+    def write_entry(self,slots,name,attributes,cluster,size):
+        """Directory entry, preceded by long-name entries unless name is plain upper-case 8.3."""
+        short = name
+        long_entries = []
+        if not re.fullmatch(r'[A-Z0-9_]{1,8}(\.[A-Z0-9_]{1,3})?',name):
+            stem,dot,ext = name.rpartition('.') if '.' in name else (name,'','')
+            clean = lambda s: re.sub('[^A-Z0-9_]','',s.upper())
+            taken = {bytes(self.image[i:i+11]) for i in slots}
+            for n in range(1,100):
+                base = (clean(stem)[:8-len(f'~{n}')] or 'FILE')+f'~{n}'
+                short = base+('.'+clean(ext)[:3] if clean(ext) else '')
+                if (base.ljust(8)+clean(ext)[:3].ljust(3)).encode('ascii') not in taken:
+                    break
+            packed = (base.ljust(8)+clean(ext)[:3].ljust(3)).encode('ascii')
+            checksum = 0
+            for byte in packed:
+                checksum = (((checksum&1)<<7)+(checksum>>1)+byte)&0xff
+            units = name.encode('utf-16-le')
+            units += b'\0\0' if len(units)%26 else b''
+            units += b'\xff'*(-len(units)%26)
+            parts = [units[i:i+26] for i in range(0,len(units),26)]
+            for index,part in enumerate(parts):
+                raw = bytearray(32)
+                raw[0] = (index+1)|(0x40 if index==len(parts)-1 else 0)
+                raw[1:11],raw[11],raw[13],raw[14:26],raw[28:32] = part[:10],0x0f,checksum,part[10:22],part[22:26]
+                long_entries.insert(0,raw)
+        slots = list(slots)
+        count = len(long_entries)+1
+        start = next((i for i in range(len(slots)-count+1)
+                      if all(self.image[slots[j]] in (0,0xe5) for j in range(i,i+count))),None)
+        if start is None:
+            raise ValueError('Not enough free directory entries')
+        base,_,ext = short.partition('.')
         raw = bytearray(32)
         raw[:11] = (base.ljust(8)+ext.ljust(3)).encode('ascii')
-        raw[11] = 0x20
-        struct.pack_into('<HHHI',raw,22,0,0x21,free[0] if free else 0,len(data))
-        self.image[entry:entry+32] = raw
+        raw[11] = attributes
+        struct.pack_into('<HHHI',raw,22,0,0x21,cluster,size)
+        for offset,entry in zip(slots[start:start+count],long_entries+[raw]):
+            self.image[offset:offset+32] = entry
 
     def unique_name(self,path):
         name = Path(path).name.upper()
@@ -105,29 +168,64 @@ class Fat16:
                 return name
         raise ValueError('No available import name')
 
+    def folder(self,cluster):
+        """Files of a one-cluster subdirectory with long names: name, slots (long entries and the entry), cluster, size."""
+        result,pending = [],[]
+        for offset in self.slots(cluster):
+            raw = self.image[offset:offset+32]
+            if raw[0] == 0:
+                break
+            if raw[0] == 0xe5:
+                pending = []
+            elif raw[11] == 0x0f:
+                pending.append((offset,bytes(raw[1:11]+raw[14:26]+raw[28:32])))
+            else:
+                if pending:
+                    units = b''.join(part for _,part in reversed(pending))
+                    name = units.decode('utf-16-le').split('\0',1)[0]
+                else:
+                    base,ext = raw[:8].decode('ascii','replace').rstrip(),raw[8:11].decode('ascii','replace').rstrip()
+                    name = base+('.'+ext if ext else '')
+                if not raw[11]&0x18:
+                    result.append(dict(name=name,slots=[o for o,_ in pending]+[offset],
+                                       cluster=int.from_bytes(raw[26:28],'little'),size=int.from_bytes(raw[28:32],'little')))
+                pending = []
+        return result
+
+    def release(self,cluster,size):
+        chain=[];seen=set()
+        while cluster:
+            if cluster in seen or not 2<=cluster<self.clusters+2:
+                raise ValueError('Invalid or cyclic FAT chain')
+            seen.add(cluster);chain.append(cluster)
+            following=int.from_bytes(self.image[self.fat+cluster*2:self.fat+cluster*2+2],'little')
+            if following>=0xfff8:break
+            if following<2 or following>=0xfff0:raise ValueError('Broken FAT chain')
+            cluster=following
+        if len(chain)*self.cluster_bytes<size:
+            raise ValueError('FAT chain is shorter than the file size')
+        for cluster in chain:
+            for index in range(2):
+                offset=self.fat+index*self.fat_sectors*512+cluster*2
+                self.image[offset:offset+2]=b'\0\0'
+
     def replace_file(self,name,data):
-        """Replace one root file on a copy, preserving the volume on failure."""
-        name=name.upper()
+        """Replace one root file, or DIR/long name, on a copy, preserving the volume on failure."""
         updated=Fat16(self.image)
-        entry=next((e for e in updated.entries() if e['name']==name),None)
-        if entry:
-            if entry['directory']:raise ValueError('Cannot replace a directory')
-            chain=[];cluster=entry['cluster'];seen=set()
-            while cluster:
-                if cluster in seen or not 2<=cluster<updated.clusters+2:
-                    raise ValueError('Invalid or cyclic FAT chain')
-                seen.add(cluster);chain.append(cluster)
-                following=int.from_bytes(updated.image[updated.fat+cluster*2:updated.fat+cluster*2+2],'little')
-                if following>=0xfff8:break
-                if following<2 or following>=0xfff0:raise ValueError('Broken FAT chain')
-                cluster=following
-            if len(chain)*updated.cluster_bytes<entry['size']:
-                raise ValueError('FAT chain is shorter than the file size')
-            for cluster in chain:
-                for index in range(2):
-                    offset=updated.fat+index*updated.fat_sectors*512+cluster*2
-                    updated.image[offset:offset+2]=b'\0\0'
-            updated.image[entry['offset']]=0xe5
+        if '/' in name:
+            folder,_,leaf=name.partition('/')
+            for item in updated.folder(updated.directory(folder.upper())):
+                if item['name'].lower()==leaf.lower():
+                    updated.release(item['cluster'],item['size'])
+                    for offset in item['slots']:
+                        updated.image[offset]=0xe5
+        else:
+            name=name.upper()
+            entry=next((e for e in updated.entries() if e['name']==name),None)
+            if entry:
+                if entry['directory']:raise ValueError('Cannot replace a directory')
+                updated.release(entry['cluster'],entry['size'])
+                updated.image[entry['offset']]=0xe5
         updated.add_file(name,data)
         self.image=updated.image
 

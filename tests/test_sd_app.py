@@ -1,5 +1,6 @@
 """B22V tests. Synthetic native-API fixtures are separate from cold SD proofs."""
 from pathlib import Path
+import fnmatch
 import struct
 from tempfile import TemporaryDirectory
 import unittest
@@ -116,20 +117,28 @@ class NativeVmTests(unittest.TestCase):
         pool_start,pool_size=0x04300000,pool_free
         uc.mem_write(0x042c4d50,struct.pack('>8I',0x42595445,0,0,0,0,0,pool_start,pool_size))
         uc.mem_write(pool_start,struct.pack('>II',pool_start+pool_size,0xffffeeee))
-        calls=dict(opens=[],closed=0,freed=[],rects=[],texts=[],allocation_sizes=[],allocated=[],creates=[],heaps=[],timers=[],stopped=[],repaints=[],flushes=[])
+        calls=dict(opens=[],closed=0,find_closed=[],freed=[],rects=[],texts=[],allocation_sizes=[],allocated=[],creates=[],heaps=[],timers=[],stopped=[],repaints=[],flushes=[])
         if files is None:
             files={'E:\\APPS.LST':b'DEMO.B22\r\nSECOND.B22\r\n','E:\\DEMO.B22':program,
                    'E:\\SECOND.B22':assemble((ROOT/'apps/card_second.b22asm').read_text())}
         if missing:files.pop('E:\\DEMO.B22',None)
         # Stub allocations start low in RAM, clear of the pool, clock and loader state.
-        handles={};positions={};heap_next=0x04000000
+        handles={};positions={};searches={};heap_next=0x04000000
+        def wide(address):
+            raw=bytes(uc.mem_read(address,512))
+            end=next(i for i in range(0,len(raw),2) if raw[i:i+2]==b'\0\0')
+            return raw[:end].decode('utf-16-be')
+        def found(data,name):
+            # Firmware find data: attributes u16 at 0x14, size at 0x18, UCS-2 long name at 0x1c.
+            uc.mem_write(data+0x14,(0x20).to_bytes(2,'big'));uc.mem_write(data+0x18,len(files[name]).to_bytes(4,'big'))
+            uc.mem_write(data+0x1c,(name.rsplit('\\',1)[1]+'\0').encode('utf-16-be'))
         def stub(uc,pc,size,_):
             nonlocal heap_next
             args=[uc.reg_read(UC_ARM_REG_R0+i) for i in range(4)]
             r0,r1,r2,r3=args;result=0
             self.assertEqual(uc.reg_read(UC_ARM_REG_SP)&7,0)
             if pc==0x5edc5e:
-                name=bytes(uc.mem_read(r0,32)).decode('utf-16-be').split('\0',1)[0]
+                name=wide(r0)
                 calls['opens'].append((name,r1))
                 if name in files:
                     result=len(handles)+1;handles[result]=name;positions[result]=0
@@ -147,6 +156,16 @@ class NativeVmTests(unittest.TestCase):
                 self.assertEqual((r1,r3),(0,0))
                 positions[r0]=r2
             elif pc==0x5ee484:calls['closed']+=1
+            elif pc==0x5ee5c0:  # SFS_FindFirstFile(pattern, data): handle or 0
+                folder,_,mask=wide(r0).rpartition('\\')
+                matches=[n for n in files if n.rpartition('\\')[0].lower()==folder.lower()
+                         and fnmatch.fnmatch(n.rpartition('\\')[2].lower(),mask.lower())]
+                if matches:
+                    result=0x100+len(searches);searches[result]=matches[1:];found(r1,matches[0])
+            elif pc==0x5ee8ba:  # SFS_FindNextFile(handle, data): 0 on a match
+                if searches[r0]:found(r1,searches[r0].pop(0))
+                else:result=7
+            elif pc==0x5ee94a:calls['find_closed'].append(r0)
             elif pc==0x6a5468:calls['freed'].append(r0)
             elif pc==0x4c65ac:calls['rects'].append((r1,r2,r3))
             elif pc==0x4cf432:
@@ -160,7 +179,7 @@ class NativeVmTests(unittest.TestCase):
             uc.reg_write(UC_ARM_REG_R0,result)
             uc.reg_write(UC_ARM_REG_PC,uc.reg_read(UC_ARM_REG_LR))
         for pc in (0x60f74e,0x4c5b68,0x5edc5e,0x5ee59e,0x6a5438,0x5ee49e,0x5ee484,0x6a5468,0x4c65ac,0x4cf432,0x4d7da2,
-                   0x1f55ee,0x1f5640,0x4d67d2,0x1d081e,0x5ee526):
+                   0x1f55ee,0x1f5640,0x4d67d2,0x1d081e,0x5ee526,0x5ee5c0,0x5ee8ba,0x5ee94a):
             uc.hook_add(UC_HOOK_CODE,stub,begin=pc,end=pc)
         class Guest:pass
         guest=Guest();guest.uc=uc
@@ -263,6 +282,51 @@ class NativeVmTests(unittest.TestCase):
         event(0xfa1b);event(0xf022)  # OK after the end exits; closing frees everything
         self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))
         self.assertEqual(calls['closed'],len([o for o in calls['opens'] if o[0]!='E:\\MISSING']))
+
+    @unittest.skipUnless(JAVA_TOOLS,'Local JDK required')
+    def test_java_vm_lists_jars_and_returns_to_the_list(self):
+        from tools.build_java_phone import build_app,build_vm,zip_directory
+        from tools.build_jvm import LIBRARY,build_library
+        build_library()
+        hello=build_app([ROOT/'apps/java/Hello.java'],'Hello')
+        with TemporaryDirectory() as folder:
+            library=Path(folder)/'JAVALIB.JAR'
+            zip_directory(LIBRARY,library)
+            files={'E:\\APPS.LST':b'JAVA.B22\r\n','E:\\JAVA.B22':build_vm(),'E:\\JAVALIB.JAR':library.read_bytes(),
+                   'E:\\JAVA\\Zeta Hello.jar':hello,'E:\\JAVA\\NOTES.TXT':b'not a game',
+                   'E:\\JAVA\\Игра.JAR':hello,'E:\\APP.JAR':b'not used while JAVA has games'}
+        event,calls=self.fixture(b'',files=files,budget=400000000)
+        event(0xf021);event(0xfa1b)
+        # Sorted by name, ".jar" hidden, no other files; the search is closed.
+        self.assertEqual(calls['texts'][-3:],['Java','Zeta Hello','Игра'])
+        self.assertEqual(calls['find_closed'],[0x100])
+        self.assertEqual(calls['timers'],[])
+        event(0xfa02);event(0xfb02)  # down: second game selected
+        self.assertEqual(calls['texts'][-3:],['Java','Zeta Hello','Игра'])
+        event(0xfa1b)
+        self.assertIn(('E:\\JAVA\\Игра.JAR',0x31),calls['opens'])
+        self.assertNotIn('E:\\APP.JAR',[name for name,_ in calls['opens']])
+        for _ in range(200):
+            event(0xf020,param=0x40000100)
+            if '[finished]' in calls['texts']:break
+        self.assertIn('fib(15) = 610',calls['texts'])
+        block=max(calls['allocation_sizes'])
+        event(0xfa1b)  # OK after the end: VM memory freed, list again
+        self.assertEqual(calls['texts'][-3:],['Java','Zeta Hello','Игра'])
+        self.assertIn(calls['allocated'][calls['allocation_sizes'].index(block)],calls['freed'])
+        self.assertEqual(calls['stopped'][-1:],[7])
+        event(0xfa17)  # right soft key on the list: back to SD Apps
+        event(0xf022)
+        self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))
+        self.assertEqual(calls['closed'],len([o for o in calls['opens'] if o[0] in files]))
+
+    def test_java_vm_says_where_to_put_jars(self):
+        from tools.build_java_phone import build_vm
+        files={'E:\\APPS.LST':b'JAVA.B22\r\n','E:\\JAVA.B22':build_vm()}
+        event,calls=self.fixture(b'',files=files,budget=400000000)
+        event(0xf021);event(0xfa1b)
+        self.assertEqual(calls['texts'][-4:],['Java','No games','Put .jar files into','E:\\JAVA\\'])
+        self.assertEqual(calls['find_closed'],[])
 
     @unittest.skipUnless(JAVA_TOOLS,'Local JDK required')
     def test_java_vm_runs_a_midlet_with_keys(self):

@@ -54,6 +54,13 @@ enum {
 #define B22N_KEY_RIGHT (B22N_PRESS | B22N_RIGHT)
 #define B22N_KEY_OK (B22N_PRESS | B22N_OK)
 
+#define B22N_ATTR_DIRECTORY 0x10
+#define B22N_NAME_MAX 255
+typedef struct B22FindEntry {
+    b22_u32 size, attributes;
+    unsigned short name[B22N_NAME_MAX+1];  /* long name, without the directory */
+} B22FindEntry;
+
 typedef struct B22Api {
     b22_u32 version, size;
     /* Firmware Dynamic App Heap; 0 when no free block fits. The loader checks
@@ -88,7 +95,20 @@ typedef struct B22Api {
     b22_u32 (*ms)(void);
     /* Set the read position from the start of the file; 0 on success. */
     b22_u32 (*seek)(b22_u32 handle, b22_u32 offset);
+    /* Fields below exist when api->size covers them (loaders from 2026-11). */
+    /* UCS-2 path, for long and non-ASCII names; handle or 0. */
+    b22_u32 (*open_wide)(const unsigned short *path);
+    /* Like text(), UCS-2, up to 64 characters. */
+    void (*text_wide)(b22_u32 y, const unsigned short *text, b22_u32 color);
+    /* Directory search with a UCS-2 pattern such as L"E:\\JAVA\\*.jar" (case
+       does not matter). find_first fills the first match and returns a search
+       handle, 0 when nothing matches; find_next returns 0 while it finds more.
+       Close every handle find_first returned. */
+    b22_u32 (*find_first)(const unsigned short *pattern, B22FindEntry *entry);
+    b22_u32 (*find_next)(b22_u32 search, B22FindEntry *entry);
+    void (*find_close)(b22_u32 search);
 } B22Api;
+
 
 #define B22N_SCREEN_WIDTH 176
 #define B22N_SCREEN_HEIGHT 220

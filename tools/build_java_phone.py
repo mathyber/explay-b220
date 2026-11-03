@@ -1,10 +1,11 @@
 """Build the B22 JVM for the phone and put it on an SD card image.
 
-Run as python -m tools.build_java_phone [--app apps/java/Hello.java | --jar game.jar]
+Run as python -m tools.build_java_phone [--app apps/java/Hello.java] [--jar game.jar ...]
 [--card IMG].
 Produces analysis/jvm/phone/: JAVA.B22 (the VM as a B22N program), JAVALIB.JAR
-(class library) and APP.JAR (the application: compiled from --app, or a ready
-MIDlet JAR given with --jar).
+(class library) and APP.JAR (compiled from --app). Ready JARs given with --jar
+go to E:\\JAVA\\ under their own names; JAVA.B22 lists that folder and runs
+APP.JAR only when the folder has no JARs.
 Without --card the files go to the card of the current content-removal PS.
 """
 import argparse
@@ -81,7 +82,7 @@ def main():
     parser.add_argument('--app', type=Path, default=ROOT/'apps/java/Hello.java')
     parser.add_argument('--main', help='Main class (default: the source file name)')
     parser.add_argument('--midlet', action='store_true', help='Package the class as MIDlet-1')
-    parser.add_argument('--jar', type=Path, help='Install a ready application JAR instead of --app')
+    parser.add_argument('--jar', type=Path, action='append', default=[], help='Ready JAR for the card folder JAVA (repeatable)')
     parser.add_argument('--card', type=Path)
     args = parser.parse_args()
     try:
@@ -90,14 +91,18 @@ def main():
         vm = build_vm()
         library = DIRECTORY/'JAVALIB.JAR'
         zip_directory(LIBRARY, library)
-        app = args.jar.read_bytes() if args.jar else build_app([args.app], args.main or args.app.stem, args.midlet)
+        files = {'JAVA.B22': vm, 'JAVALIB.JAR': library.read_bytes()}
+        if args.jar:
+            files.update({f'JAVA/{jar.name}': jar.read_bytes() for jar in args.jar})
+        else:
+            files['APP.JAR'] = build_app([args.app], args.main or args.app.stem, args.midlet)
+            (DIRECTORY/'APP.JAR').write_bytes(files['APP.JAR'])
         (DIRECTORY/'JAVA.B22').write_bytes(vm)
-        (DIRECTORY/'APP.JAR').write_bytes(app)
         card = args.card or default_card()
-        install(card, {'JAVA.B22': vm, 'JAVALIB.JAR': library.read_bytes(), 'APP.JAR': app})
+        install(card, files)
     except (OSError, ValueError) as exc:
         parser.error(f'{exc}. Close the emulator before changing its SD image.')
-    print(f'JAVA.B22 {len(vm)} bytes, JAVALIB.JAR {library.stat().st_size} bytes, APP.JAR {len(app)} bytes -> {card}')
+    print(', '.join(f'{name} {len(data)} bytes' for name, data in files.items()), '->', card)
 
 
 if __name__ == '__main__':

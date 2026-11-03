@@ -258,9 +258,44 @@ static u32 api_ms(void) { return MS_COUNTER; }
 /* SFS_SetFilePointer(handle, 64-bit offset in r1:r2 (ADS order: high, low), origin 0 = begin). */
 typedef u32 (*Seek)(u32,u32,u32,u32);
 static u32 api_seek(u32 handle,u32 offset) { return FN(0x5ee527,Seek)(handle,0,offset,0); }
+static u32 api_open_wide(const u16 *path) { return FN(0x5edc5f,Open)(path,0x31,0,0); }
+static void api_text_wide(u32 y,const u16 *wide,u32 color) {
+    if (y>156) return;
+    u32 count=0,dev[2]={0,0};
+    while (count<64 && wide[count]) count++;
+    FN(0x4cf433,Text)(dev,point(0,y),point(175,y+19),wide,count,0,color&65535,6,8,0);
+}
+/* SFS_FindFirstFile(pattern, data) returns the search handle, 0 when nothing
+   matches; SFS_FindNextFile(handle, data) returns 0 on a match. The firmware
+   find data is 556 bytes: attributes u16 at 0x14, size at 0x18, long name at 0x1c. */
+typedef u32 (*FindFirst)(const u16 *,u8 *);
+typedef u32 (*FindNext)(u32,u8 *);
+typedef u32 (*FindClose)(u32);
+static void found(const u8 *data,B22FindEntry *entry) {
+    entry->attributes=*(const u16 *)(data+0x14);
+    entry->size=*(const u32 *)(data+0x18);
+    const u16 *name=(const u16 *)(data+0x1c);
+    u32 i=0;
+    for (;i<B22N_NAME_MAX && name[i];i++) entry->name[i]=name[i];
+    entry->name[i]=0;
+}
+static u32 api_find_first(const u16 *pattern,B22FindEntry *entry) {
+    u32 data[556/4];
+    u32 search=FN(0x5ee5c1,FindFirst)(pattern,(u8 *)data);
+    if (search) found((u8 *)data,entry);
+    return search;
+}
+static u32 api_find_next(u32 search,B22FindEntry *entry) {
+    u32 data[556/4];
+    u32 error=FN(0x5ee8bb,FindNext)(search,(u8 *)data);
+    if (!error) found((u8 *)data,entry);
+    return error;
+}
+static void api_find_close(u32 search) { FN(0x5ee94b,FindClose)(search); }
 static const B22Api api={B22N_API_VERSION,sizeof(B22Api),api_alloc,api_free,api_open,api_size,api_read,
                          api_close,fill,api_text,api_exit,api_heap_free,api_screen,api_flush,
-                         api_timer,api_ms,api_seek};
+                         api_timer,api_ms,api_seek,api_open_wide,api_text_wide,
+                         api_find_first,api_find_next,api_find_close};
 /* Relocate a B22N file in place: the image starts after the 32-byte header,
    .bss follows the image and may overwrite the already applied table.
    Takes ownership of the file buffer and frees it on failure. */

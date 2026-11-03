@@ -1,15 +1,18 @@
 /* JAVA.B22: the B22 JVM as a native SD application.
 
-Classes come from E:\JAVALIB.JAR (the class library) and E:\APP.JAR (the
-application). A manifest with MIDlet-1 starts b22.Launcher, which runs the
-MIDlet and owns the screen; otherwise Main-Class runs with System.out shown as
-a console. The VM runs a bounded slice on every window timer tick; phone keys
-are posted to the MIDP event queue. */
+Opening it lists the .jar files in E:\JAVA\ and runs the chosen one; with no
+files there it runs E:\APP.JAR directly. Classes come from E:\JAVALIB.JAR (the
+class library) and the chosen JAR. A manifest with MIDlet-1 starts
+b22.Launcher, which runs the MIDlet and owns the screen; otherwise Main-Class
+runs with System.out shown as a console. The VM runs a bounded slice on every
+window timer tick; phone keys are posted to the MIDP event queue. When the
+program ends, the list comes back. */
 #include "b22n.h"
 #include "jvm.h"
 #include "jar.h"
 
 typedef uint32_t u32;
+typedef uint16_t u16;
 
 #define SLICE 20000          /* bytecodes per timer tick */
 #define TICK_MS 20
@@ -17,21 +20,35 @@ typedef uint32_t u32;
 #define RESERVE (64*1024)    /* App Heap left to the firmware */
 #define LINES 9
 #define COLUMNS 28
+#define GAMES 48
+#define NAME_CHARS 80        /* longer names are skipped */
+#define ROWS 6
+#define FOLDER "E:\\JAVA\\"
 
 static const B22Api *api;
 static Jvm *vm;
 static void *block;
 static Jar library, application;
 static u32 library_file, application_file;
-static int finished, midp;
+static int finished, midp, choosing, from_list;
 static char console[LINES][COLUMNS+1];
 static u32 row, column;
 static int dirty;
+static u16 games[GAMES][NAME_CHARS+1];
+static u32 game_count, selected;
+static B22FindEntry entry;
 
 static int is_launcher(const char *name) {
     const char *launcher = "b22/Launcher";
     while (*name && *name == *launcher) { name++; launcher++; }
     return *name == *launcher;
+}
+
+static u32 widen(u16 *out, const char *ascii) {
+    u32 n = 0;
+    while (ascii[n]) { out[n] = (unsigned char)ascii[n]; n++; }
+    out[n] = 0;
+    return n;
 }
 
 /* ---------- console ---------- */
@@ -62,6 +79,77 @@ static void draw(void) {
     dirty = 0;
 }
 
+/* ---------- game list ---------- */
+
+static u16 lower(u16 c) { return (c >= 'A' && c <= 'Z') || (c >= 0x410 && c <= 0x42f) ? (u16)(c+32) : c; }
+
+static int before(const u16 *a, const u16 *b) {
+    while (*a && lower(*a) == lower(*b)) { a++; b++; }
+    return lower(*a) < lower(*b);
+}
+
+static void scan(void) {
+    u16 pattern[24];
+    widen(pattern, FOLDER "*.jar");
+    game_count = selected = 0;
+    u32 search = api->find_first(pattern, &entry);
+    if (!search) return;
+    do {
+        u32 length = 0;
+        while (entry.name[length]) length++;
+        if ((entry.attributes & B22N_ATTR_DIRECTORY) || length > NAME_CHARS) continue;
+        /* Insertion keeps the list sorted by name. */
+        u32 at = game_count;
+        while (at > 0 && before(entry.name, games[at-1])) {
+            for (u32 i = 0; i <= NAME_CHARS; i++) games[at][i] = games[at-1][i];
+            at--;
+        }
+        for (u32 i = 0; i <= length; i++) games[at][i] = entry.name[i];
+        game_count++;
+    } while (game_count < GAMES && api->find_next(search, &entry) == 0);
+    api->find_close(search);
+}
+
+static void draw_list(void) {
+    static const u16 title[] = {'J', 'a', 'v', 'a', 0};
+    api->fill(0, 0, 176, 176, 0);
+    api->text_wide(2, title, 0xffe0);
+    if (!game_count) {
+        api->text(50, "No games", 0xffff);
+        api->text(76, "Put .jar files into", 0xffff);
+        api->text(96, FOLDER, 0x07ff);
+        return;
+    }
+    u32 first = selected/ROWS*ROWS;
+    for (u32 i = 0; i < ROWS && first+i < game_count; i++) {
+        u32 y = 28+i*22, current = first+i == selected;
+        u16 shown[NAME_CHARS+1];
+        u32 n = 0;
+        while ((shown[n] = games[first+i][n]) != 0) n++;
+        if (n > 4 && shown[n-4] == '.') shown[n-4] = 0;  /* hide ".jar" */
+        if (current) api->fill(0, y-1, 176, 21, 0x2104);
+        api->text_wide(y, shown, current ? 0x07ff : 0xffff);
+    }
+    if (game_count > ROWS) {
+        char page[8];
+        u32 at = 0, value = first/ROWS+1, pages = (game_count+ROWS-1)/ROWS;
+        if (value >= 10) page[at++] = (char)('0'+value/10);
+        page[at++] = (char)('0'+value%10);
+        page[at++] = '/';
+        if (pages >= 10) page[at++] = (char)('0'+pages/10);
+        page[at++] = (char)('0'+pages%10);
+        page[at] = 0;
+        api->text(156, page, 0x8410);
+    }
+}
+
+/* After a MIDlet the whole frame buffer is its picture: clear it. */
+static void clear_screen(void) {
+    uint16_t *screen = api->screen();
+    for (u32 i = 0; i < B22N_SCREEN_WIDTH*B22N_SCREEN_HEIGHT; i++) screen[i] = 0;
+    api->flush(0, 0, B22N_SCREEN_WIDTH, B22N_SCREEN_HEIGHT);
+}
+
 /* ---------- JVM host ---------- */
 
 static u32 archive_read(void *context, u32 offset, void *buffer, u32 length) {
@@ -73,8 +161,8 @@ static u32 archive_read(void *context, u32 offset, void *buffer, u32 length) {
 static void *archive_alloc(void *context, u32 size) { (void)context; return api->alloc(size); }
 static void archive_release(void *context, void *data) { (void)context; api->free(data); }
 
-static int open_archive(Jar *jar, u32 *handle, const char *path) {
-    u32 h = api->open(path);
+static int open_archive(Jar *jar, u32 *handle, const u16 *path) {
+    u32 h = api->open_wide(path);
     if (!h) return 0;
     u32 size = api->file_size(h);
     JarIo io = {archive_read, archive_alloc, archive_release, (void *)(uintptr_t)h, size};
@@ -140,14 +228,17 @@ static void shutdown(void) {
     vm = 0;
 }
 
-static void start(void) {
+static void start(const u16 *path) {
     static const JvmHost host = {host_read, host_release, host_write, host_ms, 0, host_screen, host_flush};
+    u16 library_path[20];
     row = column = 0;
     for (u32 i = 0; i < LINES; i++) console[i][0] = 0;
     finished = 0;
     midp = 0;
-    if (!open_archive(&library, &library_file, "E:\\JAVALIB.JAR")) { say("No E:\\JAVALIB.JAR\n"); finished = 1; return; }
-    if (!open_archive(&application, &application_file, "E:\\APP.JAR")) { say("No E:\\APP.JAR\n"); finished = 1; return; }
+    choosing = 0;
+    widen(library_path, "E:\\JAVALIB.JAR");
+    if (!open_archive(&library, &library_file, library_path)) { say("No E:\\JAVALIB.JAR\n"); finished = 1; return; }
+    if (!open_archive(&application, &application_file, path)) { say("Cannot open the JAR\n"); finished = 1; return; }
     char name[128];
     if (!jvm_main_class(&host, name, sizeof(name))) { say("No MIDlet-1 or Main-Class\n"); finished = 1; return; }
     midp = is_launcher(name);
@@ -162,12 +253,54 @@ static void start(void) {
     api->timer(TICK_MS, 1);
 }
 
+static void launch(u32 index) {
+    u16 path[NAME_CHARS+12];
+    u32 n = widen(path, FOLDER);
+    for (u32 i = 0; (path[n+i] = games[index][i]) != 0; i++) {}
+    start(path);
+    draw();
+}
+
+/* Program over: back to the list it came from, or to SD Apps. */
+static void done(void) {
+    shutdown();
+    if (!from_list) { api->exit(); return; }
+    clear_screen();
+    choosing = 1;
+    finished = 0;
+    midp = 0;
+    draw_list();
+}
+
+static void open_list(void) {
+    scan();
+    from_list = game_count > 0;
+    u16 fallback[16];
+    widen(fallback, "E:\\APP.JAR");
+    u32 old = from_list ? 0 : api->open_wide(fallback);
+    if (old) { api->close(old); start(fallback); draw(); return; }
+    choosing = 1;
+    draw_list();
+}
+
+static void choose(u32 message) {
+    u32 kind = B22N_KIND(message), code = B22N_CODE(message);
+    if (kind != B22N_PRESS && kind != B22N_REPEAT) return;
+    if (code == B22N_SOFT_RIGHT && kind == B22N_PRESS) { api->exit(); return; }
+    if (!game_count) return;
+    if (code == B22N_UP || code == B22N_2) selected = selected ? selected-1 : game_count-1;
+    else if (code == B22N_DOWN || code == B22N_8) selected = selected+1 < game_count ? selected+1 : 0;
+    else if ((code == B22N_OK || code == B22N_SOFT_LEFT || code == B22N_5) && kind == B22N_PRESS) { launch(selected); return; }
+    else return;
+    draw_list();
+}
+
 static void tick(void) {
     if (!vm || finished) return;
     int status = jvm_run(vm, SLICE);
     /* An uncaught exception or VM error brings the console back over the MIDlet. */
     if (midp && (status == JVM_ERROR || jvm_uncaught(vm))) { midp = 0; dirty = 1; }
-    if (status == JVM_DONE && midp) { finished = 1; api->timer(0, 0); api->exit(); }
+    if (status == JVM_DONE && midp) done();
     else if (status == JVM_DONE) { say("[finished]\n"); finished = 1; api->timer(0, 0); }
     else if (status == JVM_ERROR) { say("VM: "); say(jvm_error(vm)); put('\n'); finished = 1; api->timer(0, 0); }
 }
@@ -178,12 +311,17 @@ u32 b22n_main(const B22Api *program_api, u32 message, u32 parameter) {
     api = program_api;
     if (api->version != B22N_API_VERSION || api->size < sizeof(B22Api)) return 0;
     if (message == B22N_CLOSE) { shutdown(); return 1; }
-    if (message == B22N_OPEN) { start(); draw(); return 1; }
+    if (message == B22N_OPEN) { open_list(); return 1; }
+    if (choosing) {
+        if (B22N_IS_KEY(message)) choose(message);
+        else if (message == B22N_PAINT) draw_list();
+        return 1;
+    }
     if (message == B22N_TIMER) tick();
     else if (B22N_IS_KEY(message) && vm && !finished) key(message);
-    else if (message == B22N_KEY_OK && finished) { api->exit(); return 1; }
+    else if (message == B22N_KEY_OK && finished) { done(); return 1; }
     else if (message == B22N_PAINT && midp && vm && !finished) jvm_post_event(vm, JVM_REPAINT, 1);
-    if (midp && !finished) return 1;  /* the MIDlet owns the screen */
+    if (choosing || (midp && !finished)) return 1;  /* the list or the MIDlet owns the screen */
     if (dirty || message == B22N_PAINT) draw();
     return 1;
 }
