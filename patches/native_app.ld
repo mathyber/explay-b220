@@ -1,4 +1,4 @@
-ENTRY(b22n_main)
+ENTRY(go1_main)
 SECTIONS {
     . = 0;
     .image : {

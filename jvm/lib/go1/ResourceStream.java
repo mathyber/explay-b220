@@ -1,4 +1,4 @@
-package b22;
+package go1;
 
 import java.io.IOException;
 import java.io.InputStream;

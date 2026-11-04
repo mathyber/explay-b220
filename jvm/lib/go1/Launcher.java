@@ -1,4 +1,4 @@
-package b22;
+package go1;
 
 import java.io.InputStream;
 import java.util.Hashtable;
@@ -64,9 +64,9 @@ public final class Launcher {
         String className = entry.substring(entry.lastIndexOf(',') + 1).trim();
         midlet = (MIDlet) Class.forName(className).newInstance();
         Display display = Display.getDisplay(midlet);
-        midlet.b22Start();
+        midlet.go1Start();
         display.run();
-        midlet.b22Destroy();
+        midlet.go1Destroy();
     }
 
     public static boolean isExiting() {

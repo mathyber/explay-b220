@@ -1,4 +1,4 @@
-/* Windows test host: b22jvm [-heap KB] [-meta KB] [-cp dir;dir] [-jar app.jar] MainClass */
+/* Windows test host: go1jvm [-heap KB] [-meta KB] [-cp dir;dir] [-jar app.jar] MainClass */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,9 +107,9 @@ static int by_bytes(const void *a, const void *b) {
     return x < y ? 1 : x > y ? -1 : 0;
 }
 
-/* B22JVM_STATS: totals; B22JVM_HEAP: live objects by class after a collection. */
+/* GO1JVM_STATS: totals; GO1JVM_HEAP: live objects by class after a collection. */
 static void stats(Jvm *vm) {
-    if (getenv("B22JVM_STATS")) {
+    if (getenv("GO1JVM_STATS")) {
         uint32_t parts[JVM_META_PARTS];
         jvm_meta_parts(vm, parts);
         fprintf(stderr, "heap used %u, collections %u, peak live %u, largest free %u, metadata used %u\n", jvm_heap_used(vm),
@@ -117,7 +117,7 @@ static void stats(Jvm *vm) {
         fprintf(stderr, "metadata: threads %u, %u classes: constants %u, methods/fields %u, bytecode %u\n",
                 parts[0], parts[1], parts[2], parts[3], parts[4]);
     }
-    if (!getenv("B22JVM_HEAP")) return;
+    if (!getenv("GO1JVM_HEAP")) return;
     jvm_heap_walk(vm, count_object, 0);
     qsort(usage, usage_count, sizeof(usage[0]), by_bytes);
     fprintf(stderr, "live heap %u bytes\n", jvm_heap_used(vm));
@@ -162,7 +162,7 @@ int main(int argc, char **argv) {
     JvmHost host = {host_read, host_release, host_write, host_ms, &h, host_screen, host_flush, host_stream};
     char manifest_main[128];
     if (!main_class && jvm_main_class(&host, manifest_main, sizeof(manifest_main))) main_class = manifest_main;
-    if (!main_class) { fprintf(stderr, "usage: b22jvm [-heap KB] [-meta KB] [-cp dirs] [-jar app.jar] [-run ms] [-keys ms:code,...] [-shot file.ppm] [Main]\n"); return 64; }
+    if (!main_class) { fprintf(stderr, "usage: go1jvm [-heap KB] [-meta KB] [-cp dirs] [-jar app.jar] [-run ms] [-keys ms:code,...] [-shot file.ppm] [Main]\n"); return 64; }
     for (char *p = (char *)main_class; *p; p++) if (*p == '.') *p = '/';
     uint32_t bytes = (heap_kb+meta_kb)*1024;
     void *memory = malloc(bytes);

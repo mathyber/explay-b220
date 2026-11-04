@@ -1,7 +1,7 @@
-"""Build the B22 Java VM: class library (javac) and the Windows test host (zig cc).
+"""Build the GO1 Java VM: class library (javac) and the Windows test host (zig cc).
 
 Run as python -m tools.build_jvm. Outputs go to analysis/jvm/:
-lib/ (library classes) and b22jvm.exe (32-bit x86, like the phone's references).
+lib/ (library classes) and go1jvm.exe (32-bit x86, like the phone's references).
 """
 import argparse
 import os
@@ -16,7 +16,7 @@ DIRECTORY = ROOT/'analysis/jvm'
 SOURCES = ROOT/'jvm'
 JDK = ROOT/'analysis/toolchains/jdk-25.0.5+8/bin'
 LIBRARY = DIRECTORY/'lib'
-HOST = DIRECTORY/'b22jvm.exe'
+HOST = DIRECTORY/'go1jvm.exe'
 VM_FILES = ('class.c', 'heap.c', 'interp.c', 'native.c', 'jar.c', 'midp.c')
 
 

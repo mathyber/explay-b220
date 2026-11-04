@@ -1,10 +1,10 @@
-"""Build the B22 JVM for the phone and put it on an SD card image.
+"""Build the GO1 JVM for the phone and put it on an SD card image.
 
 Run as python -m tools.build_java_phone [--app apps/java/Hello.java] [--jar game.jar ...]
 [--card IMG].
-Produces analysis/jvm/phone/: JAVA.B22 (the VM as a B22N program), JAVALIB.JAR
+Produces analysis/jvm/phone/: JAVA.GO1 (the VM as a GO1N program), JAVALIB.JAR
 (class library) and APP.JAR (compiled from --app). Ready JARs given with --jar
-go to E:\\JAVA\\ under their own names; JAVA.B22 lists that folder and runs
+go to E:\\JAVA\\ under their own names; JAVA.GO1 lists that folder and runs
 APP.JAR only when the folder has no JARs.
 Without --card the files go to the card of the current content-removal PS.
 """
@@ -47,7 +47,7 @@ def build_app(sources, main, midlet=False):
         path = Path(folder)/'APP.JAR'
         if midlet:
             manifest = (f'Manifest-Version: 1.0\r\nMIDlet-1: {main}, , {main}\r\nMIDlet-Name: {main}\r\n'
-                        'MIDlet-Vendor: B22\r\nMIDlet-Version: 1.0\r\nMicroEdition-Profile: MIDP-2.0\r\n'
+                        'MIDlet-Vendor: GO1\r\nMIDlet-Version: 1.0\r\nMicroEdition-Profile: MIDP-2.0\r\n'
                         'MicroEdition-Configuration: CLDC-1.1\r\n')
         else:
             manifest = f'Manifest-Version: 1.0\r\nMain-Class: {main}\r\n'
@@ -91,13 +91,13 @@ def main():
         vm = build_vm()
         library = DIRECTORY/'JAVALIB.JAR'
         zip_directory(LIBRARY, library)
-        files = {'JAVA.B22': vm, 'JAVALIB.JAR': library.read_bytes()}
+        files = {'JAVA.GO1': vm, 'JAVALIB.JAR': library.read_bytes()}
         if args.jar:
             files.update({f'JAVA/{jar.name}': jar.read_bytes() for jar in args.jar})
         else:
             files['APP.JAR'] = build_app([args.app], args.main or args.app.stem, args.midlet)
             (DIRECTORY/'APP.JAR').write_bytes(files['APP.JAR'])
-        (DIRECTORY/'JAVA.B22').write_bytes(vm)
+        (DIRECTORY/'JAVA.GO1').write_bytes(vm)
         card = args.card or default_card()
         install(card, files)
     except (OSError, ValueError) as exc:

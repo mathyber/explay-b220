@@ -6,7 +6,7 @@ public class Hello {
 
     public static void main(String[] args) throws Exception {
         System.out.println("Hello from Java!");
-        System.out.println("B220 + B22 JVM");
+        System.out.println("B220 + GO1 JVM");
         System.out.println("fib(15) = " + fib(15));
         Vector v = new Vector();
         for (int i = 0; i < 5; i++) v.addElement("n" + i * i);

@@ -1170,7 +1170,7 @@ def main():
             card = ROOT/'analysis/emulator/experiments'/sha(output)/'sd-card.img'
             carry_settings(card.parent, manifest.get('previous_output_sha256'), output)
             if carry_card(card, manifest.get('previous_output_sha256')):
-                for name in ('card_demo.b22asm', 'card_second.b22asm', 'card_native.c', 'card_screen.c'):
+                for name in ('card_demo.go1asm', 'card_second.go1asm', 'card_native.c', 'card_screen.c'):
                     install(ROOT/'apps'/name, card, ensure=True)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))

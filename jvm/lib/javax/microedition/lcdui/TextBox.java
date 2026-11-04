@@ -1,7 +1,7 @@
 package javax.microedition.lcdui;
 
 import java.util.Vector;
-import b22.Events;
+import go1.Events;
 
 /* Text entry with the phone keypad: multi-tap letters (Cyrillic and Latin),
    '#' switches the mode, '*' deletes before the cursor, holding a digit enters
@@ -39,7 +39,7 @@ public class TextBox extends Screen {
         text = new StringBuffer(s == null ? "" : s);
         caret = text.length();
         pending = false;
-        b22Changed();
+        go1Changed();
     }
 
     public int getChars(char[] data) {
@@ -57,7 +57,7 @@ public class TextBox extends Screen {
         position = Math.max(0, Math.min(position, text.length()));
         text.insert(position, s);
         caret = position + s.length();
-        b22Changed();
+        go1Changed();
     }
 
     public void insert(char[] data, int offset, int length, int position) {
@@ -69,7 +69,7 @@ public class TextBox extends Screen {
         String s = getString();
         text = new StringBuffer(s.substring(0, offset) + s.substring(offset + length));
         caret = Math.min(caret, text.length());
-        b22Changed();
+        go1Changed();
     }
 
     public int getMaxSize() { return maxSize; }
@@ -106,7 +106,7 @@ public class TextBox extends Screen {
         else if (text.length() < maxSize) text.insert(caret++, c);
     }
 
-    public void b22Key(int kind, int code) {
+    public void go1Key(int kind, int code) {
         if (softKey(kind, code) || kind == Events.KEY_RELEASED) return;
         long now = System.currentTimeMillis();
         int digit = code >= '0' && code <= '9' ? code - '0' : -1;
@@ -147,10 +147,10 @@ public class TextBox extends Screen {
             else if (code == -2) caret = text.length();
             else return;
         }
-        b22Changed();
+        go1Changed();
     }
 
-    public void b22Paint(Graphics g) {
+    public void go1Paint(Graphics g) {
         int y = paintTitle(g);
         Font small = Font.getFont(Font.FACE_SYSTEM, Font.STYLE_PLAIN, Font.SIZE_SMALL);
         g.setFont(small);

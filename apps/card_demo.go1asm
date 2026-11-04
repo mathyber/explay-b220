@@ -53,7 +53,7 @@ rect r0
 set r5 6
 text r5 r4 "FROM SD CARD"
 set r5 27
-text r5 r4 "APP.B22"
+text r5 r4 "APP.GO1"
 set r5 154
 text r5 r4 "ARROWS / OK"
 yield input

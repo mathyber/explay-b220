@@ -16,12 +16,12 @@ public abstract class Displayable {
     public void addCommand(Command c) {
         if (c == null) throw new NullPointerException();
         if (!commands.contains(c)) commands.addElement(c);
-        b22Changed();
+        go1Changed();
     }
 
     public void removeCommand(Command c) {
         commands.removeElement(c);
-        b22Changed();
+        go1Changed();
     }
 
     public void setCommandListener(CommandListener l) {
@@ -29,7 +29,7 @@ public abstract class Displayable {
     }
 
     public String getTitle() { return title; }
-    public void setTitle(String s) { title = s; b22Changed(); }
+    public void setTitle(String s) { title = s; go1Changed(); }
     public Ticker getTicker() { return null; }
     public void setTicker(Ticker t) {}
 
@@ -47,14 +47,14 @@ public abstract class Displayable {
 
     protected void sizeChanged(int w, int h) {}
 
-    void b22Changed() {
+    void go1Changed() {
         if (isShown()) display.requestRepaint(0, 0, Display.WIDTH, Display.HEIGHT);
     }
 
     /* Hooks used by Display and other lcdui packages. */
-    public void b22Show() {}
-    public void b22Hide() {}
-    public void b22Paint(Graphics g) {
+    public void go1Show() {}
+    public void go1Hide() {}
+    public void go1Paint(Graphics g) {
         paintCommands(g);
     }
 
@@ -78,11 +78,11 @@ public abstract class Displayable {
         if (code != -6 && code != -7) return false;
         Command c = commandFor(code == -7);
         if (c == null) return false;
-        if (type == b22.Events.KEY_PRESSED && listener != null) listener.commandAction(c, this);
+        if (type == go1.Events.KEY_PRESSED && listener != null) listener.commandAction(c, this);
         return true;
     }
 
-    public void b22Key(int type, int code) {
+    public void go1Key(int type, int code) {
         softKey(type, code);
     }
 

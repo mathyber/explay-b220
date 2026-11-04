@@ -1,8 +1,8 @@
 package javax.microedition.lcdui;
 
-import b22.Draw;
-import b22.Events;
-import b22.Launcher;
+import go1.Draw;
+import go1.Events;
+import go1.Launcher;
 import java.util.Vector;
 import javax.microedition.midlet.MIDlet;
 
@@ -40,8 +40,8 @@ public class Display {
         Displayable previous = current;
         current = next;
         next.display = this;
-        if (previous != null) previous.b22Hide();
-        next.b22Show();
+        if (previous != null) previous.go1Hide();
+        next.go1Show();
         requestRepaint(0, 0, WIDTH, HEIGHT);
     }
 
@@ -113,7 +113,7 @@ public class Display {
         Graphics g = new Graphics(null, WIDTH, HEIGHT);
         g.setClip(px, py, pw, ph);
         try {
-            d.b22Paint(g);
+            d.go1Paint(g);
         } catch (RuntimeException e) {
             e.printStackTrace();
         }
@@ -149,7 +149,7 @@ public class Display {
                     if (event[1] == 1) requestRepaint(0, 0, WIDTH, HEIGHT);  /* the platform lost the screen */
                 } else if (current != null) {
                     try {
-                        current.b22Key(event[0], event[1]);
+                        current.go1Key(event[0], event[1]);
                     } catch (RuntimeException e) {
                         e.printStackTrace();
                     }

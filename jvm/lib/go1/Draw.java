@@ -1,4 +1,4 @@
-package b22;
+package go1;
 
 /* Native drawing on the screen (target null) or a javax.microedition.lcdui.Image.
    Coordinates are absolute; clip arguments are x, y, width, height. */

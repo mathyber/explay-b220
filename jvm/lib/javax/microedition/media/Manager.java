@@ -18,12 +18,12 @@ public final class Manager {
 
     public static Player createPlayer(InputStream stream, String type) throws java.io.IOException, MediaException {
         if (stream == null) throw new IllegalArgumentException();
-        return new b22.SilentPlayer(type);
+        return new go1.SilentPlayer(type);
     }
 
     public static Player createPlayer(String locator) throws java.io.IOException, MediaException {
         if (locator == null) throw new IllegalArgumentException();
-        return new b22.SilentPlayer(null);
+        return new go1.SilentPlayer(null);
     }
 
     public static void playTone(int note, int duration, int volume) throws MediaException {

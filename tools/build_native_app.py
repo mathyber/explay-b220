@@ -1,10 +1,10 @@
-"""Compile a freestanding C program into a B22N native SD application.
+"""Compile a freestanding C program into a GO1N native SD application.
 
-Run as python -m tools.build_native_app apps/card_native.c [--out DEMO.B22].
+Run as python -m tools.build_native_app apps/card_native.c [--out DEMO.GO1].
 The program is linked twice, at 0 and at DELTA (patches/native_app.ld); words
-that differ by DELTA hold program addresses and become the B22N relocation
+that differ by DELTA hold program addresses and become the GO1N relocation
 table. Firmware addresses are plain constants and are not relocated.
-See patches/b22n.h for the file format and the loader interface.
+See patches/go1.h for the file format and the loader interface.
 """
 import argparse
 import os
@@ -16,7 +16,7 @@ import tempfile
 from emulator.firmware import ROOT
 from .setup_arm_toolchain import EXECUTABLE
 
-MAGIC, VERSION, HEADER = b'B22N', 1, 32
+MAGIC, VERSION, HEADER = b'GO1N', 1, 32
 MAX_FILE = 0x100000
 LINKER = 'patches/native_app.ld'
 # Second link address: every word that differs by exactly this amount holds an
@@ -58,7 +58,7 @@ def linked(data, base):
 
 
 def native_file(low, high):
-    """B22N bytes from the same program linked at 0 and at DELTA."""
+    """GO1N bytes from the same program linked at 0 and at DELTA."""
     body, bss_size, entry = linked(low, 0)
     other, other_bss, other_entry = linked(high, DELTA)
     if len(other) != len(body) or other_bss != bss_size or other_entry != entry:
@@ -83,7 +83,38 @@ def native_file(low, high):
     return result
 
 
-def compile_native(source, sources=(), includes=()):
+ICON_SIZE = 16
+
+
+def icon_bytes(path):
+    """16x16 PNG (with transparency) as the GO1N icon block: size, RGB565, alpha."""
+    from PIL import Image
+    with Image.open(path) as image:
+        if image.size != (ICON_SIZE, ICON_SIZE):
+            raise ValueError(f'Icon {path} must be {ICON_SIZE}x{ICON_SIZE}, not {image.size[0]}x{image.size[1]}')
+        pixels = list(image.convert('RGBA').getdata())
+    rgb = b''.join(struct.pack('>H', (r >> 3) << 11 | (g >> 2) << 5 | b >> 3) for r, g, b, _ in pixels)
+    return struct.pack('>HH', ICON_SIZE, ICON_SIZE)+rgb+bytes(a for *_, a in pixels)
+
+
+def with_icon(program, icon):
+    """Append the icon and point header +24 at it (go1.h)."""
+    if struct.unpack_from('>I', program, 24)[0]:
+        raise ValueError('Program already has an icon')
+    result = program[:24]+struct.pack('>I', len(program))+program[28:]+icon_bytes(icon)
+    if len(result) > MAX_FILE:
+        raise ValueError(f'Program with icon is {len(result)} bytes, limit {MAX_FILE}')
+    return result
+
+
+def compile_native(source, sources=(), includes=(), icon=None):
+    """GO1N program; the icon defaults to a 16x16 PNG with the source's name, when present."""
+    icon = icon or (Path(source).with_suffix('.png') if Path(source).with_suffix('.png').exists() else None)
+    program = _compile(source, sources, includes)
+    return with_icon(program, icon) if icon else program
+
+
+def _compile(source, sources=(), includes=()):
     if not EXECUTABLE.exists():
         raise ValueError('Run python -m tools.setup_arm_toolchain first')
     environment = os.environ.copy()
@@ -110,7 +141,7 @@ def compile_native(source, sources=(), includes=()):
             linker, elf = Path(folder)/f'{base:x}.ld', Path(folder)/f'{base:x}.elf'
             linker.write_text(script.replace('. = 0;', f'. = {base:#x};', 1), encoding='utf-8')
             execute([str(EXECUTABLE), 'ld.lld', '-T', str(linker), '--gc-sections', '--build-id=none',
-                     '-e', 'b22n_main', *objects, str(runtime), '-o', str(elf)])
+                     '-e', 'go1_main', *objects, str(runtime), '-o', str(elf)])
             images.append(elf.read_bytes())
         return native_file(*images)
 
@@ -135,10 +166,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source', type=Path)
     parser.add_argument('--out', type=Path)
+    parser.add_argument('--icon', type=Path, help='16x16 PNG; default: the source name with .png, if it exists')
     args = parser.parse_args()
     try:
-        program = compile_native(args.source)
-        out = args.out or ROOT/'analysis/native-apps'/(args.source.stem.upper()[:8]+'.B22')
+        program = compile_native(args.source, icon=args.icon)
+        out = args.out or ROOT/'analysis/native-apps'/(args.source.stem.upper()[:8]+'.GO1')
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(program)
     except (OSError, ValueError) as exc:

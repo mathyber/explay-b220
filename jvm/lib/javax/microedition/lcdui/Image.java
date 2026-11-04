@@ -1,10 +1,10 @@
 package javax.microedition.lcdui;
 
-import b22.Draw;
+import go1.Draw;
 import java.io.IOException;
 import java.io.InputStream;
 
-/* RGB565 pixels with optional 8-bit alpha (fields used by b22.Draw). */
+/* RGB565 pixels with optional 8-bit alpha (fields used by go1.Draw). */
 public class Image {
     short[] pixels;
     byte[] alpha;

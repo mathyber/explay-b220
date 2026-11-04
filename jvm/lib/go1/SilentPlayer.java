@@ -1,4 +1,4 @@
-package b22;
+package go1;
 
 import java.util.Vector;
 import javax.microedition.media.Control;

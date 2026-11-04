@@ -1,4 +1,4 @@
-/* Internal structures of the B22 Java VM. */
+/* Internal structures of the GO1 Java VM. */
 #ifndef JVM_INTERNAL_H
 #define JVM_INTERNAL_H
 

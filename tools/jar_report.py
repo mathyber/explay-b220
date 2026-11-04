@@ -1,4 +1,4 @@
-"""Report what a MIDlet JAR needs from the B22 JVM class library.
+"""Report what a MIDlet JAR needs from the GO1 JVM class library.
 
 Run as python -m tools.jar_report game.jar. Lists the manifest, class file
 versions, resources, platform classes the JAR references and, for each, the

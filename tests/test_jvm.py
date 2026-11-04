@@ -1,7 +1,7 @@
-"""B22 Java VM on the Windows host, checked against the JDK's own JVM.
+"""GO1 Java VM on the Windows host, checked against the JDK's own JVM.
 
 Each jvm/tests/*.java program is compiled twice: against our class library
-(run on b22jvm.exe) and against the JDK (run on java.exe); outputs must match.
+(run on go1jvm.exe) and against the JDK (run on java.exe); outputs must match.
 """
 import os
 from pathlib import Path
@@ -40,7 +40,7 @@ class JvmTests(unittest.TestCase):
         command = [str(HOST), '-cp', f'{LIBRARY};{self.ours}', name]
         if heap_kb:
             command[1:1] = ['-heap', str(heap_kb)]
-        environment = dict(os.environ, B22JVM_STATS='1')
+        environment = dict(os.environ, GO1JVM_STATS='1')
         return subprocess.run(command, capture_output=True, text=True, encoding='utf-8', timeout=120, env=environment)
 
     def test_programs_match_the_jdk(self):
@@ -105,7 +105,7 @@ class JvmTests(unittest.TestCase):
         sprite.save(png, 'PNG')
         with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
             z.writestr('META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\r\nMIDlet-1: Draw Test, /icon.png, DrawTest\r\n'
-                       'MIDlet-Name: Draw Test\r\nMIDlet-Vendor: B22\r\nMIDlet-Version: 1.0\r\n'
+                       'MIDlet-Name: Draw Test\r\nMIDlet-Vendor: GO1\r\nMIDlet-Version: 1.0\r\n'
                        'MicroEdition-Profile: MIDP-2.0\r\nMicroEdition-Configuration: CLDC-1.1\r\n')
             for item in sorted(classes.rglob('*.class')):
                 z.write(item, item.relative_to(classes).as_posix())

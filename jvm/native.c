@@ -496,7 +496,7 @@ static int class_read_resource(Thread *t, u32 *args, u32 *result) {
     return 0;
 }
 
-/* Large resources are read on demand (b22.ResourceStream): the JarStream lives
+/* Large resources are read on demand (go1.ResourceStream): the JarStream lives
    in a byte[] (heap objects never move) owned by the Java stream. */
 static int class_open_resource(Thread *t, u32 *args, u32 *result) {
     Jvm *vm = thread_vm(t);
@@ -580,8 +580,8 @@ static const NativeEntry natives[] = {
     {"java/lang/Class", "newInstance", "()Ljava/lang/Object;", class_new_instance},
     {"java/lang/Class", "readResource", "(Ljava/lang/String;)[B", class_read_resource},
     {"java/lang/Class", "openResource", "(Ljava/lang/String;)[B", class_open_resource},
-    {"b22/ResourceStream", "read0", "([B[BII)I", resource_read},
-    {"b22/ResourceStream", "left", "([B)I", resource_left},
+    {"go1/ResourceStream", "read0", "([B[BII)I", resource_read},
+    {"go1/ResourceStream", "left", "([B)I", resource_left},
 };
 
 Native native_for(Jvm *vm, Class *c, Utf8 name, Utf8 desc) {

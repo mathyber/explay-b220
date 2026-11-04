@@ -61,13 +61,13 @@ def check_native_apis(image, large_height=14, small_height=12):
 def cold_boot(firmware, directory):
     from emulator.board import Board
     from .sd_image import Fat16, create_image
-    from .b22asm import assemble
+    from .go1asm import assemble
     from .prove_key_marker import execute
     from .prove_catch_game import run_for
     volume = Fat16(create_image())
-    for name, source in (('DEMO.B22', 'card_demo.b22asm'), ('SECOND.B22', 'card_second.b22asm')):
+    for name, source in (('DEMO.GO1', 'card_demo.go1asm'), ('SECOND.GO1', 'card_second.go1asm')):
         volume.add_file(name, assemble((ROOT/'apps'/source).read_text(encoding='utf-8')))
-    volume.add_file('APPS.LST', b'DEMO.B22\r\nSECOND.B22\r\n')
+    volume.add_file('APPS.LST', b'DEMO.GO1\r\nSECOND.GO1\r\n')
     board = Board(explore=True, firmware_path=firmware, sd_image=volume.image)
     heights = {'large': 0, 'small': 0}
     def height_used(uc, pc, size, data):

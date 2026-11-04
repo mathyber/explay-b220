@@ -1,4 +1,4 @@
-"""Install independent B22V/B22N programs and rebuild their on-card application catalog."""
+"""Install independent GO1V/GO1N programs and rebuild their on-card application catalog."""
 import argparse
 import hashlib
 import re
@@ -6,7 +6,7 @@ from pathlib import Path
 
 from emulator.board import ROOT
 from emulator.card_image import CardImage
-from .b22asm import assemble
+from .go1asm import assemble
 from .build_sd_app import DIRECTORY
 from .sd_image import Fat16,create_image
 
@@ -20,28 +20,31 @@ def application_name(source,name=None):
     if name is None:
         stem=source.stem
         if stem.startswith('card_'):stem=stem[5:]
-        name=stem.upper()+'.B22'
+        name=stem.upper()+'.GO1'
     name=name.upper()
-    if not re.fullmatch(r'[A-Z0-9_]{1,8}\.B22',name):
-        raise ValueError('Use --name NAME.B22 with an ASCII 8.3 name')
+    if not re.fullmatch(r'[A-Z0-9_]{1,8}\.GO1',name):
+        raise ValueError('Use --name NAME.GO1 with an ASCII 8.3 name')
     return name
 
 
 def update_catalog(volume):
-    names=sorted(e['name'] for e in volume.entries() if not e['directory'] and e['name'].endswith('.B22'))
+    # Programs of the former .B22 format (magics B22N/B22V) no longer load: drop them.
+    for old in [e['name'] for e in volume.entries() if not e['directory'] and e['name'].endswith('.B22')]:
+        volume.remove_file(old)
+    names=sorted(e['name'] for e in volume.entries() if not e['directory'] and e['name'].endswith('.GO1'))
     if len(names)>16:raise ValueError('The current selector supports at most 16 applications')
-    if any(not re.fullmatch(r'[A-Z0-9_]{1,8}\.B22',n) for n in names):
+    if any(not re.fullmatch(r'[A-Z0-9_]{1,8}\.GO1',n) for n in names):
         raise ValueError('Application file names must use ASCII 8.3 names')
     volume.replace_file('APPS.LST',('\r\n'.join(names)+'\r\n').encode('ascii'))
 
 
 def program_bytes(source):
-    """B22V assembly, B22N C source or an already built .B22 file."""
+    """GO1V assembly, GO1N C source or an already built .GO1 file."""
     suffix=source.suffix.lower()
     if suffix=='.c':
         from .build_native_app import compile_native
         return compile_native(source)
-    if suffix=='.b22':return source.read_bytes()
+    if suffix=='.go1':return source.read_bytes()
     return assemble(source.read_text(encoding='utf-8-sig'))
 
 
@@ -64,7 +67,7 @@ def install(source,card,ensure=False,name=None):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('source',type=Path,nargs='?',default=ROOT/'apps/card_demo.b22asm')
+    parser.add_argument('source',type=Path,nargs='?',default=ROOT/'apps/card_demo.go1asm')
     parser.add_argument('--card',type=Path)
     parser.add_argument('--ensure',action='store_true',help='Keep an existing application file unchanged')
     parser.add_argument('--name',help='Override the installed ASCII 8.3 name')
@@ -73,7 +76,7 @@ def main():
     try:
         card=args.card or default_card()
         if args.examples:
-            for source in (ROOT/'apps/card_demo.b22asm',ROOT/'apps/card_second.b22asm',ROOT/'apps/card_native.c',ROOT/'apps/card_screen.c'):
+            for source in (ROOT/'apps/card_demo.go1asm',ROOT/'apps/card_second.go1asm',ROOT/'apps/card_native.c',ROOT/'apps/card_screen.c'):
                 install(source,card,ensure=True)
             result='examples ready'
         else:result=install(args.source,card,args.ensure,args.name)

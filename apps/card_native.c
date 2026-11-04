@@ -1,9 +1,9 @@
-/* B22N demo: App Heap, file API, relocated data and key handling. */
-#include "b22n.h"
+/* GO1N demo: App Heap, file API, relocated data and key handling. */
+#include "go1.h"
 
-typedef b22_u32 u32;
+typedef go1_u32 u32;
 
-static const char *const labels[] = {"NATIVE B22N", "HEAP 1024 KB", "HEAP FAILED"};
+static const char *const labels[] = {"NATIVE GO1N", "HEAP 1024 KB", "HEAP FAILED"};
 static u32 x = 76, y = 90, presses, heap_ok, list_size;
 
 static void number(char *out, const char *prefix, u32 value) {
@@ -15,7 +15,7 @@ static void number(char *out, const char *prefix, u32 value) {
     *out = 0;
 }
 
-static u32 heap_test(const B22Api *api) {
+static u32 heap_test(const Go1Api *api) {
     u32 size = 1u << 20;
     unsigned char *block = api->alloc(size);
     if (!block) return 0;
@@ -26,7 +26,7 @@ static u32 heap_test(const B22Api *api) {
     return ok;
 }
 
-static void draw(const B22Api *api) {
+static void draw(const Go1Api *api) {
     char line[24];
     api->fill(0, 0, 176, 176, 0x0010);
     api->text(8, labels[0], 0xffff);
@@ -39,19 +39,19 @@ static void draw(const B22Api *api) {
 }
 
 __attribute__((used, section(".entry")))
-u32 b22n_main(const B22Api *api, u32 message, u32 parameter) {
+u32 go1_main(const Go1Api *api, u32 message, u32 parameter) {
     (void)parameter;
-    if (api->version != B22N_API_VERSION || message == B22N_CLOSE) return 0;
-    if (message == B22N_OPEN) {
+    if (api->version != GO1_API_VERSION || message == GO1_CLOSE) return 0;
+    if (message == GO1_OPEN) {
         heap_ok = heap_test(api);
         u32 handle = api->open("E:\\APPS.LST");
         list_size = 0;
         if (handle) { list_size = api->file_size(handle); api->close(handle); }
-    } else if (message == B22N_KEY_UP && y >= 74) { y -= 4; presses++; }
-    else if (message == B22N_KEY_DOWN && y <= 120) { y += 4; presses++; }
-    else if (message == B22N_KEY_LEFT && x >= 4) { x -= 4; presses++; }
-    else if (message == B22N_KEY_RIGHT && x <= 148) { x += 4; presses++; }
-    else if (message == B22N_KEY_OK) { api->exit(); return 1; }
+    } else if (message == GO1_KEY_UP && y >= 74) { y -= 4; presses++; }
+    else if (message == GO1_KEY_DOWN && y <= 120) { y += 4; presses++; }
+    else if (message == GO1_KEY_LEFT && x >= 4) { x -= 4; presses++; }
+    else if (message == GO1_KEY_RIGHT && x <= 148) { x += 4; presses++; }
+    else if (message == GO1_KEY_OK) { api->exit(); return 1; }
     draw(api);
     return 1;
 }

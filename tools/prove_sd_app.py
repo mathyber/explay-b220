@@ -10,7 +10,7 @@ from unicorn import UC_HOOK_CODE,UC_HOOK_MEM_READ
 from unicorn.arm_const import UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,UC_ARM_REG_R3,UC_ARM_REG_SP,UC_ARM_REG_PC
 from emulator.board import Board,ROOT
 from emulator.snapshot import save_snapshot
-from .b22asm import assemble
+from .go1asm import assemble
 from .sd_image import Fat16,create_image
 from .build_sd_app import DIRECTORY,build
 from .build_catch_game import elf_payload,ROM,LIMIT
@@ -71,13 +71,13 @@ def prove(directory,application,keys,missing=False,corrupt=False):
     program=assemble(application.read_text(encoding='utf-8-sig'))
     if corrupt:program=b'BAD!'+program[4:]
     volume=Fat16(create_image())
-    second=assemble((ROOT/'apps/card_second.b22asm').read_text(encoding='utf-8'))
+    second=assemble((ROOT/'apps/card_second.go1asm').read_text(encoding='utf-8'))
     if not missing:
-        volume.add_file('DEMO.B22',program)
-        volume.add_file('SECOND.B22',second)
-        volume.add_file('APPS.LST',b'DEMO.B22\r\nSECOND.B22\r\n')
+        volume.add_file('DEMO.GO1',program)
+        volume.add_file('SECOND.GO1',second)
+        volume.add_file('APPS.LST',b'DEMO.GO1\r\nSECOND.GO1\r\n')
     (directory/'input-card.img').write_bytes(volume.image)
-    (directory/'APP.B22').write_bytes(program)
+    (directory/'APP.GO1').write_bytes(program)
     board=Board(explore=True,firmware_path=firmware,sd_image=volume.image)
     report=dict(status='RUNNING',firmware=board.firmware,application=str(application),
                 program_sha256=hashlib.sha256(program).hexdigest(),host_cpu_or_ram_writes=False,
@@ -91,7 +91,7 @@ def prove(directory,application,keys,missing=False,corrupt=False):
             end=next((i for i in range(0,len(data),2) if data[i:i+2]==b'\0\0'),len(data))
             name=data[:end].decode('utf-16-be')
         except Exception:name='?'
-        if name.startswith('E:\\') and (name.endswith('.B22') or name.endswith('APPS.LST')):
+        if name.startswith('E:\\') and (name.endswith('.GO1') or name.endswith('APPS.LST')):
             report['file_opens'].append(dict(path=name,flags=hex(uc.reg_read(UC_ARM_REG_R1))))
     def read(uc,pc,size,_):
         pending[uc.reg_read(UC_ARM_REG_SP)]=dict(handle=uc.reg_read(UC_ARM_REG_R0),
@@ -152,7 +152,7 @@ def prove(directory,application,keys,missing=False,corrupt=False):
                 if current['magic']!=0x53444150 or current['status']!=expected_status:
                     raise ValueError(f'Unexpected loader state: {current}')
                 if current['mode']!=0 or current['code']:raise ValueError('Selector did not open directly')
-                if not missing and catalog_state(board)['names']!=['DEMO.B22','SECOND.B22']:
+                if not missing and catalog_state(board)['names']!=['DEMO.GO1','SECOND.GO1']:
                     raise ValueError('Both applications were not listed')
             if index==9 and not missing:
                 if current['status']!=(5 if corrupt else 0):raise ValueError('Unexpected application status')
@@ -169,7 +169,7 @@ def prove(directory,application,keys,missing=False,corrupt=False):
                     raise ValueError('Application buffer was not released on exit')
                 if key=='soft_left' and (current['loads']!=2 or current['status']):
                     raise ValueError('F1 did not reload the program through SFS')
-                if application.name=='card_demo.b22asm':
+                if application.name=='card_demo.go1asm':
                     positions={10:(76,80),11:(76,84),12:(72,80),13:(72,80),16:(48,64)}
                     if keys==DEFAULT_KEYS and index in positions:
                         if (current['r0'],current['r1'])!=positions[index]:raise ValueError('SD program movement/reset check failed')
@@ -206,7 +206,7 @@ def prove(directory,application,keys,missing=False,corrupt=False):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--directory',type=Path,default=DIRECTORY/'proof-multi')
-    parser.add_argument('--application',type=Path,default=ROOT/'apps/card_demo.b22asm')
+    parser.add_argument('--application',type=Path,default=ROOT/'apps/card_demo.go1asm')
     parser.add_argument('--keys',nargs='*',default=DEFAULT_KEYS)
     parser.add_argument('--missing',action='store_true')
     parser.add_argument('--corrupt',action='store_true')

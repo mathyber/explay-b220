@@ -1,7 +1,7 @@
 package javax.microedition.lcdui.game;
 
-import b22.Draw;
-import b22.Events;
+import go1.Draw;
+import go1.Events;
 import javax.microedition.lcdui.Canvas;
 import javax.microedition.lcdui.Graphics;
 import javax.microedition.lcdui.Image;
@@ -51,7 +51,7 @@ public abstract class GameCanvas extends Canvas {
         Draw.flush(x, y, w, h);
     }
 
-    public void b22Key(int type, int code) {
+    public void go1Key(int type, int code) {
         int action = 0;
         try {
             action = getGameAction(code);
@@ -63,6 +63,6 @@ public abstract class GameCanvas extends Canvas {
             if (type == Events.KEY_PRESSED) { keyStates |= bit; latched |= bit; }
             else if (type == Events.KEY_RELEASED) keyStates &= ~bit;
         }
-        if (!suppressKeys || action == 0) super.b22Key(type, code);
+        if (!suppressKeys || action == 0) super.go1Key(type, code);
     }
 }

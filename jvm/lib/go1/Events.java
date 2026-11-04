@@ -1,4 +1,4 @@
-package b22;
+package go1;
 
 /* Platform event queue: keys from the phone, repaint wake-ups from Java. */
 public final class Events {

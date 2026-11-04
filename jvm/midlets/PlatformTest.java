@@ -44,8 +44,8 @@ public class PlatformTest {
     static void keys(javax.microedition.lcdui.TextBox box, String keys) {
         for (int i = 0; i < keys.length(); i++) {
             char k = keys.charAt(i);
-            if (k == 'L') box.b22Key(b22.Events.KEY_REPEATED, keys.charAt(i - 1));  // hold the previous key
-            else box.b22Key(b22.Events.KEY_PRESSED, k == '<' ? -3 : k);
+            if (k == 'L') box.go1Key(go1.Events.KEY_REPEATED, keys.charAt(i - 1));  // hold the previous key
+            else box.go1Key(go1.Events.KEY_PRESSED, k == '<' ? -3 : k);
         }
     }
 
@@ -64,9 +64,9 @@ public class PlatformTest {
         list.append("a", null);
         list.append("b", null);
         list.append("c", null);
-        list.b22Key(b22.Events.KEY_PRESSED, -2);
-        list.b22Key(b22.Events.KEY_PRESSED, -2);
-        list.b22Key(b22.Events.KEY_PRESSED, -5);
+        list.go1Key(go1.Events.KEY_PRESSED, -2);
+        list.go1Key(go1.Events.KEY_PRESSED, -2);
+        list.go1Key(go1.Events.KEY_PRESSED, -5);
         System.out.println("list " + list.getSelectedIndex() + " " + list.getString(list.getSelectedIndex()));
     }
 

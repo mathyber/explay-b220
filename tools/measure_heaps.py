@@ -20,7 +20,7 @@ from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_SP, UC_ARM_REG_LR
 from emulator.board import Board, ROOT
 from emulator.debugger import Debugger
 from emulator.snapshot import load_snapshot, save_snapshot
-from .b22asm import assemble
+from .go1asm import assemble
 from .build_sd_app import DIRECTORY as SD_APP
 from .prove_catch_game import run_for
 from .prove_key_marker import execute
@@ -39,8 +39,8 @@ ROUTE = ['soft_left','soft_left','soft_left','down','ok','up','up','ok','ok']
 
 def boot_to_sd_apps(firmware, snapshot):
     volume = Fat16(create_image())
-    volume.add_file('DEMO.B22', assemble((ROOT/'apps/card_demo.b22asm').read_text(encoding='utf-8')))
-    volume.add_file('APPS.LST', b'DEMO.B22\r\n')
+    volume.add_file('DEMO.GO1', assemble((ROOT/'apps/card_demo.go1asm').read_text(encoding='utf-8')))
+    volume.add_file('APPS.LST', b'DEMO.GO1\r\n')
     board = Board(explore=True, firmware_path=firmware, sd_image=volume.image)
     board.stop_after_frames = 5
     deadline = time.monotonic()+300

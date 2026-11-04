@@ -1,6 +1,6 @@
-"""Rasterise a TrueType font into the B22 JVM bitmap font format (MIDP Font sizes).
+"""Rasterise a TrueType font into the GO1 JVM bitmap font format (MIDP Font sizes).
 
-Called by tools.build_jvm; writes b22/font-s.bin, font-m.bin and font-l.bin
+Called by tools.build_jvm; writes go1/font-s.bin, font-m.bin and font-l.bin
 into the class library. Format (big-endian): "BF", version 1, height, ascent, 0,
 u16 glyph count, entries {u16 code, u8 advance, u8 width, u32 bitmap offset}
 sorted by code, then 1-bit bitmaps of height rows, most significant bit first.
@@ -56,7 +56,7 @@ def rasterise(path, pixels):
 
 def build_fonts(directory):
     path = font_source()
-    target = directory/'b22'
+    target = directory/'go1'
     target.mkdir(parents=True, exist_ok=True)
     sizes = {}
     for name, pixels in SIZES.items():

@@ -1,9 +1,9 @@
 package javax.microedition.lcdui;
 
-import b22.Draw;
+import go1.Draw;
 import java.io.InputStream;
 
-/* Bitmap fonts with Latin-1 and Cyrillic in three sizes (b22/font-*.bin). */
+/* Bitmap fonts with Latin-1 and Cyrillic in three sizes (go1/font-*.bin). */
 public final class Font {
     public static final int FACE_SYSTEM = 0;
     public static final int FACE_MONOSPACE = 32;
@@ -34,7 +34,7 @@ public final class Font {
     private static byte[] load(int index) {
         if (DATA[index] == null) {
             try {
-                InputStream in = Font.class.getResourceAsStream("/b22/font-" + "sml".charAt(index) + ".bin");
+                InputStream in = Font.class.getResourceAsStream("/go1/font-" + "sml".charAt(index) + ".bin");
                 byte[] b = new byte[in.available()];
                 int n = 0;
                 while (n < b.length) {

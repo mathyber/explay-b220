@@ -30,9 +30,9 @@ public class Alert extends Screen {
     public AlertType getType() { return type; }
     public void setType(AlertType t) { type = t; }
     public String getString() { return text; }
-    public void setString(String s) { text = s; b22Changed(); }
+    public void setString(String s) { text = s; go1Changed(); }
     public Image getImage() { return image; }
-    public void setImage(Image i) { image = i; b22Changed(); }
+    public void setImage(Image i) { image = i; go1Changed(); }
 
     private void dismiss() {
         if (!isShown()) return;
@@ -40,7 +40,7 @@ public class Alert extends Screen {
         else if (next != null) display.setCurrent(next);
     }
 
-    public void b22Show() {
+    public void go1Show() {
         if (timeout == FOREVER) return;
         final int wait = timeout;
         new Thread() {
@@ -57,12 +57,12 @@ public class Alert extends Screen {
         }.start();
     }
 
-    public void b22Key(int type, int code) {
-        if (type != b22.Events.KEY_PRESSED) return;
+    public void go1Key(int type, int code) {
+        if (type != go1.Events.KEY_PRESSED) return;
         if (!softKey(type, code)) dismiss();
     }
 
-    public void b22Paint(Graphics g) {
+    public void go1Paint(Graphics g) {
         int y = paintTitle(g) + 4;
         if (image != null) {
             g.drawImage(image, Display.WIDTH / 2, y, Graphics.TOP | Graphics.HCENTER);

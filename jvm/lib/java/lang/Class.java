@@ -25,7 +25,7 @@ public final class Class {
             if (dot >= 0) name = className.substring(0, dot + 1).replace('.', '/') + name;
         }
         byte[] state = openResource(name);
-        if (state != null) return new b22.ResourceStream(state);
+        if (state != null) return new go1.ResourceStream(state);
         byte[] data = readResource(name);
         return data == null ? null : new java.io.ByteArrayInputStream(data);
     }

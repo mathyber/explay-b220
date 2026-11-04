@@ -1,7 +1,7 @@
 package javax.microedition.lcdui;
 
 import java.util.Vector;
-import b22.Events;
+import go1.Events;
 
 /* Full-screen choice list: up/down move the focus, OK selects. */
 public class List extends Screen implements Choice {
@@ -51,7 +51,7 @@ public class List extends Screen implements Choice {
         System.arraycopy(selected, n, next, n + 1, size() - 1 - n);
         selected = next;
         if (type != MULTIPLE && size() == 1) selected[0] = true;
-        b22Changed();
+        go1Changed();
     }
 
     public void delete(int n) {
@@ -64,7 +64,7 @@ public class List extends Screen implements Choice {
         selected[selected.length - 1] = false;
         if (focus >= size()) focus = Math.max(0, size() - 1);
         if (was && type != MULTIPLE && size() > 0) selected[Math.min(n, size() - 1)] = true;
-        b22Changed();
+        go1Changed();
     }
 
     public void deleteAll() {
@@ -73,7 +73,7 @@ public class List extends Screen implements Choice {
         fonts.removeAllElements();
         selected = new boolean[4];
         focus = top = 0;
-        b22Changed();
+        go1Changed();
     }
 
     public void set(int n, String s, Image image) {
@@ -81,7 +81,7 @@ public class List extends Screen implements Choice {
         if (s == null) throw new NullPointerException();
         strings.setElementAt(s, n);
         images.setElementAt(image, n);
-        b22Changed();
+        go1Changed();
     }
 
     public boolean isSelected(int n) { check(n, size()); return selected[n]; }
@@ -109,7 +109,7 @@ public class List extends Screen implements Choice {
             for (int i = 0; i < size(); i++) selected[i] = i == n;
             focus = n;
         }
-        b22Changed();
+        go1Changed();
     }
 
     public void setSelectedFlags(boolean[] flags) {
@@ -121,12 +121,12 @@ public class List extends Screen implements Choice {
             while (first < size() && !flags[first]) first++;
             if (size() > 0) setSelectedIndex(first < size() ? first : 0, true);
         }
-        b22Changed();
+        go1Changed();
     }
 
     public void setFitPolicy(int policy) { fit = policy; }
     public int getFitPolicy() { return fit; }
-    public void setFont(int n, Font font) { check(n, size()); fonts.setElementAt(font, n); b22Changed(); }
+    public void setFont(int n, Font font) { check(n, size()); fonts.setElementAt(font, n); go1Changed(); }
     public Font getFont(int n) {
         check(n, size());
         Font f = (Font) fonts.elementAt(n);
@@ -145,7 +145,7 @@ public class List extends Screen implements Choice {
         super.removeCommand(c);
     }
 
-    public void b22Key(int kind, int code) {
+    public void go1Key(int kind, int code) {
         if (softKey(kind, code) || kind == Events.KEY_RELEASED || size() == 0) return;
         if (code == -1 || code == Canvas.KEY_NUM2) focus = (focus + size() - 1) % size();
         else if (code == -2 || code == Canvas.KEY_NUM8) focus = (focus + 1) % size();
@@ -154,10 +154,10 @@ public class List extends Screen implements Choice {
             else setSelectedIndex(focus, true);
             if (type == IMPLICIT && listener != null) listener.commandAction(selectCommand, this);
         } else return;
-        b22Changed();
+        go1Changed();
     }
 
-    public void b22Paint(Graphics g) {
+    public void go1Paint(Graphics g) {
         int y0 = paintTitle(g);
         int rows = Math.max(1, (getHeight() - y0) / ROW);
         if (focus < top) top = focus;

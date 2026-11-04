@@ -209,6 +209,15 @@ class Fat16:
                 offset=self.fat+index*self.fat_sectors*512+cluster*2
                 self.image[offset:offset+2]=b'\0\0'
 
+    def remove_file(self,name):
+        """Delete one 8.3 root file; False when it does not exist."""
+        name=name.upper()
+        entry=next((e for e in self.entries() if e['name']==name and not e['directory']),None)
+        if not entry:return False
+        self.release(entry['cluster'],entry['size'])
+        self.image[entry['offset']]=0xe5
+        return True
+
     def replace_file(self,name,data):
         """Replace one root file, or DIR/long name, on a copy, preserving the volume on failure."""
         updated=Fat16(self.image)

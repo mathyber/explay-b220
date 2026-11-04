@@ -1,13 +1,13 @@
-/* JAVA.B22: the B22 JVM as a native SD application.
+/* JAVA.GO1: the GO1 JVM as a native SD application.
 
 Opening it lists the .jar files in E:\JAVA\ and runs the chosen one; with no
 files there it runs E:\APP.JAR directly. Classes come from E:\JAVALIB.JAR (the
 class library) and the chosen JAR. A manifest with MIDlet-1 starts
-b22.Launcher, which runs the MIDlet and owns the screen; otherwise Main-Class
+go1.Launcher, which runs the MIDlet and owns the screen; otherwise Main-Class
 runs with System.out shown as a console. The VM runs a bounded slice on every
 window timer tick; phone keys are posted to the MIDP event queue. When the
 program ends, the list comes back. */
-#include "b22n.h"
+#include "go1.h"
 #include "jvm.h"
 #include "jar.h"
 
@@ -26,7 +26,7 @@ typedef uint16_t u16;
 #define ROWS 6
 #define FOLDER "E:\\JAVA\\"
 
-static const B22Api *api;
+static const Go1Api *api;
 static Jvm *vm;
 static void *block;
 static Jar library, application;
@@ -37,10 +37,10 @@ static u32 row, column;
 static int dirty;
 static u16 games[GAMES][NAME_CHARS+1];
 static u32 game_count, selected;
-static B22FindEntry entry;
+static Go1FindEntry entry;
 
 static int is_launcher(const char *name) {
-    const char *launcher = "b22/Launcher";
+    const char *launcher = "go1/Launcher";
     while (*name && *name == *launcher) { name++; launcher++; }
     return *name == *launcher;
 }
@@ -98,7 +98,7 @@ static void scan(void) {
     do {
         u32 length = 0;
         while (entry.name[length]) length++;
-        if ((entry.attributes & B22N_ATTR_DIRECTORY) || length > NAME_CHARS) continue;
+        if ((entry.attributes & GO1_ATTR_DIRECTORY) || length > NAME_CHARS) continue;
         /* Insertion keeps the list sorted by name. */
         u32 at = game_count;
         while (at > 0 && before(entry.name, games[at-1])) {
@@ -147,8 +147,8 @@ static void draw_list(void) {
 /* After a MIDlet the whole frame buffer is its picture: clear it. */
 static void clear_screen(void) {
     uint16_t *screen = api->screen();
-    for (u32 i = 0; i < B22N_SCREEN_WIDTH*B22N_SCREEN_HEIGHT; i++) screen[i] = 0;
-    api->flush(0, 0, B22N_SCREEN_WIDTH, B22N_SCREEN_HEIGHT);
+    for (u32 i = 0; i < GO1_SCREEN_WIDTH*GO1_SCREEN_HEIGHT; i++) screen[i] = 0;
+    api->flush(0, 0, GO1_SCREEN_WIDTH, GO1_SCREEN_HEIGHT);
 }
 
 /* ---------- JVM host ---------- */
@@ -211,26 +211,26 @@ static void host_flush(void *context, int x, int y, int w, int h) { (void)contex
 /* Phone key code to a MIDP key code (0 when unmapped). */
 static int midp_key(u32 code) {
     switch (code) {
-    case B22N_UP: return JVM_KEY_UP;
-    case B22N_DOWN: return JVM_KEY_DOWN;
-    case B22N_LEFT: return JVM_KEY_LEFT;
-    case B22N_RIGHT: return JVM_KEY_RIGHT;
-    case B22N_OK: return JVM_KEY_FIRE;
-    case B22N_SOFT_LEFT: return JVM_KEY_SOFT_LEFT;
-    case B22N_SOFT_RIGHT: return JVM_KEY_SOFT_RIGHT;
-    case B22N_STAR: return '*';
-    case B22N_HASH: return '#';
-    case B22N_0: return '0';
-    default: return code >= B22N_1 && code <= B22N_9 ? (int)('1'+code-B22N_1) : 0;
+    case GO1_UP: return JVM_KEY_UP;
+    case GO1_DOWN: return JVM_KEY_DOWN;
+    case GO1_LEFT: return JVM_KEY_LEFT;
+    case GO1_RIGHT: return JVM_KEY_RIGHT;
+    case GO1_OK: return JVM_KEY_FIRE;
+    case GO1_SOFT_LEFT: return JVM_KEY_SOFT_LEFT;
+    case GO1_SOFT_RIGHT: return JVM_KEY_SOFT_RIGHT;
+    case GO1_STAR: return '*';
+    case GO1_HASH: return '#';
+    case GO1_0: return '0';
+    default: return code >= GO1_1 && code <= GO1_9 ? (int)('1'+code-GO1_1) : 0;
     }
 }
 
 static void key(u32 message) {
-    int code = midp_key(B22N_CODE(message)), type = 0;
-    switch (B22N_KIND(message)) {
-    case B22N_PRESS: type = JVM_KEY_PRESSED; break;
-    case B22N_RELEASE: case B22N_LONG_RELEASE: type = JVM_KEY_RELEASED; break;
-    case B22N_REPEAT: type = JVM_KEY_REPEATED; break;
+    int code = midp_key(GO1_CODE(message)), type = 0;
+    switch (GO1_KIND(message)) {
+    case GO1_PRESS: type = JVM_KEY_PRESSED; break;
+    case GO1_RELEASE: case GO1_LONG_RELEASE: type = JVM_KEY_RELEASED; break;
+    case GO1_REPEAT: type = JVM_KEY_REPEATED; break;
     default: break;
     }
     if (code && type) jvm_post_event(vm, type, code);
@@ -303,13 +303,13 @@ static void open_list(void) {
 }
 
 static void choose(u32 message) {
-    u32 kind = B22N_KIND(message), code = B22N_CODE(message);
-    if (kind != B22N_PRESS && kind != B22N_REPEAT) return;
-    if (code == B22N_SOFT_RIGHT && kind == B22N_PRESS) { api->exit(); return; }
+    u32 kind = GO1_KIND(message), code = GO1_CODE(message);
+    if (kind != GO1_PRESS && kind != GO1_REPEAT) return;
+    if (code == GO1_SOFT_RIGHT && kind == GO1_PRESS) { api->exit(); return; }
     if (!game_count) return;
-    if (code == B22N_UP || code == B22N_2) selected = selected ? selected-1 : game_count-1;
-    else if (code == B22N_DOWN || code == B22N_8) selected = selected+1 < game_count ? selected+1 : 0;
-    else if ((code == B22N_OK || code == B22N_SOFT_LEFT || code == B22N_5) && kind == B22N_PRESS) { launch(selected); return; }
+    if (code == GO1_UP || code == GO1_2) selected = selected ? selected-1 : game_count-1;
+    else if (code == GO1_DOWN || code == GO1_8) selected = selected+1 < game_count ? selected+1 : 0;
+    else if ((code == GO1_OK || code == GO1_SOFT_LEFT || code == GO1_5) && kind == GO1_PRESS) { launch(selected); return; }
     else return;
     draw_list();
 }
@@ -325,32 +325,32 @@ static void tick(void) {
 }
 
 __attribute__((used, section(".entry")))
-u32 b22n_main(const B22Api *program_api, u32 message, u32 parameter) {
+u32 go1_main(const Go1Api *program_api, u32 message, u32 parameter) {
     (void)parameter;
     api = program_api;
-    if (api->version != B22N_API_VERSION) return 0;
+    if (api->version != GO1_API_VERSION) return 0;
     /* Older loaders lack file search and UCS-2 calls; text and exit always exist. */
-    if (api->size < sizeof(B22Api)) {
-        if (message == B22N_OPEN || message == B22N_PAINT) {
+    if (api->size < sizeof(Go1Api)) {
+        if (message == GO1_OPEN || message == GO1_PAINT) {
             api->fill(0, 0, 176, 176, 0);
-            api->text(50, "JAVA.B22 needs", 0xffff);
+            api->text(50, "JAVA.GO1 needs", 0xffff);
             api->text(72, "a newer firmware", 0xffff);
             api->text(110, "OK: back", 0x07ff);
-        } else if (message == B22N_KEY_OK) api->exit();
+        } else if (message == GO1_KEY_OK) api->exit();
         return 1;
     }
-    if (message == B22N_CLOSE) { shutdown(); return 1; }
-    if (message == B22N_OPEN) { open_list(); return 1; }
+    if (message == GO1_CLOSE) { shutdown(); return 1; }
+    if (message == GO1_OPEN) { open_list(); return 1; }
     if (choosing) {
-        if (B22N_IS_KEY(message)) choose(message);
-        else if (message == B22N_PAINT) draw_list();
+        if (GO1_IS_KEY(message)) choose(message);
+        else if (message == GO1_PAINT) draw_list();
         return 1;
     }
-    if (message == B22N_TIMER) tick();
-    else if (B22N_IS_KEY(message) && vm && !finished) key(message);
-    else if (message == B22N_KEY_OK && finished) { done(); return 1; }
-    else if (message == B22N_PAINT && midp && vm && !finished) jvm_post_event(vm, JVM_REPAINT, 1);
+    if (message == GO1_TIMER) tick();
+    else if (GO1_IS_KEY(message) && vm && !finished) key(message);
+    else if (message == GO1_KEY_OK && finished) { done(); return 1; }
+    else if (message == GO1_PAINT && midp && vm && !finished) jvm_post_event(vm, JVM_REPAINT, 1);
     if (choosing || (midp && !finished)) return 1;  /* the list or the MIDlet owns the screen */
-    if (dirty || message == B22N_PAINT) draw();
+    if (dirty || message == GO1_PAINT) draw();
     return 1;
 }

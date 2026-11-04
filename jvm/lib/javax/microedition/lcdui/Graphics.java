@@ -1,8 +1,8 @@
 package javax.microedition.lcdui;
 
-import b22.Draw;
+import go1.Draw;
 
-/* Translation, clip, colour and font state; pixels are drawn by b22.Draw. */
+/* Translation, clip, colour and font state; pixels are drawn by go1.Draw. */
 public class Graphics {
     public static final int HCENTER = 1;
     public static final int VCENTER = 2;

@@ -535,18 +535,18 @@ static int draw_decode_png(Thread *t, u32 *args, u32 *result) {
 typedef struct Entry { const char *cls, *name, *desc; Native fn; } Entry;
 
 static const Entry entries[] = {
-    {"b22/Events", "poll", "([I)Z", events_poll},
-    {"b22/Events", "post", "(II)V", events_post},
-    {"b22/Draw", "fillRect", "(Ljava/lang/Object;IIIIIIIII)V", draw_fill_rect},
-    {"b22/Draw", "drawLine", "(Ljava/lang/Object;IIIIIIIII)V", draw_line},
-    {"b22/Draw", "fillTriangle", "(Ljava/lang/Object;IIIIIIIIIII)V", draw_fill_triangle},
-    {"b22/Draw", "drawRegion", "(Ljava/lang/Object;Ljava/lang/Object;IIIIIIIIIII)V", draw_region},
-    {"b22/Draw", "drawRGB", "(Ljava/lang/Object;[IIIIIIIZIIII)V", draw_rgb},
-    {"b22/Draw", "getRGB", "(Ljava/lang/Object;[IIIIIII)V", draw_get_rgb},
-    {"b22/Draw", "textWidth", "(Ljava/lang/String;II[B)I", draw_text_width},
-    {"b22/Draw", "drawText", "(Ljava/lang/Object;Ljava/lang/String;IIIII[BZIIII)I", draw_text},
-    {"b22/Draw", "flush", "(IIII)V", draw_flush},
-    {"b22/Draw", "decodePng", "([BIILjava/lang/Object;)Z", draw_decode_png},
+    {"go1/Events", "poll", "([I)Z", events_poll},
+    {"go1/Events", "post", "(II)V", events_post},
+    {"go1/Draw", "fillRect", "(Ljava/lang/Object;IIIIIIIII)V", draw_fill_rect},
+    {"go1/Draw", "drawLine", "(Ljava/lang/Object;IIIIIIIII)V", draw_line},
+    {"go1/Draw", "fillTriangle", "(Ljava/lang/Object;IIIIIIIIIII)V", draw_fill_triangle},
+    {"go1/Draw", "drawRegion", "(Ljava/lang/Object;Ljava/lang/Object;IIIIIIIIIII)V", draw_region},
+    {"go1/Draw", "drawRGB", "(Ljava/lang/Object;[IIIIIIIZIIII)V", draw_rgb},
+    {"go1/Draw", "getRGB", "(Ljava/lang/Object;[IIIIIII)V", draw_get_rgb},
+    {"go1/Draw", "textWidth", "(Ljava/lang/String;II[B)I", draw_text_width},
+    {"go1/Draw", "drawText", "(Ljava/lang/Object;Ljava/lang/String;IIIII[BZIIII)I", draw_text},
+    {"go1/Draw", "flush", "(IIII)V", draw_flush},
+    {"go1/Draw", "decodePng", "([BIILjava/lang/Object;)Z", draw_decode_png},
 };
 
 Native midp_native_for(Utf8 class_name, Utf8 name, Utf8 desc) {
@@ -566,7 +566,7 @@ int jvm_main_class(const JvmHost *host, char *name, uint32_t capacity) {
     /* MIDlet-1 wins over Main-Class wherever it appears. */
     for (u32 i = 0; i < size && !found; i++)
         if ((!i || manifest[i-1] == '\n') && size-i >= 9 && !jvm_memcmp(manifest+i, "MIDlet-1:", 9)) {
-            const char *launcher = "b22/Launcher";
+            const char *launcher = "go1/Launcher";
             u32 n = jvm_strlen(launcher);
             if (n < capacity) { jvm_memcpy(name, launcher, n+1); found = 1; }
         }

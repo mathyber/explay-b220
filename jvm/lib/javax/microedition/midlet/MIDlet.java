@@ -10,7 +10,7 @@ public abstract class MIDlet {
     protected abstract void destroyApp(boolean unconditional) throws MIDletStateChangeException;
 
     public final void notifyDestroyed() {
-        b22.Launcher.exit();
+        go1.Launcher.exit();
     }
 
     public final void notifyPaused() {}
@@ -18,7 +18,7 @@ public abstract class MIDlet {
     public final void resumeRequest() {}
 
     public final String getAppProperty(String key) {
-        return b22.Launcher.getProperty(key);
+        return go1.Launcher.getProperty(key);
     }
 
     public final boolean platformRequest(String url) {
@@ -29,12 +29,12 @@ public abstract class MIDlet {
         return 1;
     }
 
-    /* Called by b22.Launcher. */
-    public final void b22Start() throws MIDletStateChangeException {
+    /* Called by go1.Launcher. */
+    public final void go1Start() throws MIDletStateChangeException {
         startApp();
     }
 
-    public final void b22Destroy() {
+    public final void go1Destroy() {
         try {
             destroyApp(true);
         } catch (MIDletStateChangeException e) {

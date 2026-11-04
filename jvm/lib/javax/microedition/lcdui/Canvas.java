@@ -1,6 +1,6 @@
 package javax.microedition.lcdui;
 
-import b22.Events;
+import go1.Events;
 
 public abstract class Canvas extends Displayable {
     public static final int UP = 1;
@@ -106,17 +106,17 @@ public abstract class Canvas extends Displayable {
         }
     }
 
-    public void b22Show() { showNotify(); }
-    public void b22Hide() { hideNotify(); }
+    public void go1Show() { showNotify(); }
+    public void go1Hide() { hideNotify(); }
 
-    public void b22Paint(Graphics g) {
+    public void go1Paint(Graphics g) {
         Graphics own = new Graphics(null, Display.WIDTH, getHeight());
         own.setClip(g.getClipX(), g.getClipY(), g.getClipWidth(), g.getClipHeight());
         paint(own);
         paintCommands(g);
     }
 
-    public void b22Key(int type, int code) {
+    public void go1Key(int type, int code) {
         if (softKey(type, code)) return;
         if (type == Events.KEY_PRESSED) keyPressed(code);
         else if (type == Events.KEY_RELEASED) keyReleased(code);

@@ -1,4 +1,4 @@
-/* B22 Java VM: a compact CLDC-style interpreter for the Explay B220.
+/* GO1 Java VM: a compact CLDC-style interpreter for the Explay B220.
 
 The VM lives in one memory block supplied by the host: class metadata grows from
 the start, the garbage-collected object heap fills the rest. Java frames are kept
@@ -86,7 +86,7 @@ void *jvm_scratch_alloc(Jvm *vm, uint32_t size);
 int jvm_scratch_release(Jvm *vm, void *data);
 /* Queue a MIDP event (type, value such as a key code); returns 0 if the queue is full. */
 int jvm_post_event(Jvm *vm, int type, int value);
-/* Main class for an application JAR, read through host->read: "b22/Launcher"
+/* Main class for an application JAR, read through host->read: "go1/Launcher"
    when the manifest declares MIDlet-1, otherwise its Main-Class. */
 int jvm_main_class(const JvmHost *host, char *name, uint32_t capacity);
 

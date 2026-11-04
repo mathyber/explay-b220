@@ -1,4 +1,4 @@
-"""Assemble the small, register-based B22V v1 language used by the native loader."""
+"""Assemble the small, register-based GO1V v1 language used by the native loader."""
 import argparse
 from pathlib import Path
 import shlex
@@ -58,7 +58,7 @@ def assemble(source):
                 value=len(strings);strings.extend(raw+b'\0')
         except (ValueError,UnicodeError) as exc:raise ValueError(f'Line {lineno}: {exc}') from exc
         code.extend(struct.pack('>4BI',OPS[op],a,b,0,value))
-    result=struct.pack('>4sHHHHI',b'B22V',1,16,len(instructions),0,len(strings))+code+strings
+    result=struct.pack('>4sHHHHI',b'GO1V',1,16,len(instructions),0,len(strings))+code+strings
     if len(result)>4096:raise ValueError('Application exceeds the 4096-byte loader limit')
     return bytes(result)
 
