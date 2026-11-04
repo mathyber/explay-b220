@@ -169,7 +169,7 @@ long/float/double и преобразования, строки, массивы,
 .\.venv\Scripts\python.exe -m tools.build_java_phone [--app apps/java/Hello.java]
 ```
 
-Затем `Start B220 CUT.cmd` → главное меню → SD Apps (правый нижний пункт) → Java.
+Затем `Start B220 CUT.cmd` → главное меню → «Приложения» (правый нижний пункт) → Java.
 
 * На карте: `JAVA.GO1`, `E:\JAVALIB.JAR` (библиотека, 59 КБ) и `E:\APP.JAR`
   (приложение, главный класс — `Main-Class` в манифесте).

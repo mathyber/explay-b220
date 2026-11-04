@@ -74,7 +74,8 @@ class CutTests(unittest.TestCase):
         for language in (0, 1):
             address, _ = text_slot(self.output, SOCIAL_TEXT, language)
             length = struct.unpack_from('>H', self.output, address+2)[0]
-            self.assertEqual(self.output[address+4:address+4+length].decode('utf-16-be'), 'SD Apps')
+            self.assertEqual(self.output[address+4:address+4+length].decode('utf-16-be'),
+                             ('Applications', 'Приложения')[language])
 
     def test_main_menu_icons_follow_items(self):
         for table in MAIN_ICONS:

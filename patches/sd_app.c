@@ -244,7 +244,8 @@ static void draw_icon(u32 x,u32 y,const u16 *pixels,const u8 *alpha) {
     FN(0x1d081f,InvalidateRect)(dev,point(x,y),point(x+GO1_ICON_SIZE-1,y+GO1_ICON_SIZE-1));
 }
 static void menu(void) {
-    clear_panel(); text(4,"SD APPS",0xffff);
+    static const u16 header[]={0x041f,0x0440,0x0438,0x043b,0x043e,0x0436,0x0435,0x043d,0x0438,0x044f};  /* Приложения */
+    clear_panel(); text_wide_at(0,4,header,sizeof(header)/2,0xffff,8);
     if (!S->catalog || !CAT->count) {
         text(54,"NO APPLICATIONS",0xffe0);
         text(84,"APPS.LST",0xffff);

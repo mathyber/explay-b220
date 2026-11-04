@@ -260,7 +260,7 @@ GAMES_TEXT = 0x40000027
 # literal at 0x25eab0, straight to the SD Apps entry (0x25ea00 -> 0x60eee9);
 # Games' own id 0x37 would open the Games list first.
 SD_APPS_MENU_ID, SD_APPS_ID_LITERAL = 0xc0002, 0x25eab0
-SD_APPS_LABEL = 'SD Apps'
+SD_APPS_LABEL = ('Applications', 'Приложения')   # language 0 English, 1 Russian
 # Social networks' grid icons (images main/342 and main/351) become SD Apps'.
 SD_APPS_ICONS = (0x40000157, 0x40000160)
 
@@ -277,9 +277,11 @@ def text_slot(image, text, language):
     return MAIN_MODULE+start, end-start
 
 
-def rewrite_text(image, output, text, value):
+def rewrite_text(image, output, text, values):
+    """values: one string for both languages, or (English, Russian)."""
     changes = []
     for language in (0, 1):
+        value = values[language] if isinstance(values, tuple) else values
         address, size = text_slot(image, text, language)
         data = struct.pack('>HH', 0x8000, len(value)*2)+value.encode('utf-16-be')
         if len(data) > size:
