@@ -545,6 +545,355 @@ def wait_animation(image, output, free):
             dict(start=hex(record+8), size=4, kind='waiting animation: size')]
 
 
+# The "Опции" pop-up: its border colour is a literal of two drawing routines, its
+# selected row frame main/692 an 8-bit palette MB (palette B, G, R, 0 at 0x36).
+OPTIONS_BORDER_LITERALS = (0x557464, 0x5774d4)
+OPTIONS_BORDER = (0xdd67, 0x37a6)      # gold (222, 174, 57) -> green (54, 245, 54)
+OPTIONS_FRAME = 692
+
+
+def green_hue(r, g, b):
+    """The gold -> green shift of the recoloured frames (hue 1/3, a little brighter)."""
+    import colorsys
+    h, s, v = colorsys.rgb_to_hsv(r/255, g/255, b/255)
+    if s > 0.25 and 0.02 < h < 0.2:
+        r, g, b = (round(c*255) for c in colorsys.hsv_to_rgb(1/3, min(1, s*1.05), min(1, v*1.1)))
+    return r, g, b
+
+
+def green_options(image, output):
+    from .extract_images import catalog
+    changes = []
+    old, new = OPTIONS_BORDER
+    for address in OPTIONS_BORDER_LITERALS:
+        if struct.unpack_from('>I', image, address)[0] != old:
+            raise ValueError(f'Unexpected options border colour at {address:#x}')
+        struct.pack_into('>I', output, address, new)
+        changes.append(dict(start=hex(address), size=4, kind='options pop-up border: green'))
+    entry = next(e for e in catalog(image) if e['module'] == 'main' and e['index'] == OPTIONS_FRAME)
+    at = int(entry['address'], 16)
+    bpp, = struct.unpack_from('>H', image, at+28)
+    colours, = struct.unpack_from('>I', image, at+46)
+    if image[at:at+2] != b'MB' or bpp != 8 or not 0 < colours <= 256:
+        raise ValueError('Unexpected options row frame')
+    palette = at+0x36
+    for k in range(colours):
+        b, g, r = image[palette+4*k:palette+4*k+3]
+        output[palette+4*k:palette+4*k+3] = bytes(reversed(green_hue(r, g, b)))
+    changes.append(dict(start=hex(palette), size=4*colours, kind=f'options row frame main/{OPTIONS_FRAME}: green palette'))
+    return changes
+
+
+# Status strip: titles and client areas move 18 px down; every title paint ends by
+# clearing rows 0-17 and painting the idle window's status bar there.
+STRIP = 18
+TITLE_RECT = 0x3bbb64                    # theme: title (0, 0, 175, 21), 16-bit
+TITLE_ICONS = ((0x3bbb6c, (3, 3, 22, 22)), (0x3bbb74, (153, 3, 172, 22)))
+TITLE_PAGE = (137, 10, 174, 19)           # theme: page number at the right of the title
+THEME_REGION = (0x3b6000, 0x3e0000)
+TITLE_BACKGROUND_CALL = 0x5b7df4          # the title paint's only call of its background
+TITLE_BACKGROUND = 0x5b8346
+STRIP_VENEER = 0x4220a4                   # the freed "B220 MOD" wrapper, in BL reach of the call
+IDLE_WINDOW = 1
+STATUS_BAR_OF = 0x5b64f0                  # window id -> its status bar control (0: none)
+STATUS_BAR_PAINT = 0x5b6c40               # control -> painted on the main layer
+MEMCLR = 0x6a17a4                         # (pointer, bytes)
+MAIN_LAYER = 0x4280200                    # 176 x 220 RGB565 main LCD buffer
+STORE_UPDATE_RECT = 0x1d081e              # MMITHEME_StoreUpdateRect(lcd, (left, top), (right, bottom))
+UPDATE_RECT = 0x1d08c6                    # MMITHEME_UpdateRect(): stored rectangles to the display
+STATUS_UPDATE_CHECK = 0x4cc788            # status items changed: bl "focused window has a status bar"
+HAS_STATUS_BAR = 0x4d79b6
+FOCUS_WINDOW = 0x4d7cf4
+TITLE_OF = 0x5b7ee6                       # (window, control id) -> title control or 0
+TITLE_CONTROL = 0xa8
+STATUS_UPDATE = 0x4cc780                  # repaint the focused window's status bar
+MINUTE_EMPTY_CALL = 0x4a38f6              # MAIN_HandleSysMsg, MISC_MSG_RTC_MIN: bl to an empty function
+EMPTY_FUNCTION = 0x4a708c                 # bx lr
+GET_SYS_TIME = 0x17e88a                   # TM_GetSysTime(&(seconds, minutes, hours))
+TEXT = 0x4cf432                           # (lcd, (x0, y0), (x1, y1), utf16, length, 0, colour, font, align, 0)
+CLOCK_FONT = 3                            # small antialiased (0/1 tiny pixel, 4 a bit larger, 6 the list font)
+CLOCK_ALIGN = 8                           # centred (1 right, 3 left)
+CLOCK_LEFT, CLOCK_RIGHT = 0, 175          # the whole width: exactly centred, clear of the icons
+CLOCK_TOP = 1                             # the text box rows 1-18 (one pixel lower than the strip)
+MENU_TITLE_CALL = 0x5a6824                # the main menu paint: grid (0x5a6f3c), then this title call
+MENU_TITLE = 0x5a663a
+MENU_TITLE_TEXT = 0x70d4d0                # main menu: title text rectangle (after its title area)
+GRID_TITLE = 0x70d3c4                     # main menu grid layout (0x70d3bc) +8: title (10, 6, 165, 32)
+GRID_CELLS = 0x70d3dc                     # +0x20: nine icon cells, columns 7/65/123, rows 37/91/145
+GRID_LEFT, GRID_TOP, GRID_STEP_X, GRID_STEP_Y = 14, 48, 52, 48
+
+
+DRY = 0x7fff0000                          # placeholder address for dry runs (no literal clashes)
+
+
+def place(output, at, data, size):
+    """Writes data of exactly size bytes: a slice of another length would shift the image."""
+    if len(data) != size:
+        raise ValueError(f'Code at {at:#x}: {len(data)} bytes instead of {size}')
+    output[at:at+size] = data
+
+
+def shift_rect16(image, output, at, old, changes, kind):
+    if struct.unpack_from('>4H', image, at) != old:
+        raise ValueError(f'Unexpected rectangle at {at:#x}')
+    x0, y0, x1, y1 = old
+    struct.pack_into('>4H', output, at, x0, y0+STRIP, x1, y1+STRIP)
+    changes.append(dict(start=hex(at), size=8, kind=kind))
+
+
+def status_strip(image, output, free):
+    from .thumb_asm import Thumb, bl_bytes
+    changes = []
+    shift_rect16(image, output, TITLE_RECT, (0, 0, 175, 21), changes, 'title 18 px lower')
+    for at, rect in TITLE_ICONS:
+        shift_rect16(image, output, at, rect, changes, 'title arrow 18 px lower')
+    # Other title rectangles (0, 0, 175, 22): theme variants and the main menu's own title.
+    packed = struct.pack('>4H', 0, 0, 175, 22)
+    at = image.find(packed)
+    while at != -1:
+        if at % 2 == 0:
+            shift_rect16(image, output, at, (0, 0, 175, 22), changes, 'title (variant) 18 px lower')
+        at = image.find(packed, at+2)
+    shift_rect16(image, output, MENU_TITLE_TEXT, (10, 2, 166, 21), changes, 'main menu (list view) title text 18 px lower')
+    # The grid's title (its background and text) between the strip and the first icon row.
+    if struct.unpack_from('>4H', image, GRID_TITLE) != (10, 6, 165, 32):
+        raise ValueError('Unexpected main menu grid title')
+    struct.pack_into('>4H', output, GRID_TITLE, 10, STRIP, 165, 36)
+    changes.append(dict(start=hex(GRID_TITLE), size=8, kind='main menu grid title below the strip'))
+    # The nine icon cells (44 x 39, 3 x 3) closer together, centred below the title.
+    cells = [struct.unpack_from('>4H', image, GRID_CELLS+8*k) for k in range(9)]
+    if cells != [(7+58*c, 37+54*r, 51+58*c, 76+54*r) for r in range(3) for c in range(3)]:
+        raise ValueError('Unexpected main menu grid cells')
+    for k in range(9):
+        r, c = divmod(k, 3)
+        x, y = GRID_LEFT+GRID_STEP_X*c, GRID_TOP+GRID_STEP_Y*r
+        struct.pack_into('>4H', output, GRID_CELLS+8*k, x, y, x+44, y+39)
+    changes.append(dict(start=hex(GRID_CELLS), size=72, kind='main menu grid icons closer together'))
+    page = image.find(struct.pack('>4H', *TITLE_PAGE), *THEME_REGION)
+    if page < 0:
+        raise ValueError('Title page rectangle not found')
+    shift_rect16(image, output, page, TITLE_PAGE, changes, 'title page number 18 px lower')
+    # Theme client rectangles (16-bit) and window table rectangles (a creation token
+    # 0xf0xx, then four 32-bit words) that start below a title move down; bottoms stay.
+    theme = 0
+    for old in ((0, 22, 175, 195), (0, 22, 175, 219)):
+        packed = struct.pack('>4H', *old)
+        at = image.find(packed)
+        while at != -1:
+            if at % 2 == 0:
+                struct.pack_into('>4H', output, at, old[0], old[1]+STRIP, old[2], old[3])
+                changes.append(dict(start=hex(at), size=8, kind='theme client area below the strip'))
+                theme += 1
+            at = image.find(packed, at+2)
+    windows = 0
+    for at in range(4, len(image)-16, 4):
+        if not 0xf000 <= struct.unpack_from('>I', image, at-4)[0] <= 0xf0ff:
+            continue
+        x0, y0, x1, y1 = struct.unpack_from('>4I', image, at)
+        if y0 == 22 and x0 < x1 <= 175 and y0 < y1 <= 219:
+            struct.pack_into('>4I', output, at, x0, y0+STRIP, x1, y1 if y1 >= 190 else y1+STRIP)
+            changes.append(dict(start=hex(at), size=16, kind='window area below the strip'))
+            windows += 1
+
+    def clock_routine(base, main_lcd):
+        """Draws the system time "HH:MM" in the middle of the strip (r4-r7 kept)."""
+        code = Thumb(base)
+        code.push(4, 5, 6, 7, 'lr')
+        code._fixed(0xb08a)                   # sub sp, #40
+        code.add_sp(0, 24)
+        code.ldr_lit(7, GET_SYS_TIME | 1)     # (seconds, minutes, hours) bytes at sp+24
+        code.bl('via_r7')
+        code.add_sp(6, 28)                    # the UTF-16 text at sp+28
+        for value_at, out_at in ((26, 0), (25, 6)):
+            code.add_sp(1, 24)
+            code._fixed(0x7808 | (value_at-24) << 6)   # ldrb r0, [r1, #n]
+            code.mov(4, 0)
+            code.movs(1, 205)                 # tens = v*205 >> 11 (v < 180)
+            code.alu('muls', 0, 1)
+            code.lsrs(0, 0, 11)
+            code.lsls(2, 0, 3)
+            code.lsls(3, 0, 1)
+            code.add3(2, 2, 3)
+            code.sub3(1, 4, 2)                # ones = v - 10*tens
+            code.adds(0, 48)
+            code.strh_imm(0, 6, out_at)
+            code.adds(1, 48)
+            code.strh_imm(1, 6, out_at+2)
+        code.movs(0, 58)                      # ':'
+        code.strh_imm(0, 6, 4)
+        code.movs(0, 0)
+        code.strh_imm(0, 6, 10)
+        code.movs(0, 5)
+        code.str_sp(0, 0)                     # length
+        code.movs(0, 0)
+        code.str_sp(0, 4)
+        code.ldr_lit(0, 0xffff)
+        code.str_sp(0, 8)                     # white
+        code.movs(0, CLOCK_FONT)
+        code.str_sp(0, 12)
+        code.movs(0, CLOCK_ALIGN)
+        code.str_sp(0, 16)
+        code.movs(0, 0)
+        code.str_sp(0, 20)
+        code.ldr_lit(0, main_lcd)
+        code.ldr_lit(1, CLOCK_LEFT << 16 | CLOCK_TOP)
+        code.ldr_lit(2, CLOCK_RIGHT << 16 | CLOCK_TOP+STRIP-1)
+        code.mov(3, 6)
+        code.ldr_lit(7, TEXT | 1)
+        code.bl('via_r7')
+        code._fixed(0xb00a)                   # add sp, #40
+        code.pop(4, 5, 6, 7)
+        code.pop(3)
+        code._fixed(0x4718)                   # bx r3
+        code.label('via_r7')
+        code._fixed(0x4738)                   # bx r7
+        return code
+
+    # Sizes come from a dry run with distinct placeholder literals (equal literals share
+    # one pool slot, so a dry run with zeros could be shorter than the real code).
+    clock_body = len(clock_routine(DRY, DRY+4).assemble())
+    clock = take_free(free, clock_body+8, 0)
+    place(output, clock, clock_routine(clock, clock+clock_body).assemble()+bytes(8), clock_body+8)
+    changes.append(dict(start=hex(clock), size=clock_body+8, kind='status strip: clock "HH:MM"'))
+
+    def helper(base, main_lcd, rows, then):
+        # Called instead of a title paint step (r0 = its control): rows 0..rows-1 black,
+        # the idle status bar on top, those rows marked for the display (a window opened
+        # over the main menu flushes only its own areas), then the replaced call.
+        # Freed ROM is far from the firmware routines (beyond BL reach): calls go
+        # through r3 (ldr r3, =routine|1; bl via_r3; via_r3: bx r3).
+        code = Thumb(base)
+        code.push(4, 'lr')
+        code.mov(4, 0)
+        code.ldr_lit(0, MAIN_LAYER)
+        code.ldr_lit(1, 176*2*rows)
+        code.ldr_lit(3, MEMCLR | 1)
+        code.bl('via_r3')
+        code.movs(0, IDLE_WINDOW)
+        code.ldr_lit(3, STATUS_BAR_OF | 1)
+        code.bl('via_r3')
+        code.cmp(0, 0)
+        code.b('flush', 'eq')
+        code.ldr_lit(3, STATUS_BAR_PAINT | 1)
+        code.bl('via_r3')
+        code.label('flush')
+        code.ldr_lit(3, clock | 1)
+        code.bl('via_r3')
+        code.ldr_lit(0, main_lcd)             # main LCD, block 0: two zero words
+        code.movs(1, 0)                       # left 0, top 0
+        code.ldr_lit(2, 175 << 16 | rows-1)   # right 175, bottom
+        code.ldr_lit(3, STORE_UPDATE_RECT | 1)
+        code.bl('via_r3')
+        code.mov(0, 4)
+        code.ldr_lit(3, then | 1)
+        code.bl('via_r3')
+        code.pop(4)
+        code.pop(3)
+        code.label('via_r3')
+        code._fixed(0x4718)                   # bx r3: the return and the call stub
+        return code
+
+    # Veneers sit in the freed wrapper slot (BL reach of the calls); helpers anywhere.
+    region = next((r for r in free if int(r['start'], 16) <= STRIP_VENEER < int(r['end'], 16)), None)
+    if region is None or output[STRIP_VENEER:STRIP_VENEER+16] != b'\xff'*16:
+        raise ValueError('The status strip veneer slot is not free')
+    hooks = ((TITLE_BACKGROUND_CALL, TITLE_BACKGROUND, STRIP+22, 'window title (rows 0-39 cleared)'),
+             (MENU_TITLE_CALL, MENU_TITLE, STRIP, 'main menu title (rows 0-17 cleared)'))
+    veneer_at = STRIP_VENEER
+    for call, target, rows, what in hooks:
+        if image[call:call+4] != bl_bytes(call, target):
+            raise ValueError(f'Unexpected call at {call:#x}')
+        body = len(helper(DRY, DRY+4, rows, target).assemble())
+        size = body+8                         # + the main LCD description (two zero words)
+        base = take_free(free, size, 0)
+        code = helper(base, base+body, rows, target)
+        place(output, base, code.assemble()+bytes(8), size)
+        veneer = Thumb(veneer_at)
+        veneer.ldr_lit(3, base | 1)
+        veneer._fixed(0x4718)                 # bx r3 (r3 is free: the call passes r0 only)
+        data = veneer.assemble()
+        output[veneer_at:veneer_at+len(data)] = data
+        output[call:call+4] = bl_bytes(call, veneer_at)
+        changes += [dict(start=hex(base), size=size, kind=f'status strip: {what}'),
+                    dict(start=hex(veneer_at), size=len(data), kind='status strip: veneer'),
+                    dict(start=hex(call), size=4, kind=f'{what}: call through the status strip')]
+        veneer_at += len(data)
+    # A status item changed (signal, battery, ...): the firmware repaints the status bar
+    # of the focused window if it has one. A window with a title has the strip instead:
+    # it is repainted and sent to the display at once. Other windows (applications) stay.
+    if image[STATUS_UPDATE_CHECK:STATUS_UPDATE_CHECK+4] != bl_bytes(STATUS_UPDATE_CHECK, HAS_STATUS_BAR):
+        raise ValueError('Unexpected status update')
+
+    def updater(base, main_lcd):
+        code = Thumb(base)
+        code.push(4, 'lr')
+        code.ldr_lit(3, HAS_STATUS_BAR | 1)
+        code.bl('via_r3')
+        code.cmp(0, 0)
+        code.b('out', 'ne')                   # the window's own status bar: as before
+        code.ldr_lit(3, FOCUS_WINDOW | 1)
+        code.bl('via_r3')
+        code.movs(1, TITLE_CONTROL)
+        code.ldr_lit(3, TITLE_OF | 1)
+        code.bl('via_r3')
+        code.cmp(0, 0)
+        code.b('none', 'eq')
+        code.ldr_lit(0, MAIN_LAYER)
+        code.ldr_lit(1, 176*2*STRIP)
+        code.ldr_lit(3, MEMCLR | 1)
+        code.bl('via_r3')
+        code.movs(0, IDLE_WINDOW)
+        code.ldr_lit(3, STATUS_BAR_OF | 1)
+        code.bl('via_r3')
+        code.cmp(0, 0)
+        code.b('flush', 'eq')
+        code.ldr_lit(3, STATUS_BAR_PAINT | 1)
+        code.bl('via_r3')
+        code.label('flush')
+        code.ldr_lit(3, clock | 1)
+        code.bl('via_r3')
+        code.ldr_lit(0, main_lcd)
+        code.movs(1, 0)
+        code.ldr_lit(2, 175 << 16 | STRIP-1)
+        code.ldr_lit(3, STORE_UPDATE_RECT | 1)
+        code.bl('via_r3')
+        code.ldr_lit(3, UPDATE_RECT | 1)      # to the display now (no window paint follows)
+        code.bl('via_r3')
+        code.label('none')
+        code.movs(0, 0)                       # "no status bar": the caller paints nothing more
+        code.label('out')
+        code.pop(4)
+        code.pop(3)
+        code.label('via_r3')
+        code._fixed(0x4718)
+        return code
+    body = len(updater(DRY, DRY+4).assemble())
+    base = take_free(free, body+8, 0)
+    code = updater(base, base+body)
+    place(output, base, code.assemble()+bytes(8), body+8)
+    veneer = Thumb(veneer_at)
+    veneer.ldr_lit(3, base | 1)
+    veneer._fixed(0x4718)
+    data = veneer.assemble()
+    output[veneer_at:veneer_at+len(data)] = data
+    output[STATUS_UPDATE_CHECK:STATUS_UPDATE_CHECK+4] = bl_bytes(STATUS_UPDATE_CHECK, veneer_at)
+    changes += [dict(start=hex(base), size=body+8, kind='status strip: repaint on status changes in titled windows'),
+                dict(start=hex(veneer_at), size=len(data), kind='status strip: veneer'),
+                dict(start=hex(STATUS_UPDATE_CHECK), size=4, kind='status update: through the status strip')]
+    veneer_at += len(data)
+    # Every minute (MISC_MSG_RTC_MIN) the clock follows: the handler's call of an empty
+    # function becomes a status update (the strip of a titled window, with the clock).
+    if image[MINUTE_EMPTY_CALL:MINUTE_EMPTY_CALL+4] != bl_bytes(MINUTE_EMPTY_CALL, EMPTY_FUNCTION) \
+            or image[EMPTY_FUNCTION:EMPTY_FUNCTION+2] != b'\x47\x70':
+        raise ValueError('Unexpected minute handler')
+    output[MINUTE_EMPTY_CALL:MINUTE_EMPTY_CALL+4] = bl_bytes(MINUTE_EMPTY_CALL, STATUS_UPDATE)
+    changes.append(dict(start=hex(MINUTE_EMPTY_CALL), size=4, kind='every minute: status update (the strip clock)'))
+    region['start'] = hex((veneer_at+3) & ~3)
+    region['size'] = int(region['end'], 16)-int(region['start'], 16)
+    changes.append(dict(start=hex(STRIP_VENEER), size=0, kind=f'status strip: {theme} theme and {windows} window rectangles shifted'))
+    return changes
+
+
 def games_out_of_shortcut_list(image, output, free):
     from .thumb_asm import Thumb, bl_bytes
     for address, original in SHORTCUT_LIST_BYTES.items():
@@ -727,7 +1076,9 @@ def build(image, icons=ICONS):
     changes += more; free += extra
     changes += games_out_of_shortcut_list(image, output, free)
     changes += time_title_back(image, output, free)
+    changes += status_strip(image, output, free)
     changes += wait_animation(image, output, free)
+    changes += green_options(image, output)
     changes += antialias_fonts(image, output, free)
     more, placed = replace_icons(image, output, free, icons) if icons else ([], [])
     changes += more
@@ -737,7 +1088,7 @@ def build(image, icons=ICONS):
         allowed.update(range(start, start+change['size']))
     if len(output) != len(image) or any(i not in allowed for i, (a, b) in enumerate(zip(image, output)) if a != b):
         raise ValueError('Changes outside declared regions')
-    steps = ['wallpapers', 'media library', 'social networks', 'SD Apps in the main menu', 'power-on animation', 'world time', 'Quick access without Games', 'time title', 'waiting dots', 'font antialiasing']+(['icons'] if placed else [])
+    steps = ['wallpapers', 'media library', 'social networks', 'SD Apps in the main menu', 'power-on animation', 'world time', 'Quick access without Games', 'time title', 'status strip', 'waiting dots', 'green options', 'font antialiasing']+(['icons'] if placed else [])
     return bytes(output), dict(format='b220-cut', version=1, steps=steps, source_sha256=sha(image),
                                output_sha256=sha(output), size=len(output), changes=changes, icons=placed, free_rom=free,
                                free_rom_bytes=sum(f['size'] for f in free),
@@ -761,6 +1112,34 @@ def carry_card(card, previous):
     card.write_bytes(data)
     print(f'SD card of the previous build copied: {old} -> {card}')
     return 1
+
+
+def carry_settings(folder, previous, firmware):
+    """The emulator's saved flash (window-nor-v2.bin: the PS image, then the settings)
+    of the previous build, or the newest one of any build, with this firmware in front.
+    A fresh flash starts at the date screen, where the emulator window never unlocks
+    its keys (it waits for five full LCD frames)."""
+    target = folder/'window-nor-v2.bin'
+    if target.exists() and target.stat().st_size:
+        return
+    experiments = ROOT/'analysis/emulator/experiments'
+    sources = [experiments/previous/target.name] if previous else []
+    sources += sorted((p for p in experiments.glob(f'*/{target.name}') if p.parent != folder and p.stat().st_size),
+                      key=lambda p: p.stat().st_mtime, reverse=True)
+    for source in sources:
+        if not source.exists():
+            continue
+        try:
+            flash = bytearray(source.read_bytes())
+        except OSError:
+            continue
+        if len(flash) <= len(firmware):
+            continue
+        flash[:len(firmware)] = firmware
+        folder.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(flash)
+        print(f'Settings (date, time, wallpaper) carried over from {source.parent.name[:12]}')
+        return
 
 
 def main():
@@ -789,6 +1168,7 @@ def main():
         if args.prepare_card:
             from .install_sd_app import install
             card = ROOT/'analysis/emulator/experiments'/sha(output)/'sd-card.img'
+            carry_settings(card.parent, manifest.get('previous_output_sha256'), output)
             if carry_card(card, manifest.get('previous_output_sha256')):
                 for name in ('card_demo.b22asm', 'card_second.b22asm', 'card_native.c', 'card_screen.c'):
                     install(ROOT/'apps'/name, card, ensure=True)

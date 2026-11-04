@@ -1,9 +1,13 @@
-"""Give an experimental firmware the SD card of the main CUT build (games, apps).
+"""Give an experimental firmware the SD card and settings of the main CUT build.
 
-python -m tools.experiment_card <firmware.bin>: the card goes to
-analysis/emulator/experiments/<firmware sha256>/sd-card.img (where the emulator
-window looks for it) unless a non-empty card is already there. Exit code 1 when
-the main card is in use (emulator open) or missing.
+python -m tools.experiment_card <firmware.bin>: into
+analysis/emulator/experiments/<firmware sha256>/ (where the emulator window looks)
+- sd-card.img: the main build's card (games, apps), unless a non-empty card is there;
+- window-nor-v2.bin: the settings memory (date, time, wallpaper...) of the main build,
+  or the newest one of another experiment, unless the experiment has its own. A fresh
+  settings memory starts at the date screen, which redraws too little for the window
+  to unlock its keys (it waits for five full LCD frames).
+Exit code 1 when a source is in use (emulator open) or the main card is missing.
 """
 import hashlib
 import json
@@ -15,28 +19,57 @@ from emulator.firmware import ROOT
 
 EXPERIMENTS = ROOT/'analysis/emulator/experiments'
 MAIN_MANIFEST = ROOT/'analysis/firmware-patches/cut/manifest.json'
+SETTINGS = 'window-nor-v2.bin'
 
 
-def main():
-    firmware = Path(sys.argv[1])
-    card = EXPERIMENTS/hashlib.sha256(firmware.read_bytes()).hexdigest()/'sd-card.img'
-    if card.exists() and card.stat().st_size:
-        return 0
-    main_sha = json.loads(MAIN_MANIFEST.read_text(encoding='utf-8'))['output_sha256']
-    source = EXPERIMENTS/main_sha/'sd-card.img'
-    if not source.exists():
-        print(f'The main CUT build has no SD card yet: run "Start B220 CUT.cmd" once ({source})')
-        return 1
-    card.parent.mkdir(parents=True, exist_ok=True)
-    temporary = card.with_suffix('.tmp')
+def copy(source, target):
+    temporary = target.with_suffix('.tmp')
     try:
         shutil.copyfile(source, temporary)
     except OSError:
         temporary.unlink(missing_ok=True)
-        print('Close the emulator with the CUT firmware first: its SD card is copied for this experiment.')
-        return 1
-    temporary.replace(card)
-    print(f'SD card copied from the main CUT build: {card}')
+        print('Close the emulator first: its files are copied for this experiment.')
+        return False
+    temporary.replace(target)
+    return True
+
+
+def main():
+    firmware = Path(sys.argv[1])
+    folder = EXPERIMENTS/hashlib.sha256(firmware.read_bytes()).hexdigest()
+    folder.mkdir(parents=True, exist_ok=True)
+    main_folder = EXPERIMENTS/json.loads(MAIN_MANIFEST.read_text(encoding='utf-8'))['output_sha256']
+    card = folder/'sd-card.img'
+    if not (card.exists() and card.stat().st_size):
+        source = main_folder/'sd-card.img'
+        if not source.exists():
+            print(f'The main CUT build has no SD card yet: run "Start B220 CUT.cmd" once ({source})')
+            return 1
+        if not copy(source, card):
+            return 1
+        print(f'SD card copied from the main CUT build: {card}')
+    settings = folder/SETTINGS
+    if not (settings.exists() and settings.stat().st_size):
+        candidates = [main_folder/SETTINGS] if (main_folder/SETTINGS).exists() else sorted(
+            (p for p in EXPERIMENTS.glob(f'*/{SETTINGS}') if p.parent != folder and p.stat().st_size),
+            key=lambda p: p.stat().st_mtime, reverse=True)
+        if candidates:
+            # The saved NOR is the whole flash: the PS image first, then the settings.
+            # Keep the settings, put this firmware in front.
+            image = firmware.read_bytes()
+            try:
+                nor = bytearray(candidates[0].read_bytes())
+            except OSError:
+                print('Close the emulator first: its files are copied for this experiment.')
+                return 1
+            if len(nor) <= len(image):
+                print(f'Unexpected settings memory size in {candidates[0]}')
+                return 1
+            nor[:len(image)] = image
+            temporary = settings.with_suffix('.tmp')
+            temporary.write_bytes(nor)
+            temporary.replace(settings)
+            print(f'Settings memory copied from {candidates[0].parent.name[:12]}')
     return 0
 
 
