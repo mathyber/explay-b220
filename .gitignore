@@ -56,3 +56,6 @@ Desktop.ini
 
 # Downloaded compiler distributions also contain Markdown documentation.
 /analysis/toolchains/
+
+# Game and browser JARs for local tests (copyrighted, not in git).
+/jars/
