@@ -11,7 +11,8 @@ from tools.build_cut import (BLACK_ID, BLACK_SIZE, BOOT_END, BOOT_HEADER, BOOT_S
                              DOTS_Y, GROUP_COUNT, ITEM_SIZE, MAIN_ICONS, MAIN_MENU,
                              MEDIA_LIBRARY_TEXT, MULTIMEDIA, SD_APPS_ENTRY, SHORTCUT_ACTIONS, SLOTS_END,
                              SOCIAL_SHORTCUT, SOCIAL_TEXT, OTHERS, TOOLS, WALLPAPER_IDS, WORLD_MAP, WORLD_TIME_TEXT,
-                             GAMES_TEXT, SD_APPS_MENU_ID, build, text_slot)
+                             GAMES_TEXT, SD_APPS_MENU_ID, build, text_slot, SHORTCUT_LIST_LOOP, SHORTCUT_LIST_END,
+                             SHORTCUT_LIST_GET, SHORTCUT_LIST_SET, LIST_APPEND, LIST_POSITION)
 from tools.build_green_theme import bitmap_resources
 from tools.map_resources import WALLPAPERS, WALLPAPER_KEPT
 
@@ -118,6 +119,28 @@ class CutTests(unittest.TestCase):
         free = next(f for f in self.manifest['free_rom'] if f['origin'] == 'world map')
         self.assertEqual(set(self.output[int(free['start'], 0):int(free['end'], 0)]), {0xff})
 
+    def test_time_title_is_stock_again(self):
+        from tools.build_ui_label import HOOK, NATIVE_DRAW
+        from tools.thumb_asm import bl_bytes
+        self.assertNotEqual(self.source[HOOK:HOOK+4], self.output[HOOK:HOOK+4])
+        self.assertEqual(self.output[HOOK:HOOK+4], bl_bytes(HOOK, NATIVE_DRAW))
+
+    def test_quick_access_list_skips_games(self):
+        md = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_BIG_ENDIAN)
+        def code(address, size):
+            return [f'{i.mnemonic} {i.op_str}' for i in md.disasm(self.output[address:address+size], address)]
+        helpers = next(c for c in self.manifest['changes'] if c['kind'] == 'Quick access without Games: list helpers')
+        base = int(helpers['start'], 0)
+        self.assertEqual(code(SHORTCUT_LIST_LOOP, 6), [f'bl #{base:#x}', f'b #{SHORTCUT_LIST_END:#x}'])
+        listing = code(base, helpers['size'])
+        self.assertIn('cmp r4, #7', listing)
+        self.assertIn('cmp r4, #0x12', listing)
+        self.assertIn(f'bl #{LIST_APPEND:#x}', listing)
+        self.assertIn(f'bl #{LIST_POSITION:#x}', listing)
+        get, put = code(SHORTCUT_LIST_GET, 4)[0], code(SHORTCUT_LIST_SET, 4)[0]
+        self.assertTrue(get.startswith('bl #') and put.startswith('bl #'))
+        self.assertTrue(base < int(get[4:], 0) < base+helpers['size'] and base < int(put[4:], 0) < base+helpers['size'])
+
     def test_wrong_source_is_rejected(self):
         broken = bytearray(self.source)
         broken[0x1c9ade:0x1c9ae0] = b'\x21\x07'
@@ -158,6 +181,20 @@ class IconTests(unittest.TestCase):
             start = int(change['start'], 0)
             declared.update(range(start, start+change['size']))
         self.assertTrue(all(i in declared for i, (a, b) in enumerate(zip(source, output)) if a != b))
+
+    def test_removed_images_become_empty_and_free_their_space(self):
+        from tempfile import TemporaryDirectory
+        from tools.extract_images import catalog, decode
+        source = DEFAULT_SOURCE.read_bytes()
+        with TemporaryDirectory() as folder:
+            (Path(folder)/'removed.txt').write_text('main/291\n', encoding='utf-8')
+            output, manifest = build(source, icons=Path(folder))
+        image = next(e for e in catalog(output) if e['module'] == 'main' and e['index'] == 291)
+        self.assertEqual(set(decode(output, image).getdata()), {(0, 0, 0, 0)})
+        self.assertLess(image['size'], 32)
+        tail = next(f for f in manifest['free_rom'] if f['origin'] == 'icon main/291 tail')
+        self.assertGreater(tail['size'], 1200)
+        self.assertEqual(set(output[int(tail['start'], 0):int(tail['end'], 0)]), {0xff})
 
     def test_wrong_icon_size_is_rejected(self):
         from tempfile import TemporaryDirectory

@@ -287,6 +287,118 @@ def rewrite_text(image, output, text, value):
     return changes
 
 
+# Settings -> Quick access lists idle shortcut functions 0..17 (handler near
+# 0x278800): its list position is the function number. Games (7) only opens a
+# window with SD Apps, which is shortcut 17, so it leaves the list: positions
+# after it are one function higher.
+SHORTCUT_LIST_LOOP, SHORTCUT_LIST_END = 0x278884, 0x27889a   # append items 0..17
+SHORTCUT_LIST_GET = 0x278852    # BL: list position of the chosen item
+SHORTCUT_LIST_SET = 0x2788f0    # movs r2,#1; adds r1,r4,#0 before "highlight r4"
+LIST_APPEND, LIST_POSITION = 0x1c682c, 0x395e24
+GAMES_SHORTCUT, SHORTCUT_LIST_SIZE = 7, 18
+SHORTCUT_LIST_BYTES = {SHORTCUT_LIST_LOOP: '00a0492b1c3b580849251c32f74dffcc34012c12d3f4',
+                       SHORTCUT_LIST_GET: 'f11dfae7', SHORTCUT_LIST_SET: '22011c21'}
+
+
+LABEL_WRAPPER_CODE = bytes.fromhex('b4104c0542a3d1024b05240894014c0346a4bc10476046c0')
+
+
+def time_title_back(image, output, free):
+    """The early label demo (tools.build_ui_label) makes the date/time screen's
+    title "B220 MOD": its call site goes to a wrapper that swaps the "Время"
+    string. The call site gets the original BL to the stock text drawing again,
+    and the wrapper (code, literals) and its "B220 MOD" string become free ROM."""
+    from .build_ui_label import HOOK, NATIVE_DRAW, ORIGINAL_TEXT, TEXT
+    from .thumb_asm import bl_bytes
+    original = bl_bytes(HOOK, NATIVE_DRAW)
+    if image[HOOK:HOOK+4] == original:
+        return []
+    hi, lo = struct.unpack_from('>HH', image, HOOK)
+    if hi & 0xf800 != 0xf000 or lo & 0xf800 != 0xf800:
+        raise ValueError('Unexpected time title call site')
+    offset = (hi & 0x7ff) << 12 | (lo & 0x7ff) << 1
+    wrapper = HOOK+4+(offset-(1 << 23) if offset & (1 << 22) else offset)
+    size = len(LABEL_WRAPPER_CODE)+12
+    text_at = struct.unpack_from('>I', image, wrapper+size-4)[0]
+    string = TEXT.encode('utf-16-be')+b'\0\0'
+    if (image[wrapper:wrapper+len(LABEL_WRAPPER_CODE)] != LABEL_WRAPPER_CODE
+            or struct.unpack_from('>II', image, wrapper+len(LABEL_WRAPPER_CODE)) != (ORIGINAL_TEXT, NATIVE_DRAW | 1)
+            or image[text_at:text_at+len(string)] != string):
+        raise ValueError('Unexpected label wrapper')
+    output[HOOK:HOOK+4] = original
+    output[wrapper:wrapper+size] = b'\xff'*size
+    output[text_at:text_at+len(string)] = b'\xff'*len(string)
+    for start, end, origin in ((wrapper, wrapper+size, 'label wrapper'), (text_at, text_at+len(string), '"B220 MOD" string')):
+        aligned = (start+3) & ~3
+        if end-aligned >= 8:
+            free.append(dict(start=hex(aligned), end=hex(end), size=end-aligned, origin=origin))
+    return [dict(start=hex(HOOK), size=4, kind='date/time title: stock drawing ("Время" instead of "B220 MOD")'),
+            dict(start=hex(wrapper), size=size, kind='label wrapper removed'),
+            dict(start=hex(text_at), size=len(string), kind='"B220 MOD" string removed')]
+
+
+def games_out_of_shortcut_list(image, output, free):
+    from .thumb_asm import Thumb, bl_bytes
+    for address, original in SHORTCUT_LIST_BYTES.items():
+        if image[address:address+len(original)//2].hex() != original:
+            raise ValueError(f'Unexpected Quick access code at {address:#x}')
+    labels_table = struct.unpack_from('>I', image, 0x278934)[0]   # literals of the original loop
+    item_style = struct.unpack_from('>I', image, 0x278924)[0]
+
+    def helpers(base):
+        code = Thumb(base)
+        code.label('append')            # r6 list, r7 style argument: add every function but Games
+        code.push(4, 'lr')
+        code.movs(4, 0)
+        code.label('loop')
+        code.cmp(4, GAMES_SHORTCUT)
+        code.b('next', 'eq')
+        code.ldr_lit(1, labels_table)
+        code.lsls(0, 4, 2)
+        code.ldr(0, 1, 0)
+        code.ldr_lit(1, item_style)
+        code.mov(2, 6)
+        code.mov(3, 7)
+        code.bl(LIST_APPEND)
+        code.label('next')
+        code.adds(4, 1)
+        code.cmp(4, SHORTCUT_LIST_SIZE)
+        code.b('loop', 'lo')
+        code.pop(4, 'pc')
+        code.label('get')               # list position -> function
+        code.push('lr')
+        code.bl(LIST_POSITION)
+        code.cmp(0, GAMES_SHORTCUT)
+        code.b('got', 'lo')
+        code.adds(0, 1)
+        code.label('got')
+        code.pop('pc')
+        code.label('position')          # function in r4 -> list position, then the replaced instructions
+        code.cmp(4, GAMES_SHORTCUT)
+        code.b('keep', 'ls')
+        code.subs(4, 1)
+        code.label('keep')
+        code.movs(2, 1)
+        code.mov(1, 4)
+        code.bx_lr()
+        return code
+    size = len(helpers(0).assemble())
+    base = take_free(free, size, 0)
+    code = helpers(base)
+    data = code.assemble()
+    output[base:base+size] = data
+    at = code.addresses
+    loop = bl_bytes(SHORTCUT_LIST_LOOP, at['append'])+struct.pack('>H', 0xe000 | (SHORTCUT_LIST_END-(SHORTCUT_LIST_LOOP+8)) >> 1)
+    loop += b'\x46\xc0'*((SHORTCUT_LIST_END-SHORTCUT_LIST_LOOP-len(loop))//2)
+    output[SHORTCUT_LIST_LOOP:SHORTCUT_LIST_END] = loop
+    output[SHORTCUT_LIST_GET:SHORTCUT_LIST_GET+4] = bl_bytes(SHORTCUT_LIST_GET, at['get'])
+    output[SHORTCUT_LIST_SET:SHORTCUT_LIST_SET+4] = bl_bytes(SHORTCUT_LIST_SET, at['position'])
+    return [dict(start=hex(base), size=size, kind='Quick access without Games: list helpers'),
+            dict(start=hex(SHORTCUT_LIST_LOOP), size=SHORTCUT_LIST_END-SHORTCUT_LIST_LOOP, kind='Quick access list: skip Games'),
+            dict(start=hex(SHORTCUT_LIST_GET), size=4, kind='Quick access: list position -> function'),
+            dict(start=hex(SHORTCUT_LIST_SET), size=4, kind='Quick access: function -> list position')]
+
+
 def sd_apps_in_main_menu(output):
     """Games leaves Multimedia; SD Apps becomes the ninth main menu item: a menu
     id that opens the SD Apps list, the former Social networks text and grid icons."""
@@ -340,30 +452,49 @@ def replace_icons(image, output, free, directory=ICONS):
     for start in range(0, len(image)-0x80, 4):
         if struct.unpack_from('>I', image, start)[0] == 0x60 and struct.unpack_from('>I', image, start+0x60)[0] == 0x68:
             modules.setdefault(start, None)
-    changes, placed = [], []
+    # Pictures to place: PNGs, and an empty picture for each image in removed.txt.
+    wanted = {}
     for path in sorted(directory.glob('*/*.png')):
-        key = (path.parent.name, int(path.stem))
+        wanted[(path.parent.name, int(path.stem))] = (path, Image.open(path).convert('RGBA'))
+    removed = directory/'removed.txt'
+    for line in (removed.read_text(encoding='utf-8').split() if removed.exists() else []):
+        module_name, _, index = line.partition('/')
+        key = (module_name, int(index))
+        if key in entries:
+            wanted[key] = (removed, Image.new('RGBA', (entries[key]['width'], entries[key]['height']), (0, 0, 0, 0)))
+        else:
+            raise ValueError(f'{removed}: no image {line} in the firmware')
+    jobs = []
+    for key, (path, picture) in sorted(wanted.items()):
         entry = entries.get(key)
         if not entry or entry['type'] not in ENCODERS:
             raise ValueError(f'{path}: no MB or ABMP image {key[0]}/{key[1]} in the firmware')
-        picture = Image.open(path).convert('RGBA')
         if picture.size != (entry['width'], entry['height']):
             raise ValueError(f'{path}: {picture.size[0]}x{picture.size[1]}, the slot is {entry["width"]}x{entry["height"]}')
-        data = ENCODERS[entry['type']](picture)
-        address, size = int(entry['address'], 16), entry['size']
+        address = int(entry['address'], 16)
+        # The module that holds this image: the closest module header below it.
+        module = max(m for m in modules if m <= address)
+        table = module+struct.unpack_from('>I', image, module+0x64)[0]
+        if struct.unpack_from('>I', image, table+key[1]*4)[0] != address-module:
+            raise ValueError(f'icon {key[0]}/{key[1]}: offset table does not point at the image')
+        jobs.append((key, entry, ENCODERS[entry['type']](picture), module, table))
+    changes, placed = [], []
+    # First every image that fits its slot: the unused tail of the slot becomes
+    # free ROM (the record size follows), then the heavier ones move into it.
+    for key, entry, data, module, table in sorted(jobs, key=lambda j: len(j[2]) > j[1]['size']):
+        address, size, index = int(entry['address'], 16), entry['size'], key[1]
+        record = module+0x68+index*12
         name = f'icon {key[0]}/{key[1]}'
         if len(data) <= size:
             output[address:address+size] = data+b'\xff'*(size-len(data))
             changes.append(dict(start=hex(address), size=size, kind=f'{name}: {len(data)} bytes in place of {size}'))
+            tail = (address+len(data)+3) & ~3
+            if address+size-tail >= 16:
+                free.append(dict(start=hex(tail), end=hex(address+size), size=address+size-tail, origin=f'{name} tail'))
+                struct.pack_into('>I', output, record+8, len(data))
+                changes.append(dict(start=hex(record+8), size=4, kind=f'{name}: record size'))
             placed.append(dict(icon=f'{key[0]}/{key[1]}', bytes=len(data), old_bytes=size, address=hex(address)))
             continue
-        # The module that holds this image: the closest module header below it.
-        module = max(m for m in modules if m <= address)
-        index = key[1]
-        table = module+struct.unpack_from('>I', image, module+0x64)[0]
-        record = module+0x68+index*12
-        if struct.unpack_from('>I', image, table+index*4)[0] != address-module:
-            raise ValueError(f'{name}: offset table does not point at the image')
         target = take_free(free, len(data), module)
         output[target:target+len(data)] = data
         struct.pack_into('>I', output, table+index*4, target-module)
@@ -386,6 +517,8 @@ def build(image, icons=ICONS):
     changes += more; free += extra
     more, extra = cut_world_time(image, output)
     changes += more; free += extra
+    changes += games_out_of_shortcut_list(image, output, free)
+    changes += time_title_back(image, output, free)
     more, placed = replace_icons(image, output, free, icons) if icons else ([], [])
     changes += more
     allowed = set()
@@ -394,7 +527,7 @@ def build(image, icons=ICONS):
         allowed.update(range(start, start+change['size']))
     if len(output) != len(image) or any(i not in allowed for i, (a, b) in enumerate(zip(image, output)) if a != b):
         raise ValueError('Changes outside declared regions')
-    steps = ['wallpapers', 'media library', 'social networks', 'SD Apps in the main menu', 'power-on animation', 'world time']+(['icons'] if placed else [])
+    steps = ['wallpapers', 'media library', 'social networks', 'SD Apps in the main menu', 'power-on animation', 'world time', 'Quick access without Games', 'time title']+(['icons'] if placed else [])
     return bytes(output), dict(format='b220-cut', version=1, steps=steps, source_sha256=sha(image),
                                output_sha256=sha(output), size=len(output), changes=changes, icons=placed, free_rom=free,
                                free_rom_bytes=sum(f['size'] for f in free),
