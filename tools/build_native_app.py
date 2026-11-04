@@ -8,6 +8,7 @@ See patches/go1.h for the file format and the loader interface.
 """
 import argparse
 import os
+import re
 from pathlib import Path
 import struct
 import subprocess
@@ -97,21 +98,45 @@ def icon_bytes(path):
     return struct.pack('>HH', ICON_SIZE, ICON_SIZE)+rgb+bytes(a for *_, a in pixels)
 
 
-def with_icon(program, icon):
-    """Append the icon and point header +24 at it (go1.h)."""
-    if struct.unpack_from('>I', program, 24)[0]:
-        raise ValueError('Program already has an icon')
-    result = program[:24]+struct.pack('>I', len(program))+program[28:]+icon_bytes(icon)
+TITLE_MAX = 24
+TITLE_MARK = re.compile(r'go1-title:\s*(.+?)\s*(?:\*/)?\s*$', re.M)
+
+
+def source_title(source):
+    """Program title from a 'go1-title: ...' comment line in the source, or None."""
+    match = TITLE_MARK.search(Path(source).read_text(encoding='utf-8'))
+    return match.group(1) if match else None
+
+
+def title_bytes(title):
+    if not 0 < len(title) <= TITLE_MAX or any(ord(c) > 0xffff or ord(c) < 32 for c in title):
+        raise ValueError(f'Title must be 1..{TITLE_MAX} printable BMP characters: {title!r}')
+    return struct.pack('>H', len(title))+title.encode('utf-16-be')
+
+
+def with_extras(program, title=None, icon=None):
+    """Append the optional title and icon and point header +28/+24 at them (go1.h)."""
+    if program[24:32] != bytes(8):
+        raise ValueError('Program already has a title or icon')
+    result = bytearray(program)
+    if title:
+        struct.pack_into('>I', result, 28, len(result))
+        result += title_bytes(title)
+    if icon:
+        struct.pack_into('>I', result, 24, len(result))
+        result += icon_bytes(icon)
     if len(result) > MAX_FILE:
-        raise ValueError(f'Program with icon is {len(result)} bytes, limit {MAX_FILE}')
-    return result
+        raise ValueError(f'Program with title and icon is {len(result)} bytes, limit {MAX_FILE}')
+    return bytes(result)
 
 
-def compile_native(source, sources=(), includes=(), icon=None):
-    """GO1N program; the icon defaults to a 16x16 PNG with the source's name, when present."""
-    icon = icon or (Path(source).with_suffix('.png') if Path(source).with_suffix('.png').exists() else None)
-    program = _compile(source, sources, includes)
-    return with_icon(program, icon) if icon else program
+def compile_native(source, sources=(), includes=(), icon=None, title=None):
+    """GO1N program. Defaults: the title from a 'go1-title:' line in the source,
+    the icon from a 16x16 PNG with the source's name; both are optional."""
+    png = Path(source).with_suffix('.png')
+    icon = icon or (png if png.exists() else None)
+    title = title or source_title(source)
+    return with_extras(_compile(source, sources, includes), title, icon)
 
 
 def _compile(source, sources=(), includes=()):
@@ -167,9 +192,10 @@ def main():
     parser.add_argument('source', type=Path)
     parser.add_argument('--out', type=Path)
     parser.add_argument('--icon', type=Path, help='16x16 PNG; default: the source name with .png, if it exists')
+    parser.add_argument('--title', help='Name in the application list; default: a go1-title: line in the source')
     args = parser.parse_args()
     try:
-        program = compile_native(args.source, icon=args.icon)
+        program = compile_native(args.source, icon=args.icon, title=args.title)
         out = args.out or ROOT/'analysis/native-apps'/(args.source.stem.upper()[:8]+'.GO1')
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(program)

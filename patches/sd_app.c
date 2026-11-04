@@ -15,6 +15,7 @@ typedef struct {
 #define ICON_PIXELS (GO1_ICON_SIZE*GO1_ICON_SIZE)
 typedef struct {
     u32 count,selected; char names[16][13]; u8 has_icon[16];
+    u16 titles[16][GO1_TITLE_MAX+1];  /* UTF-16; titles[n][0]==0: show the file name */
     u16 pixels[16][ICON_PIXELS]; u8 alpha[16][ICON_PIXELS];  /* RGB565 as stored (big-endian RAM) */
 } Catalog;
 #define CAT ((Catalog *)S->catalog)
@@ -177,34 +178,48 @@ static int filename(const char *s,u32 length) {
         if (!((s[i]>='A' && s[i]<='Z') || (s[i]>='0' && s[i]<='9') || s[i]=='_')) return 0;
     return 1;
 }
-/* Application icons: 16x16 RGB565 + 8-bit alpha at the header's icon offset
-   (go1.h), read once per refresh with seek; the program itself stays on the card. */
+/* Application titles and icons (go1.h), read once per refresh with seek;
+   the program itself stays on the card. */
 #define LIST_ICON_X 6
 #define LIST_TEXT_X 28
 #define TEXT_LEFT 3   /* alignment argument of the text call 0x4cf433 (8 centres) */
 #define SCREEN_BUFFER ((u16 *)0x04280200u)
 typedef u32 (*SeekFile)(u32,u32,u32,u32);
 typedef u32 (*InvalidateRect)(u32 *,u32,u32);
-static void text_at(u32 x,u32 y,const char *ascii,u32 color,u32 align) {
+static void text_wide_at(u32 x,u32 y,const u16 *wide,u32 count,u32 color,u32 align) {
     if (y>156 || x>=176) return;
-    u16 buffer[65]; u32 count=0,dev[2]={0,0};
+    u32 dev[2]={0,0};
+    FN(0x4cf433,Text)(dev,point(x,y),point(175,y+19),wide,count,0,color&65535,6,align,0);
+}
+static void text_at(u32 x,u32 y,const char *ascii,u32 color,u32 align) {
+    u16 buffer[65]; u32 count=0;
     while (count<64 && ascii[count]) { buffer[count]=(u8)ascii[count]; count++; }
     buffer[count]=0;
-    FN(0x4cf433,Text)(dev,point(x,y),point(175,y+19),buffer,count,0,color&65535,6,align,0);
+    text_wide_at(x,y,buffer,count,color,align);
 }
 static u32 read_exact(u32 handle,void *buffer,u32 size) {
     u32 actual=0;
     return !FN(0x5ee49f,Read)(handle,buffer,size,&actual,0) && actual==size;
 }
-static void load_icon(Catalog *catalog,u32 n) {
-    catalog->has_icon[n]=0;
+static u32 seek_to(u32 handle,u32 at) { return !FN(0x5ee527,SeekFile)(handle,0,at,0); }
+static void load_extras(Catalog *catalog,u32 n) {
+    catalog->has_icon[n]=0; catalog->titles[n][0]=0;
     u32 handle=open_card(catalog->names[n]);
     if (!handle) return;
     u8 head[32]; u32 size=0;
     if (!FN(0x5ee59f,Size)(handle,&size) && read_exact(handle,head,32) && be32(head)==GO1_MAGIC) {
-        u32 at=be32(head+24);
+        u32 at=be32(head+28);
+        u8 two[2];
+        if (at>=32 && at+2<=size && seek_to(handle,at) && read_exact(handle,two,2)) {
+            u32 count=be16(two);
+            u16 *title=catalog->titles[n];
+            if (count && count<=GO1_TITLE_MAX && at+2+count*2<=size && read_exact(handle,title,count*2))
+                title[count]=0;
+            else title[0]=0;
+        }
+        at=be32(head+24);
         u8 dims[4];
-        if (at>=32 && at<size && size-at==GO1_ICON_BYTES && !FN(0x5ee527,SeekFile)(handle,0,at,0) &&
+        if (at>=32 && at<size && size-at==GO1_ICON_BYTES && seek_to(handle,at) &&
             read_exact(handle,dims,4) && be16(dims)==GO1_ICON_SIZE && be16(dims+2)==GO1_ICON_SIZE &&
             read_exact(handle,catalog->pixels[n],ICON_PIXELS*2) && read_exact(handle,catalog->alpha[n],ICON_PIXELS))
             catalog->has_icon[n]=1;
@@ -241,7 +256,10 @@ static void menu(void) {
     for (u32 i=0;i<6 && first+i<CAT->count;i++) {
         u32 n=first+i,selected=n==CAT->selected,y=32+i*24;
         if (selected) fill(0,y,176,20,0x2104);
-        text_at(LIST_TEXT_X,y,CAT->names[n],selected?0x07ff:0xffff,TEXT_LEFT);
+        u32 color=selected?0x07ff:0xffff,length=0;
+        while (length<GO1_TITLE_MAX && CAT->titles[n][length]) length++;
+        if (length) text_wide_at(LIST_TEXT_X,y,CAT->titles[n],length,color,TEXT_LEFT);
+        else text_at(LIST_TEXT_X,y,CAT->names[n],color,TEXT_LEFT);
         if (CAT->has_icon[n]) draw_icon(LIST_ICON_X,y+2,CAT->pixels[n],CAT->alpha[n]);
     }
 }
@@ -270,7 +288,7 @@ static void refresh(void) {
     }
     FN(0x6a5469,Free)(data);
     if (reason) { catalog->count=0; S->status=reason; }
-    for (u32 n=0;n<catalog->count;n++) load_icon(catalog,n);
+    for (u32 n=0;n<catalog->count;n++) load_extras(catalog,n);
     menu();
 }
 static void *api_alloc(u32 size) { return heap_alloc(size,"GO1N"); }
@@ -361,12 +379,24 @@ static const Go1Api api={GO1_API_VERSION,sizeof(Go1Api),api_alloc,api_free,api_o
    Takes ownership of the file buffer and frees it on failure. */
 static u8 *reject(u8 *file) { FN(0x6a5469,Free)(file); return 0; }
 static u8 *prepare_native(u8 *file,u32 size) {
-    if (size<32 || be16(file+4)!=GO1_VERSION || be16(file+6)!=32 || be32(file+28)) return reject(file);
-    u32 length=be32(file+8),bss=be32(file+12),entry=be32(file+16),count=be32(file+20),icon=be32(file+24);
+    if (size<32 || be16(file+4)!=GO1_VERSION || be16(file+6)!=32) return reject(file);
+    u32 length=be32(file+8),bss=be32(file+12),entry=be32(file+16),count=be32(file+20);
+    u32 icon=be32(file+24),title=be32(file+28);
     if (!length || length>GO1_MAX_FILE || bss>GO1_MAX_FILE || !(entry&1) || (entry&~1u)>=length ||
         count>(GO1_MAX_FILE>>2)) return reject(file);
-    u32 end=32+length+count*4;  /* the optional icon is the last part of the file */
-    if (icon ? icon!=end || size!=end+GO1_ICON_BYTES : size!=end) return reject(file);
+    /* After the relocations: optional title, then optional icon, then the end. */
+    u32 end=32+length+count*4;
+    if (title) {
+        if (title!=end || end+2>size) return reject(file);
+        u32 chars=be16(file+end);
+        if (!chars || chars>GO1_TITLE_MAX) return reject(file);
+        end+=2+chars*2;
+    }
+    if (icon) {
+        if (icon!=end) return reject(file);
+        end+=GO1_ICON_BYTES;
+    }
+    if (size!=end) return reject(file);
     u32 need=32+length+bss;
     if (need>size) {
         u8 *bigger=heap_alloc(need,"GO1N");

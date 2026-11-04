@@ -1,4 +1,5 @@
 /* JAVA.GO1: the GO1 JVM as a native SD application.
+   go1-title: Java
 
 Opening it lists the .jar files in E:\JAVA\ and runs the chosen one; with no
 files there it runs E:\APP.JAR directly. Classes come from E:\JAVALIB.JAR (the

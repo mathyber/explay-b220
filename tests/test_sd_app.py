@@ -374,10 +374,29 @@ class NativeVmTests(unittest.TestCase):
         # The second program (GO1V bytecode) has no icon: nothing drawn in its row.
         self.assertEqual(bytes(self.last_uc.mem_read(0x04280200+((58+8)*176+6+8)*2,2)),b'\0\0')
         self.assertEqual(event(0xfa1b)['status'],0)
+        self.assertIn('DEMO.GO1',calls['texts'])   # no title: the file name
         broken=bytearray(program);struct.pack_into('>I',broken,24,len(program)-10)   # icon not at the end
         event,calls=self.fixture(bytes(broken))
         event(0xf021)
         self.assertEqual(event(0xfa1b)['status'],5)
+
+    def test_title_replaces_the_file_name_in_the_list(self):
+        program=compile_native(ROOT/'apps/card_native.c',icon=ROOT/'jvm/phone_main.png',title='Тест: Ява')
+        self.assertEqual(struct.unpack_from('>II',program,24)[1],struct.unpack_from('>I',program,24)[0]-2-9*2)
+        event,calls=self.fixture(program)
+        event(0xf021)
+        self.assertIn('Тест: Ява',calls['texts'])
+        self.assertNotIn('DEMO.GO1',calls['texts'])
+        self.assertIn('SECOND.GO1',calls['texts'])    # bytecode program: file name
+        self.assertEqual(event(0xfa1b)['status'],0)
+        title=struct.unpack_from('>I',program,28)[0]
+        for chars in (0,25):
+            broken=bytearray(program);struct.pack_into('>H',broken,title,chars)
+            with self.subTest(chars=chars):
+                event,calls=self.fixture(bytes(broken))
+                event(0xf021)
+                self.assertIn('DEMO.GO1',calls['texts'])
+                self.assertEqual(event(0xfa1b)['status'],5)
 
     def test_invalid_native_programs_are_rejected(self):
         program=compile_native(ROOT/'apps/card_native.c')

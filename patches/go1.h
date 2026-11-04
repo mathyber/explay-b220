@@ -1,15 +1,17 @@
 /* GO1N native SD applications: interface between the SD Apps loader and a program.
 
 Files are E:\NAME.GO1 ("Go-1").
-File (big-endian): 32-byte header, image, relocation table, optional icon.
+File (big-endian): 32-byte header, image, relocation table, optional title,
+optional icon, in this order and nothing after them.
   0  'GO1N'            16 u32 entry offset in image, Thumb bit set
   4  u16 version 1     20 u32 relocation count
   6  u16 header 32     24 u32 icon offset in the file, 0 = no icon
-  8  u32 image bytes   28 u32 0
+  8  u32 image bytes   28 u32 title offset in the file, 0 = no title
   12 u32 bss bytes
-The icon follows the relocation table and ends the file: u16 width 16,
-u16 height 16, 256 RGB565 pixels, then 256 alpha bytes (0 transparent,
-255 opaque), rows top to bottom. The application list shows it left of the name.
+Title: u16 character count 1..GO1_TITLE_MAX, then UTF-16BE characters. The
+application list shows it instead of the file name.
+Icon: u16 width 16, u16 height 16, 256 RGB565 pixels, then 256 alpha bytes
+(0 transparent, 255 opaque), rows top to bottom; shown left of the name.
 Each relocation is a u32 image offset of an aligned word that holds an
 image-relative address; the loader adds the load address. The program is
 linked at 0 and runs from RAM in the firmware MMI task.
@@ -28,6 +30,7 @@ typedef unsigned int go1_u32;
 #define GO1_MAX_FILE 0x100000u
 #define GO1_ICON_SIZE 16
 #define GO1_ICON_BYTES (4+GO1_ICON_SIZE*GO1_ICON_SIZE*3)
+#define GO1_TITLE_MAX 24
 
 /* Window messages passed to the program. */
 #define GO1_OPEN 0xf021u
