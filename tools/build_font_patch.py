@@ -101,8 +101,13 @@ def raster(font, char, height, max_width, missing, original, baseline_shift=0):
         # A few accented/extended glyphs exceed the cell. Fit the entire ink,
         # including descenders, rather than dropping rows or writing next glyph.
         left = min(left, max(0, width-2))
-        ink = ink.resize((max(1, min(ink.width, width-left-1 if width>1 else 1)),
-                          min(ink.height, height)), Image.Resampling.NEAREST)
+        size = (max(1, min(ink.width, width-left-1 if width>1 else 1)), min(ink.height, height))
+        if size[0] < ink.width <= 2*size[0]:
+            # Up to twice narrower: a pixel is ink if any of its source is. NEAREST would
+            # keep every other column and lose a stem ("l" with a foot became a dot).
+            ink = ink.convert('L').resize(size, Image.Resampling.BOX).point(lambda v: 255 if v else 0).convert('1')
+        else:
+            ink = ink.resize(size, Image.Resampling.NEAREST)
         top = max(0, min(top, height-ink.height))
         result.paste(ink, (left, top))
     return result, False

@@ -80,6 +80,54 @@ class Thumb:
     def ldr(self, rd, rn, rm):
         self._fixed(0x5800 | rm << 6 | rn << 3 | rd)
 
+    def _offset(self, value, scale, limit):
+        if value % scale or not 0 <= value//scale < limit:
+            raise ValueError(f'Offset {value:#x} out of range')
+        return value//scale
+
+    def ldr_sp(self, rd, offset):
+        self._fixed(0x9800 | rd << 8 | self._offset(offset, 4, 256))
+
+    def str_sp(self, rd, offset):
+        self._fixed(0x9000 | rd << 8 | self._offset(offset, 4, 256))
+
+    def add_sp(self, rd, offset):
+        """add rd, sp, #offset"""
+        self._fixed(0xa800 | rd << 8 | self._offset(offset, 4, 256))
+
+    def ldr_imm(self, rd, rn, offset):
+        self._fixed(0x6800 | self._offset(offset, 4, 32) << 6 | rn << 3 | rd)
+
+    def ldrh_imm(self, rd, rn, offset):
+        self._fixed(0x8800 | self._offset(offset, 2, 32) << 6 | rn << 3 | rd)
+
+    def strh_imm(self, rd, rn, offset):
+        self._fixed(0x8000 | self._offset(offset, 2, 32) << 6 | rn << 3 | rd)
+
+    def ldrb_reg(self, rd, rn, rm):
+        self._fixed(0x5c00 | rm << 6 | rn << 3 | rd)
+
+    def ldrsh_reg(self, rd, rn, rm):
+        self._fixed(0x5e00 | rm << 6 | rn << 3 | rd)
+
+    def lsrs(self, rd, rm, imm):
+        self._fixed(0x0800 | imm << 6 | rm << 3 | rd)
+
+    def add3(self, rd, rn, rm):
+        """adds rd, rn, rm"""
+        self._fixed(0x1800 | rm << 6 | rn << 3 | rd)
+
+    def sub3(self, rd, rn, rm):
+        """subs rd, rn, rm"""
+        self._fixed(0x1a00 | rm << 6 | rn << 3 | rd)
+
+    ALU = ('ands', 'eors', 'lsls', 'lsrs', 'asrs', 'adcs', 'sbcs', 'rors',
+           'tst', 'negs', 'cmp', 'cmn', 'orrs', 'muls', 'bics', 'mvns')
+
+    def alu(self, operation, rd, rs):
+        """Two-register data processing: alu('muls', r0, r1) is muls r0, r1, r0."""
+        self._fixed(0x4000 | self.ALU.index(operation) << 6 | rs << 3 | rd)
+
     def ldr_lit(self, rd, value):
         if value not in self.literals:
             self.literals.append(value)

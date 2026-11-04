@@ -9,6 +9,8 @@ Steps 2-3: Media library leaves Multimedia, Social networks leaves the main menu
 The power-on GIF becomes a black screen with dots; World time leaves Tools
 and its world map becomes a small black bitmap.
 Freed regions are listed in the manifest for later code or data.
+Fonts: grey-level copies of the four font sets go to freed ROM and the native
+glyph loops blend their pixels (tools.font_alpha, CUT_RU.md).
 Last, icons/<module>/<index>.png (tools.icon_studio) replace firmware images;
 one heavier than the original moves into freed ROM (ICONS_RU.md).
 """
@@ -337,6 +339,147 @@ def time_title_back(image, output, free):
             dict(start=hex(text_at), size=len(string), kind='"B220 MOD" string removed')]
 
 
+# The native 1bpp glyph drawing (0x4cc9c4) has two equal pixel loops (r6 pixel index,
+# r4 colour, r5 layer buffer): a bit test, then x/y, clipping and one STRH of the colour.
+# (bit test start, its skip target, pixel store start); bit test 18 bytes, store 20 bytes.
+GLYPH_LOOPS = ((0x4ccb66, 0x4ccbc8, 0x4ccbb4), (0x4ccbd6, 0x4ccc20, 0x4ccc0c))
+GLYPH_BIT_TEST = '992508f05c0807720f52218040d14008d0'   # ...; ANDS; BEQ skip
+GLYPH_STORE = 'ab0020205e189918434821245e5918400040522c'
+GLYPH_ALPHA_SLOT = 0x1c    # caller stack word unused on this path: the pixel's alpha 0..15
+BL_LOW = 0x4ccb66-0x3ff000
+
+
+def glyph_helpers(base, table):
+    """alpha: r6 pixel index of the glyph at [sp+0x94] -> r0 = alpha 0..15 (also in the
+    alpha slot): its nibble in the alpha copy of the set, the 1bpp bit for other glyphs.
+    store: blends r4 (RGB565) into the pixel at the loop's x/y with that alpha."""
+    from .thumb_asm import Thumb
+    code = Thumb(base)
+    code.label('alpha')
+    code.push(4, 'lr')                       # caller sp = sp+8
+    code.ldr_sp(1, 0x94+8)
+    code.ldr_lit(4, table)
+    code.label('set')
+    code.ldr_imm(2, 4, 0)
+    code.cmp(2, 0)
+    code.b('mono', 'eq')
+    code.alu('cmp', 1, 2)
+    code.b('next', 'lo')
+    code.ldr_imm(3, 4, 4)
+    code.alu('cmp', 1, 3)
+    code.b('next', 'hs')
+    code.sub3(1, 1, 2)                       # alpha glyph = alpha base + 4*(glyph - 1bpp base)
+    code.lsls(1, 1, 2)
+    code.ldr_imm(2, 4, 8)
+    code.add3(1, 1, 2)
+    code.lsrs(2, 6, 1)
+    code.ldrb_reg(0, 1, 2)
+    code.lsls(3, 6, 31)
+    code.b('high', 'eq')
+    code.lsls(0, 0, 28)
+    code.lsrs(0, 0, 28)
+    code.b('found')
+    code.label('high')
+    code.lsrs(0, 0, 4)
+    code.label('found')
+    code.str_sp(0, GLYPH_ALPHA_SLOT+8)
+    code.pop(4, 'pc')
+    code.label('next')
+    code.adds(4, 12)
+    code.b('set')
+    code.label('mono')                       # the original bit test, 1 -> 15
+    code.lsrs(2, 6, 3)
+    code.ldrb_reg(0, 1, 2)
+    code.lsls(2, 6, 29)
+    code.lsrs(2, 2, 29)
+    code.alu('lsls', 0, 2)
+    code.lsls(0, 0, 24)
+    code.lsrs(0, 0, 31)
+    code.lsls(3, 0, 4)
+    code.sub3(0, 3, 0)
+    code.b('found')
+
+    code.label('store')
+    code.push(4, 5, 6, 7, 'lr')              # caller sp = sp+20
+    code.add_sp(3, 20)
+    code.movs(0, 0x20)
+    code.ldrsh_reg(0, 3, 0)                  # y
+    code.ldr_imm(1, 3, 0x60)                 # layer width
+    code.alu('muls', 0, 1)
+    code.movs(1, 0x24)
+    code.ldrsh_reg(1, 3, 1)                  # x
+    code.add3(0, 0, 1)
+    code.lsls(0, 0, 1)
+    code.add3(5, 5, 0)
+    code.lsls(4, 4, 16)
+    code.lsrs(4, 4, 16)
+    code.ldr_imm(2, 3, GLYPH_ALPHA_SLOT)
+    code.cmp(2, 15)
+    code.b('solid', 'hs')
+    code.ldrh_imm(1, 5, 0)
+    code.ldr_lit(7, 0x07e0f81f)              # RGB565 spread: G in the high half, R and B low
+    code.lsls(0, 4, 16)
+    code.alu('orrs', 0, 4)
+    code.alu('ands', 0, 7)
+    code.lsls(6, 1, 16)
+    code.alu('orrs', 1, 6)
+    code.alu('ands', 1, 7)
+    code.lsls(6, 2, 1)                       # alpha 0..15 -> 0..31
+    code.lsrs(2, 2, 3)
+    code.add3(2, 6, 2)
+    code.movs(6, 32)
+    code.sub3(6, 6, 2)
+    code.alu('muls', 0, 2)
+    code.alu('muls', 1, 6)
+    code.add3(0, 0, 1)
+    code.lsrs(0, 0, 5)
+    code.alu('ands', 0, 7)
+    code.lsrs(1, 0, 16)
+    code.alu('orrs', 0, 1)
+    code.strh_imm(0, 5, 0)
+    code.pop(4, 5, 6, 7, 'pc')
+    code.label('solid')
+    code.strh_imm(4, 5, 0)
+    code.pop(4, 5, 6, 7, 'pc')
+    return code
+
+
+def antialias_fonts(image, output, free):
+    """Grey-level copies of the four font sets (tools.font_alpha) go to freed ROM;
+    the native glyph loops take each pixel's alpha from them and blend."""
+    from .font_alpha import alpha_sets
+    from .thumb_asm import bl_bytes
+    for test, skip, store in GLYPH_LOOPS:
+        if (image[test:test+17].hex() != GLYPH_BIT_TEST or image[test+16:test+18] != b'\xd0'+bytes([(skip-(test+20)) >> 1 & 0xff])
+                or image[store:store+20].hex() != GLYPH_STORE):
+            raise ValueError(f'Unexpected glyph drawing loop at {test:#x}')
+    changes, table = [], b''
+    for fontset, data, grey in alpha_sets(image):
+        at = take_free(free, len(data), 0)
+        output[at:at+len(data)] = data
+        table += struct.pack('>III', fontset.bitmap, fontset.end, at)
+        changes.append(dict(start=hex(at), size=len(data), kind=f'font {fontset.name}: 4bpp alpha ({grey} grey glyphs)'))
+    table += bytes(4)
+    at = take_free(free, len(table), 0)
+    output[at:at+len(table)] = table
+    changes.append(dict(start=hex(at), size=len(table), kind='font alpha sets: 1bpp range -> alpha copy'))
+    size = len(glyph_helpers(0, 0).assemble())
+    base = take_free(free, size, BL_LOW)
+    code = glyph_helpers(base, at)
+    data = code.assemble()
+    output[base:base+size] = data
+    changes.append(dict(start=hex(base), size=size, kind='font antialiasing: alpha and blend helpers'))
+    nop = b'\x46\xc0'
+    for test, skip, store in GLYPH_LOOPS:
+        patch = bl_bytes(test, code.addresses['alpha'])+bytes.fromhex('2800')
+        patch += struct.pack('>H', 0xd000 | (skip-(test+10)) >> 1 & 0xff)
+        output[test:test+18] = patch+nop*((18-len(patch))//2)
+        output[store:store+20] = bl_bytes(store, code.addresses['store'])+nop*8
+        changes += [dict(start=hex(test), size=18, kind='glyph loop: pixel alpha instead of the bit'),
+                    dict(start=hex(store), size=20, kind='glyph loop: blended pixel')]
+    return changes
+
+
 def games_out_of_shortcut_list(image, output, free):
     from .thumb_asm import Thumb, bl_bytes
     for address, original in SHORTCUT_LIST_BYTES.items():
@@ -519,6 +662,7 @@ def build(image, icons=ICONS):
     changes += more; free += extra
     changes += games_out_of_shortcut_list(image, output, free)
     changes += time_title_back(image, output, free)
+    changes += antialias_fonts(image, output, free)
     more, placed = replace_icons(image, output, free, icons) if icons else ([], [])
     changes += more
     allowed = set()
@@ -527,7 +671,7 @@ def build(image, icons=ICONS):
         allowed.update(range(start, start+change['size']))
     if len(output) != len(image) or any(i not in allowed for i, (a, b) in enumerate(zip(image, output)) if a != b):
         raise ValueError('Changes outside declared regions')
-    steps = ['wallpapers', 'media library', 'social networks', 'SD Apps in the main menu', 'power-on animation', 'world time', 'Quick access without Games', 'time title']+(['icons'] if placed else [])
+    steps = ['wallpapers', 'media library', 'social networks', 'SD Apps in the main menu', 'power-on animation', 'world time', 'Quick access without Games', 'time title', 'font antialiasing']+(['icons'] if placed else [])
     return bytes(output), dict(format='b220-cut', version=1, steps=steps, source_sha256=sha(image),
                                output_sha256=sha(output), size=len(output), changes=changes, icons=placed, free_rom=free,
                                free_rom_bytes=sum(f['size'] for f in free),

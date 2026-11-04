@@ -42,6 +42,32 @@ class ThumbTests(unittest.TestCase):
         self.assertEqual(data[-4:], bytes.fromhex('0429d94c'))
         self.assertEqual(code.addresses, {'loop': 0x1004, 'next': 0x1014, 'end': 0x1020})
 
+    def test_memory_and_data_processing(self):
+        code = Thumb(0x2000)
+        code.ldr_sp(1, 0x9c)
+        code.str_sp(0, 0x24)
+        code.add_sp(3, 20)
+        code.ldr_imm(1, 3, 0x60)
+        code.ldrh_imm(1, 5, 0)
+        code.strh_imm(0, 5, 2)
+        code.ldrb_reg(0, 1, 2)
+        code.ldrsh_reg(0, 3, 0)
+        code.lsrs(0, 0, 28)
+        code.add3(5, 5, 0)
+        code.sub3(0, 3, 0)
+        code.alu('muls', 0, 1)
+        code.alu('orrs', 0, 4)
+        code.alu('ands', 1, 7)
+        code.alu('cmp', 1, 2)
+        code.alu('lsls', 0, 2)
+        self.assertEqual(disassemble(code.assemble(), 0x2000), [
+            'ldr r1, [sp, #0x9c]', 'str r0, [sp, #0x24]', 'add r3, sp, #0x14', 'ldr r1, [r3, #0x60]',
+            'ldrh r1, [r5]', 'strh r0, [r5, #2]', 'ldrb r0, [r1, r2]', 'ldrsh r0, [r3, r0]', 'lsrs r0, r0, #0x1c',
+            'adds r5, r5, r0', 'subs r0, r3, r0', 'muls r0, r1, r0', 'orrs r0, r4', 'ands r1, r7', 'cmp r1, r2',
+            'lsls r0, r2'])
+        with self.assertRaises(ValueError):
+            Thumb(0).ldr_imm(0, 1, 0x80)
+
     def test_bl_reach_is_checked(self):
         self.assertEqual(disassemble(bl_bytes(0x278884, 0x86bf0), 0x278884), ['bl #0x86bf0'])
         with self.assertRaises(ValueError):

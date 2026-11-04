@@ -102,7 +102,7 @@ class CutTests(unittest.TestCase):
                              DOT_STATES[index])
         self.assertEqual(sum(durations), 3360)
         free = next(f for f in self.manifest['free_rom'] if f['origin'] == 'power-on animation')
-        self.assertGreater(free['size'], 67000)
+        self.assertEqual(int(free['end'], 0), BOOT_END)   # later steps take its start (font alpha tables)
         self.assertEqual(set(self.output[int(free['start'], 0):BOOT_END]), {0xff})
 
     def test_world_time_is_gone(self):
@@ -140,6 +140,20 @@ class CutTests(unittest.TestCase):
         get, put = code(SHORTCUT_LIST_GET, 4)[0], code(SHORTCUT_LIST_SET, 4)[0]
         self.assertTrue(get.startswith('bl #') and put.startswith('bl #'))
         self.assertTrue(base < int(get[4:], 0) < base+helpers['size'] and base < int(put[4:], 0) < base+helpers['size'])
+
+    def test_glyph_loops_use_the_alpha_helpers(self):
+        from tools.build_cut import GLYPH_LOOPS
+        from tools.build_font_patch import SETS
+        md = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_BIG_ENDIAN)
+        helpers = next(c for c in self.manifest['changes'] if c['kind'] == 'font antialiasing: alpha and blend helpers')
+        base = int(helpers['start'], 0)
+        for test, skip, store in GLYPH_LOOPS:
+            listing = [f'{i.mnemonic} {i.op_str}' for i in md.disasm(self.output[test:test+8], test)]
+            self.assertEqual(listing[1:], ['cmp r0, #0', f'beq #{skip:#x}'])
+            for call in (listing[0], next(md.disasm(self.output[store:store+4], store)).op_str):
+                self.assertTrue(base <= int(call.split('#')[1], 0) < base+helpers['size'])
+        tables = [c for c in self.manifest['changes'] if c['kind'].startswith('font ') and '4bpp alpha' in c['kind']]
+        self.assertEqual([c['size'] for c in tables], [4*(s.end-s.bitmap) for s in SETS])
 
     def test_wrong_source_is_rejected(self):
         broken = bytearray(self.source)
@@ -207,3 +221,61 @@ class IconTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class GlyphHelperTests(unittest.TestCase):
+    """The antialiasing helpers run in Unicorn on a fake glyph loop frame."""
+    BASE, TABLE, MONO, ALPHA, STACK, LAYER, RETURN = 0x10000, 0x20000, 0x30000, 0x40000, 0x80000, 0x90000, 0x50000
+
+    def setUp(self):
+        from unicorn import Uc, UC_ARCH_ARM, UC_MODE_THUMB, UC_MODE_BIG_ENDIAN
+        from tools.build_cut import glyph_helpers
+        self.uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_BIG_ENDIAN)
+        self.uc.mem_map(0, 0x100000)
+        self.code = glyph_helpers(self.BASE, self.TABLE)
+        self.uc.mem_write(self.BASE, self.code.assemble())
+        # One alpha set: 1bpp [MONO, MONO+0x100) -> ALPHA; glyph at MONO+0x10.
+        self.uc.mem_write(self.TABLE, struct.pack('>IIII', self.MONO, self.MONO+0x100, self.ALPHA, 0))
+        self.uc.mem_write(self.ALPHA+0x40, bytes([0x0f, 0x8a]))
+        self.uc.mem_write(self.MONO+0x200, bytes([0x40]))      # outside every set: 1bpp, pixel 1 set
+
+    def call(self, name, **registers):
+        from unicorn.arm_const import UC_ARM_REG_SP, UC_ARM_REG_LR, UC_ARM_REG_R0, UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6
+        names = dict(r4=UC_ARM_REG_R4, r5=UC_ARM_REG_R5, r6=UC_ARM_REG_R6)
+        for key, value in registers.items():
+            self.uc.reg_write(names[key], value)
+        self.uc.reg_write(UC_ARM_REG_SP, self.STACK)
+        self.uc.reg_write(UC_ARM_REG_LR, self.RETURN | 1)
+        self.uc.emu_start(self.code.addresses[name] | 1, self.RETURN, count=200)
+        return self.uc.reg_read(UC_ARM_REG_R0), {k: self.uc.reg_read(v) for k, v in names.items()}
+
+    def alpha(self, glyph, index):
+        self.uc.mem_write(self.STACK+0x94, struct.pack('>I', glyph))
+        value, kept = self.call('alpha', r6=index)
+        self.assertEqual(kept['r6'], index)
+        self.assertEqual(struct.unpack('>I', bytes(self.uc.mem_read(self.STACK+0x1c, 4)))[0], value)
+        return value
+
+    def test_alpha_nibbles_and_1bpp_fallback(self):
+        self.assertEqual([self.alpha(self.MONO+0x10, i) for i in range(4)], [0, 15, 8, 10])
+        self.assertEqual([self.alpha(self.MONO+0x200, i) for i in range(3)], [0, 15, 0])
+
+    def store(self, alpha, colour, under):
+        x, y, width = 3, 2, 176
+        pixel = self.LAYER+2*(y*width+x)
+        self.uc.mem_write(self.STACK+0x20, struct.pack('>h', y))
+        self.uc.mem_write(self.STACK+0x24, struct.pack('>h', x))
+        self.uc.mem_write(self.STACK+0x60, struct.pack('>I', width))
+        self.uc.mem_write(self.STACK+0x1c, struct.pack('>I', alpha))
+        self.uc.mem_write(pixel, struct.pack('>H', under))
+        _, kept = self.call('store', r4=colour, r5=self.LAYER, r6=77)
+        self.assertEqual((kept['r4'], kept['r5'], kept['r6']), (colour, self.LAYER, 77))
+        return struct.unpack('>H', bytes(self.uc.mem_read(pixel, 2)))[0]
+
+    def test_store_blends_rgb565(self):
+        self.assertEqual(self.store(15, 0xffff, 0x0000), 0xffff)
+        self.assertEqual(self.store(15, 0x1234, 0xffff), 0x1234)
+        self.assertEqual(self.store(1, 0xffff, 0x0000), 1 << 11 | 3 << 5 | 1)   # 2/32 white
+        half = self.store(8, 0xffff, 0x0000)                                    # 17/32
+        self.assertEqual((half >> 11, half >> 5 & 63, half & 31), (16, 33, 16))
+        self.assertEqual(self.store(8, 0x0000, 0xf800), 14 << 11)   # 15/32 of the red under black text
