@@ -29,6 +29,51 @@ class PeripheralTests(unittest.TestCase):
         self.assertEqual(rtc.raw,0x1000)
         rtc.write(0x30,0,128000)
         self.assertFalse(rtc.pending)
+
+    def test_rtc_minute_day_and_alarm_ticks(self):
+        rtc = Rtc(blocks_per_ms=1)   # 1000 blocks per second
+        rtc.write(0x30,0x12,0)       # minute + alarm, as PS 0x18e83c enables them
+        for offset,value in ((0x10,58),(0x14,59),(0x18,23),(0x1c,5)):
+            rtc.write(offset,value,0)
+        rtc.write(0x38,0xff00,0)
+        rtc.tick(1000)
+        self.assertEqual(rtc.raw,1)          # a second passed; not enabled
+        self.assertFalse(rtc.pending)
+        rtc.tick(2000)                       # 23:59:59 -> 00:00:00 next day
+        self.assertEqual(rtc.raw&0xf,0xf)
+        self.assertTrue(rtc.pending)
+        rtc.write(0x38,rtc.raw,2000)
+        for offset,value in ((0x20,30),(0x24,0),(0x28,0),(0x2c,6)):
+            rtc.write(offset,value,2000)
+        rtc.write(0x38,0xf000,2000)
+        rtc.tick(31000)                      # 00:00:29
+        self.assertFalse(rtc.raw&0x10)
+        rtc.tick(32000)
+        self.assertTrue(rtc.raw&0x10)
+
+    def test_rtc_follows_host_and_ignores_factory_resets(self):
+        rtc = Rtc(blocks_per_ms=1)
+        host = 17110*86400+12*3600+0.5     # 2026-11-04 12:00:00.5
+        rtc.follow(0,host)
+        self.assertEqual(rtc.fields(500),(1,0,12,17110))
+        # Boot/MMI reset to 2012-01-01 00:00:00: shadow bits complete, time stays.
+        for offset,value in ((0x10,0),(0x14,0),(0x18,0),(0x1c,11688)):
+            rtc.write(offset,value,500)
+        rtc.write(0x1c,11688,500)
+        # Boot 0x17e6d6 then sets 00:00:00 on the (unchanged) current day.
+        for offset,value in ((0x10,0),(0x14,0),(0x18,0),(0x1c,17110)):
+            rtc.write(offset,value,500)
+        self.assertEqual(rtc.raw&0xf00,0xf00)
+        self.assertEqual(rtc.fields(500),(1,0,12,17110))
+        self.assertEqual(rtc.ignored_resets,3)
+        # A date chosen in Settings is kept as an offset from host time.
+        rtc.write(0x1c,17111,500)
+        rtc.follow(60500,host+60.4)   # the block clock ran a bit slower than the host
+        self.assertEqual(rtc.host_offset,86400)
+        self.assertEqual(rtc.fields(60500)[1:],(1,12,17111))
+        rtc.tick(60500)
+        self.assertTrue(rtc.raw&2)
+
     def test_mailbox_stages_copies_commits_and_does_not_repeat_irq(self):
         dsp = DspBootstrap()
         dsp.write(0,1,lambda n:b'')

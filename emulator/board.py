@@ -197,6 +197,19 @@ class Board:
             uc.hook_add(UC_HOOK_CODE,self._power_loop,begin=0x483b68,end=0x483b68)
             for addr in (0x483978,0x483a02,0x483a04,0x394320):
                 uc.hook_add(UC_HOOK_CODE,self._milestone,begin=addr,end=addr)
+        elif self._trace_unchanged(image):
+            # Read-only observer (window IDs, backlight request): the window and the
+            # network HLE need them; the trace entry and its strings are the reference's.
+            uc.hook_add(UC_HOOK_CODE,self._guest_log,begin=0x48e11a,end=0x48e11a)
+
+    def _trace_unchanged(self,image):
+        try:
+            original = Path(self.firmware['reference']).read_bytes()
+        except (OSError,KeyError):
+            return False
+        return (image[0x48e000:0x48e200] == original[0x48e000:0x48e200] and
+                self.window_log_pointer == original.find(b'MMK_RunWinProc, win_handle') >= 0 and
+                self.backlight_log_pointer == original.find(b'GPIO_SetLcdBackLight: %d') >= 0)
 
     def is_mmio(self,address):
         return any(start <= address < end for start,end in self.mmio_windows)
@@ -238,8 +251,8 @@ class Board:
             if self.block_serial >= self.next_timer_block:
                 self._sync_timer_events()
         elif self.irq:
-            if self.rtc and bool(self.irq.raw&0x80) != self.rtc.pending:
-                self.irq.set_line(7,self.rtc.pending)
+            if self.rtc:
+                self.sync_rtc()
             for device in self.countdown_timers.values():
                 device.tick(self.block_serial)
                 if bool(self.irq.raw&(1<<device.line)) != device.pending:
@@ -258,7 +271,15 @@ class Board:
                                              irq_sp=hex(uc.reg_read(UC_ARM_REG_SP))))
             uc.reg_write(UC_ARM_REG_PC,0x18)
 
+    def sync_rtc(self):
+        """Raise RTC tick/alarm bits crossed so far and mirror them on IRQ7."""
+        self.rtc.tick(self.block_serial)
+        if self.irq and bool(self.irq.raw&0x80) != self.rtc.pending:
+            self.irq.set_line(7,self.rtc.pending)
+
     def _sync_timer_events(self):
+        if self.rtc:
+            self.sync_rtc()
         self.next_timer_block = 1<<63
         for device in self.countdown_timers.values():
             device.tick(self.block_serial)

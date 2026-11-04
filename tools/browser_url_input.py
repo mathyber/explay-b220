@@ -5,14 +5,14 @@ The editor is still confirmed with a real phone key; all URL parsing is guest co
 """
 from unicorn import UC_HOOK_CODE,UC_PROT_READ,UC_PROT_WRITE
 from unicorn.arm_const import UC_ARM_REG_R0
-from emulator.network_trace import PS_SHA256
+from emulator.network_trace import network_code_matches
 
 
 class BrowserUrlInput:
     ADDRESS = 0x50001000
 
     def __init__(self,board,url,*,address=ADDRESS):
-        if board.image_sha256 != PS_SHA256 or not hasattr(board,'experimental_network'):
+        if not network_code_matches(board) or not hasattr(board,'experimental_network'):
             raise ValueError('Debugger URL input requires an experimental network session')
         if not url.isascii() or not 0 < len(url) <= 512 or any(ord(c)<32 for c in url):
             raise ValueError('Expected an ASCII URL of 1..512 bytes without control characters')

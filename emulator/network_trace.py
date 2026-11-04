@@ -13,6 +13,34 @@ from unicorn.arm_const import UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,UC_ARM_R
 
 
 PS_SHA256 = '7bd1dd7b3ce3a3efa65f957eb24e4e4b3114775c8b7770121f98b39816bacbeb'
+# Code the network HLE hooks, re-enters or relies on: browser URL entry, CMS GPRS/
+# PDP/socket/DNS paths, socket API and TCP/IP tasks, SIM checks, the native WAP
+# account routine. A modified PS (the CUT build) gets the network when these bytes
+# equal the pinned PS; RAM preconditions are still validated by VirtualNetwork.
+NETWORK_CODE = ((0x1d4900,0x1d4b00),(0x23fe00,0x240400),(0x2cf900,0x2cfe00),(0x2d9c00,0x2d9d00),
+                (0x2fe900,0x2fea00),(0x48e100,0x48e140),(0x4adf00,0x4ae000),(0x4b0300,0x4b0600),
+                (0x53b000,0x53b100),(0x58d700,0x58d900),(0x598600,0x598e40),(0x5990f0,0x59b100),
+                (0x59e500,0x59e600),(0x5eca00,0x5ece00),(0x652300,0x652400))
+
+
+def network_code_matches(board):
+    """True for the pinned PS, or a PS whose network-related code is unchanged."""
+    if board.image_sha256 == PS_SHA256:
+        return True
+    reference = getattr(board,'firmware',{}).get('reference')
+    if not reference or getattr(board,'firmware',{}).get('reference_sha256') != PS_SHA256:
+        return False
+    try:
+        original = Path(reference).read_bytes()
+    except OSError:
+        return False
+    return all(bytes(board.uc.mem_read(start,end-start)) == original[start:end] for start,end in NETWORK_CODE)
+
+
+def image_network_code_matches(image,original):
+    return len(image) == len(original) and all(image[start:end] == original[start:end] for start,end in NETWORK_CODE)
+
+
 # Function identities follow CMS call sites and the original veneer targets.
 POINTS = {
     0x1d49f6:'browser.access_url',0x2d9c9a:'cms.access_url',
@@ -38,8 +66,8 @@ REGISTERS = (UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,UC_ARM_REG_R3)
 
 class NetworkTrace:
     def __init__(self,board,limit=10000):
-        if board.image_sha256 != PS_SHA256:
-            raise ValueError('Network trace addresses require the pinned B220 PS')
+        if not network_code_matches(board):
+            raise ValueError('Network trace addresses require the pinned B220 PS network code')
         if type(limit) is not int or not 0 < limit <= 100000:
             raise ValueError('Network trace limit must be 1..100000')
         self.board,self.limit = board,limit

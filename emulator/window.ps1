@@ -327,8 +327,9 @@ function Set-B220FirmwarePaths {
         $script:firmwareIdentity = ($result -join '') | ConvertFrom-Json
         $script:outputDirectory = Join-Path $script:baseOutputDirectory ('experiments\'+$script:firmwareIdentity.sha256)
         $script:subtitle.Text = 'Эксперимент · '+$script:firmwareIdentity.sha256.Substring(0,12)
-        $script:networkEnabled = $false
-        $script:networkButton.Enabled = $false
+        # A modified PS keeps the network when its network code equals the original.
+        $script:networkButton.Enabled = [bool]$script:firmwareIdentity.network
+        if (-not $script:networkButton.Enabled) { $script:networkEnabled = $false }
     } else {
         $script:firmwareIdentity = $null
         $script:subtitle.Text = 'Оригинальная прошивка · 176 × 220'

@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unicorn import UC_HOOK_CODE,UC_PROT_READ,UC_PROT_WRITE
 from unicorn.arm_const import (UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,
                                UC_ARM_REG_R3,UC_ARM_REG_LR,UC_ARM_REG_PC)
-from .network_trace import PS_SHA256
+from .network_trace import PS_SHA256,network_code_matches
 
 
 class SocketNetwork:
@@ -26,7 +26,7 @@ class SocketNetwork:
                    0x2cfbf6,0x2cfc02,0x2cfc0e,0x2cfc1a)
 
     def __init__(self,board,service=None,byte_limit=1024*1024):
-        if board.image_sha256 != PS_SHA256 or not hasattr(board,'experimental_network'):
+        if not network_code_matches(board) or not hasattr(board,'experimental_network'):
             raise ValueError('Host backend requires the pinned experimental PDP session')
         if 'host_backend' in board.experimental_network:
             raise ValueError('A host backend has already been attached to this session')

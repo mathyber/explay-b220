@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .virtual_network import VirtualNetwork
 from .host_network import InternetNetwork
+from .network_trace import network_code_matches
 
 
 class WindowNetwork:
@@ -23,8 +24,8 @@ class WindowNetwork:
     def configure(self,*,enabled,plmn='25001',sim_present=True,registered=True):
         if any(type(value) is not bool for value in (enabled,sim_present,registered)):
             raise ValueError('Network and SIM switches must be boolean')
-        if enabled and self.board.image_sha256 != self.board.profile['ps_sha256']:
-            raise ValueError('Network HLE is only available for the original PS image')
+        if enabled and not network_code_matches(self.board):
+            raise ValueError('Network HLE needs the original PS network code (this firmware changed it)')
         if not isinstance(plmn,str) or len(plmn) not in (5,6) or not plmn.isascii() or not plmn.isdigit():
             raise ValueError('PLMN must contain 5 or 6 ASCII digits')
         if registered and not sim_present:

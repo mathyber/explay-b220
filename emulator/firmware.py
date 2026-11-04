@@ -53,10 +53,12 @@ def main():
     args = parser.parse_args()
     profile = json.loads((ROOT/'emulator/profiles/b220-l7a.json').read_text())
     try:
-        _,identity = load_firmware(profile,args.image)
+        image,identity = load_firmware(profile,args.image)
     except (OSError,ValueError) as exc:
         parser.error(str(exc))
+    from .network_trace import image_network_code_matches
     identity['directory'] = str(experiment_directory(identity))
+    identity['network'] = image_network_code_matches(image,Path(identity['reference']).read_bytes())
     print(json.dumps(identity,ensure_ascii=True))
 
 

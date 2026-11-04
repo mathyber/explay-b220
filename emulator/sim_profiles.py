@@ -8,13 +8,13 @@ import hashlib
 
 from unicorn.arm_const import UC_ARM_REG_CPSR,UC_ARM_REG_R0,UC_ARM_REG_SP,UC_ARM_REG_LR
 from .board import Board
-from .network_trace import PS_SHA256
+from .network_trace import PS_SHA256,network_code_matches
 
 BASE,SIZE = 0x0433613c,0x43b0
 
 
 def provision_wap_accounts(board):
-    if board.image_sha256 != PS_SHA256:
+    if not network_code_matches(board):
         raise ValueError('SIM provisioning routine requires the pinned B220 PS')
     isolated = Board(profile=board.profile,explore=board.explore)
     isolated.uc.mem_write(0x04000000,bytes(board.ram))

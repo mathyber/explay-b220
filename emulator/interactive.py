@@ -6,6 +6,8 @@ import time
 
 from unicorn.arm_const import UC_ARM_REG_PC,UC_ARM_REG_CPSR
 
+from .rtc import host_seconds
+
 
 class CommandInbox:
     def __init__(self,path):
@@ -69,6 +71,11 @@ class InteractiveSession:
         self.debugger = debugger
         self.debug_stopped = False
         self.step_requested = False
+        if getattr(board,'rtc',None):
+            # Battery-backed clock: start on the host's local time and mark the RTC
+            # valid (status bit17, PS 0x18e6ea), so boot keeps it instead of 2012-01-01.
+            board.storage[0x8b000020] = board.storage.get(0x8b000020,0)|0x20000
+            self.follow_clock()
 
     def commands(self):
         for command in self.inbox.poll():
@@ -177,6 +184,11 @@ class InteractiveSession:
                     last_input_error=self.last_error,instruction_budget_scope='per execution slice')
         return value
 
+    def follow_clock(self):
+        if getattr(self.board,'rtc',None):
+            self.board.rtc.follow(self.board.block_serial,host_seconds())
+            self.board.sync_rtc()
+
     def run(self):
         try:
             return self._run()
@@ -219,6 +231,7 @@ class InteractiveSession:
             keypad = self.board.keypad
             busy = getattr(keypad,'held',None) or getattr(keypad,'queue',None)
             slice_seconds = 0.03 if busy else 0.2
+            self.follow_clock()
             if self.debugger:
                 step = self.debugger.run(self.args.instructions,slice_seconds,until=self.args.until,step=self.step_requested)
             else:

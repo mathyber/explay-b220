@@ -9,13 +9,13 @@ can supply the data calls; this control-plane class creates no host sockets.
 from unicorn import UC_HOOK_CODE
 from unicorn.arm_const import UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,UC_ARM_REG_PC
 
-from .network_trace import PS_SHA256
+from .network_trace import PS_SHA256,network_code_matches
 
 
 class VirtualNetwork:
     def __init__(self,board,stop_at_dns=True,configure_http=False,home_plmn=None):
-        if board.image_sha256 != PS_SHA256:
-            raise ValueError('Virtual network requires the pinned B220 PS')
+        if not network_code_matches(board):
+            raise ValueError('Virtual network requires the pinned B220 PS network code')
         if getattr(board,'_running',False) or hasattr(board,'experimental_network'):
             raise ValueError('Virtual network requires a stopped, unmodified laboratory session')
         if board.last_window_id is None or not 0x40000 <= board.last_window_id <= 0x400ff:

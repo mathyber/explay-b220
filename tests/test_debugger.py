@@ -93,11 +93,22 @@ class FirmwareTests(unittest.TestCase):
         b = Board(explore=True,firmware_path=self.path)
         self.assertTrue(b.firmware['modified'])
         from emulator.window_network import WindowNetwork
+        # Network code untouched (only the reset vector changed): the network is allowed.
         network = WindowNetwork(b,self.folder/'network.json')
-        with self.assertRaisesRegex(ValueError,'original PS'):
+        network.configure(enabled=True)
+        self.assertTrue(network.enabled)
+        network.close()
+        changed = bytearray(self.path.read_bytes())
+        changed[0x2cfb32] ^= 1   # socket API entry used by the network HLE
+        other = self.folder/'network-changed.bin'
+        other.write_bytes(changed)
+        c = Board(explore=True,firmware_path=other)
+        network = WindowNetwork(c,self.folder/'network-changed.json')
+        with self.assertRaisesRegex(ValueError,'original PS network code'):
             network.configure(enabled=True)
         self.assertFalse(network.enabled)
         network.close()
+        del c
         self.assertEqual(b.image_sha256,hashlib.sha256(self.path.read_bytes()).hexdigest())
         result = b.run(1,2)
         self.assertIsNone(result['engine_error'])
