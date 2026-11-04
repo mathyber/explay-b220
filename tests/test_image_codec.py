@@ -5,7 +5,7 @@ import unittest
 from PIL import Image
 
 from tools.extract_images import FIRMWARE, catalog
-from tools.image_codec import DECODERS, decode_abmp, decode_mb, encode, encode_abmp, encode_mb
+from tools.image_codec import DECODERS, decode_abmp, decode_mb, decode_mv, encode, encode_abmp, encode_mb, encode_mv
 
 
 def pattern(width, height, alpha=False):
@@ -31,6 +31,17 @@ class ImageCodecTests(unittest.TestCase):
             back = decode_mb(data)
             self.assertEqual(list(back.getdata()), list(decode_mb(encode_mb(back)).getdata()))
             self.assertEqual([p[3] for p in back.getdata()], [255 if p[3] >= 128 else 0 for p in picture.getdata()])
+
+    def test_mv_round_trip(self):
+        frames = [pattern(9, 7), pattern(9, 7).transpose(Image.Transpose.FLIP_LEFT_RIGHT), Image.new('RGBA', (9, 7), (0, 4, 0, 255))]
+        template = b'MV'+bytes(8)+struct.pack('>I', 0x42)+struct.pack('>I', 0x28)+bytes(8)+struct.pack('>HHI', 1, 16, 0x1003)+bytes(0x42-34)
+        data = encode_mv(frames, template)
+        self.assertEqual(struct.unpack_from('>I', data, 2)[0], len(data))
+        back = decode_mv(data)
+        self.assertEqual(len(back), 3)
+        for original, decoded in zip(frames, back):
+            self.assertEqual(list(decode_mv(encode_mv([decoded], template))[0].getdata()), list(decoded.getdata()))
+            self.assertEqual([q[3] for q in decoded.getdata()], [255 if q[3] >= 128 else 0 for q in original.getdata()])
 
     def test_mb_keeps_an_opaque_magenta_visible(self):
         picture = Image.new('RGBA', (3, 1), (255, 0, 255, 255))

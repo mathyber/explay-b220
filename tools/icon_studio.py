@@ -36,6 +36,7 @@ GROUP_NAMES = {
 HIDDEN = ('games',)
 FORMATS = {'0x1': 'MB: прозрачность только да/нет', '0x30c': 'ABMP: плавная прозрачность'}
 EDITOR = 440   # editor canvas side, pixels
+MAX_VIEW = 4000   # the zoomed picture's longest side, pixels (keeps redraws fast)
 THUMB = 52
 COLUMNS = 5
 
@@ -127,12 +128,30 @@ class Studio:
         self.format.pack(anchor='w')
         work = ttk.Frame(right)
         work.pack(fill='both', expand=True, pady=6)
-        self.canvas = tk.Canvas(work, width=EDITOR, height=EDITOR, bg='#2a2a30', highlightthickness=0)
-        self.canvas.pack(side='left', anchor='n')
+        holder = ttk.Frame(work)
+        holder.pack(side='left', anchor='n')
+        self.canvas = tk.Canvas(holder, width=EDITOR, height=EDITOR, bg='#2a2a30', highlightthickness=0)
+        across = ttk.Scrollbar(holder, orient='horizontal', command=self.canvas.xview)
+        down = ttk.Scrollbar(holder, orient='vertical', command=self.canvas.yview)
+        self.canvas.configure(xscrollcommand=across.set, yscrollcommand=down.set)
+        self.canvas.grid(row=0, column=0)
+        down.grid(row=0, column=1, sticky='ns')
+        across.grid(row=1, column=0, sticky='ew')
+        zoom_bar = ttk.Frame(holder)
+        zoom_bar.grid(row=2, column=0, columnspan=2, sticky='w', pady=(4, 0))
+        ttk.Button(zoom_bar, text='−', width=3, command=lambda: self.zoom_by(-1)).pack(side='left')
+        self.zoom_label = ttk.Label(zoom_bar, text='', width=7, anchor='center')
+        self.zoom_label.pack(side='left')
+        ttk.Button(zoom_bar, text='+', width=3, command=lambda: self.zoom_by(1)).pack(side='left')
+        ttk.Button(zoom_bar, text='Вписать', command=self.zoom_fit).pack(side='left', padx=(6, 0))
+        ttk.Label(zoom_bar, text='Ctrl+колесо — масштаб, колесо / Shift+колесо — прокрутка',
+                  foreground='#555555').pack(side='left', padx=8)
         self.canvas.bind('<Button-1>', self.press)
         self.canvas.bind('<B1-Motion>', self.drag)
         self.canvas.bind('<ButtonRelease-1>', self.release)
         self.canvas.bind('<MouseWheel>', self.wheel)
+        self.canvas.bind('<Control-MouseWheel>', self.zoom_wheel)
+        self.canvas.bind('<Shift-MouseWheel>', lambda e: self.canvas.xview_scroll(-e.delta//120, 'units'))
 
         side = ttk.Frame(work, padding=(10, 0))
         side.pack(side='left', fill='y')
@@ -265,7 +284,9 @@ class Studio:
         path = self.edited_path(entry)
         self.picture = Image.open(path).convert('RGBA') if path.exists() else self.original(entry).copy()
         self.undo, self.dirty = [], False
-        self.zoom = max(1, min(24, EDITOR//max(entry['width'], entry['height'])))
+        self.zoom = self.fit_zoom()
+        self.canvas.xview_moveto(0)
+        self.canvas.yview_moveto(0)
         self.title['text'] = f'{entry["module"]}/{entry["index"]}  —  {entry["width"]}×{entry["height"]} px'
         self.format['text'] = FORMATS[entry['type']] + ('   (ваша версия)' if path.exists() else '')
         self.unused_var.set(self.key(entry) in self.unused)
@@ -294,8 +315,13 @@ class Studio:
         del self.undo[:-50]
         self.dirty = True
 
+    def at(self, event):
+        """Mouse position in the zoomed picture (the canvas may be scrolled)."""
+        return self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+
     def cell(self, event):
-        x, y = event.x//self.zoom, event.y//self.zoom
+        ex, ey = self.at(event)
+        x, y = int(ex//self.zoom), int(ey//self.zoom)
         if self.picture and 0 <= x < self.picture.width and 0 <= y < self.picture.height:
             return x, y
         return None
@@ -304,8 +330,9 @@ class Studio:
         if self.placing:
             p = self.placing
             z = self.zoom
-            corner = abs(event.x-(p['x']+p['w'])*z) <= 8 and abs(event.y-(p['y']+p['h'])*z) <= 8
-            self.grab = dict(mode='resize' if corner else 'move', x=event.x, y=event.y, box=dict(p))
+            ex, ey = self.at(event)
+            corner = abs(ex-(p['x']+p['w'])*z) <= 8 and abs(ey-(p['y']+p['h'])*z) <= 8
+            self.grab = dict(mode='resize' if corner else 'move', x=ex, y=ey, box=dict(p))
             return
         point = self.cell(event)
         if not point:
@@ -325,7 +352,8 @@ class Studio:
     def drag(self, event):
         if self.placing and self.grab:
             g, p, z = self.grab, self.placing, self.zoom
-            dx, dy = (event.x-g['x'])/z, (event.y-g['y'])/z
+            ex, ey = self.at(event)
+            dx, dy = (ex-g['x'])/z, (ey-g['y'])/z
             if g['mode'] == 'move':
                 p['x'], p['y'] = g['box']['x']+dx, g['box']['y']+dy
             else:
@@ -452,6 +480,50 @@ class Studio:
     def wheel(self, event):
         if self.placing:
             self.scale_placement(1.1 if event.delta > 0 else 1/1.1)
+        else:
+            self.canvas.yview_scroll(-event.delta//120, 'units')
+
+    # ---------- zoom ----------
+
+    def max_zoom(self):
+        return max(1, min(32, MAX_VIEW//max(self.picture.size)))
+
+    def fit_zoom(self):
+        return max(1, min(24, EDITOR//max(self.picture.size)))
+
+    def set_zoom(self, zoom, anchor=None):
+        """New zoom; the picture point under anchor (canvas x, y on screen) stays under it."""
+        if not self.picture:
+            return
+        zoom = max(1, min(self.max_zoom(), zoom))
+        if zoom == self.zoom:
+            return
+        ax, ay = anchor if anchor else (self.canvas.winfo_width()/2, self.canvas.winfo_height()/2)
+        px = (self.canvas.canvasx(ax))/self.zoom
+        py = (self.canvas.canvasy(ay))/self.zoom
+        self.zoom = zoom
+        self.redraw()
+        width, height = self.picture.width*zoom, self.picture.height*zoom
+        if width > 0:
+            self.canvas.xview_moveto(max(0.0, (px*zoom-ax)/width))
+        if height > 0:
+            self.canvas.yview_moveto(max(0.0, (py*zoom-ay)/height))
+
+    def zoom_by(self, step):
+        if self.picture:
+            self.set_zoom(self.zoom+step if self.zoom+step >= 1 else 1)
+
+    def zoom_wheel(self, event):
+        if self.picture:
+            step = max(1, self.zoom//4)
+            self.set_zoom(self.zoom+(step if event.delta > 0 else -step), (event.x, event.y))
+
+    def zoom_fit(self):
+        if self.picture:
+            self.zoom = self.fit_zoom()
+            self.redraw()
+            self.canvas.xview_moveto(0)
+            self.canvas.yview_moveto(0)
 
     def nudge(self, dx, dy):
         if self.placing:
@@ -564,6 +636,8 @@ class Studio:
         self.editor_photo = ImageTk.PhotoImage(view)
         self.canvas.delete('all')
         self.canvas.create_image(0, 0, anchor='nw', image=self.editor_photo)
+        self.canvas.configure(scrollregion=(0, 0, width*z, height*z))
+        self.zoom_label['text'] = f'×{z}'
         if self.placing:
             p = self.placing
             x0, y0, x1, y1 = p['x']*z, p['y']*z, (p['x']+p['w'])*z, (p['y']+p['h'])*z

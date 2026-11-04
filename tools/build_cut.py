@@ -500,6 +500,51 @@ def antialias_fonts(image, output, free):
     return changes
 
 
+# Resource animations of the main module: header +0x0c the table (records offset, data
+# offsets offset), +0x10 their count; a record is width, height (16 bit), frames, size.
+WAIT_ANIMATION = 2          # the 30x30 wheel of the "Ожидание" window (Bluetooth on, ...)
+WAIT_DOTS = (5, 13, 21)     # three 4x4 dots, as on the power-on screen, in green
+WAIT_DOTS_Y = 13
+WAIT_GREEN = (3, 254, 0)    # the colour of the selection frames
+# The animation blit skips pure black (0x0000): a near-black backdrop (RGB565 0x0020) erases
+# the dots of the previous frame. The original wheel redraws every petal in each frame.
+WAIT_BACK = (0, 4, 0)
+
+
+def wait_dots(count):
+    picture = Image.new('RGBA', (30, 30), WAIT_BACK+(255,))
+    draw = ImageDraw.Draw(picture)
+    for x in WAIT_DOTS[:count]:
+        draw.rectangle((x, WAIT_DOTS_Y, x+3, WAIT_DOTS_Y+3), fill=WAIT_GREEN+(255,))
+    return picture
+
+
+def wait_animation(image, output, free):
+    """The waiting wheel becomes three green dots that light up one by one (DOT_STATES)
+    on a near-black backdrop (WAIT_BACK). Same place, its tail is freed."""
+    from .image_codec import decode_mv, encode_mv
+    table = MAIN_MODULE+struct.unpack_from('>I', image, MAIN_MODULE+0x0c)[0]
+    count, = struct.unpack_from('>I', image, MAIN_MODULE+0x10)
+    records, offsets = struct.unpack_from('>II', image, table)
+    record = MAIN_MODULE+records+12*WAIT_ANIMATION
+    width, height, frames, size = struct.unpack_from('>HHII', image, record)
+    at = MAIN_MODULE+struct.unpack_from('>I', image, MAIN_MODULE+offsets+4*WAIT_ANIMATION)[0]
+    if count != 3 or (width, height, frames) != (30, 30, 8) or len(decode_mv(image, at)) != 8:
+        raise ValueError('Unexpected waiting animation')
+    data = encode_mv([wait_dots(n) for n in DOT_STATES], image[at:at+0x42])
+    check = decode_mv(data)
+    first = (WAIT_DOTS[0]+1, WAIT_DOTS_Y+1)
+    if len(data) > size or len(check) != len(DOT_STATES) or check[0].getpixel(first)[1] > 100 or check[1].getpixel(first)[1] < 200:
+        raise ValueError('Waiting animation does not fit or round-trip')
+    output[at:at+size] = data+b'\xff'*(size-len(data))
+    struct.pack_into('>I', output, record+8, len(data))
+    tail = (at+len(data)+3) & ~3
+    if at+size-tail >= 16:
+        free.append(dict(start=hex(tail), end=hex(at+size), size=at+size-tail, origin='waiting animation tail'))
+    return [dict(start=hex(at), size=size, kind=f'waiting animation: {len(DOT_STATES)} frames of green dots ({len(data)} bytes)'),
+            dict(start=hex(record+8), size=4, kind='waiting animation: size')]
+
+
 def games_out_of_shortcut_list(image, output, free):
     from .thumb_asm import Thumb, bl_bytes
     for address, original in SHORTCUT_LIST_BYTES.items():
@@ -682,6 +727,7 @@ def build(image, icons=ICONS):
     changes += more; free += extra
     changes += games_out_of_shortcut_list(image, output, free)
     changes += time_title_back(image, output, free)
+    changes += wait_animation(image, output, free)
     changes += antialias_fonts(image, output, free)
     more, placed = replace_icons(image, output, free, icons) if icons else ([], [])
     changes += more
@@ -691,7 +737,7 @@ def build(image, icons=ICONS):
         allowed.update(range(start, start+change['size']))
     if len(output) != len(image) or any(i not in allowed for i, (a, b) in enumerate(zip(image, output)) if a != b):
         raise ValueError('Changes outside declared regions')
-    steps = ['wallpapers', 'media library', 'social networks', 'SD Apps in the main menu', 'power-on animation', 'world time', 'Quick access without Games', 'time title', 'font antialiasing']+(['icons'] if placed else [])
+    steps = ['wallpapers', 'media library', 'social networks', 'SD Apps in the main menu', 'power-on animation', 'world time', 'Quick access without Games', 'time title', 'waiting dots', 'font antialiasing']+(['icons'] if placed else [])
     return bytes(output), dict(format='b220-cut', version=1, steps=steps, source_sha256=sha(image),
                                output_sha256=sha(output), size=len(output), changes=changes, icons=placed, free_rom=free,
                                free_rom_bytes=sum(f['size'] for f in free),

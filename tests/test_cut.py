@@ -155,6 +155,16 @@ class CutTests(unittest.TestCase):
         tables = [c for c in self.manifest['changes'] if c['kind'].startswith('font ') and '4bpp alpha' in c['kind']]
         self.assertEqual([c['size'] for c in tables], [4*(s.end-s.bitmap) for s in SETS])
 
+    def test_waiting_wheel_becomes_green_dots(self):
+        from tools.build_cut import DOT_STATES, WAIT_DOTS, WAIT_DOTS_Y
+        from tools.image_codec import decode_mv
+        change = next(c for c in self.manifest['changes'] if c['kind'].startswith('waiting animation: 8'))
+        self.assertEqual(len(decode_mv(self.source, int(change['start'], 0))), 8)
+        frames = decode_mv(self.output, int(change['start'], 0))
+        lit = [sum(f.getpixel((x+1, WAIT_DOTS_Y+1))[1] > 200 for x in WAIT_DOTS) for f in frames]
+        self.assertEqual(lit, list(DOT_STATES))
+        self.assertTrue(all(f.getpixel((0, 0))[:3] != (0, 0, 0) for f in frames))   # black is skipped
+
     def test_squeezed_glyphs_move_to_their_own_width(self):
         from tools.build_font_patch import SETS
         moved = [c for c in self.manifest['changes'] if c['kind'].endswith(' moved')]

@@ -190,6 +190,70 @@ def encode_abmp(picture):
     return bytes(out)
 
 
+MV_HEADER = 0x42   # the MB header with 'MV'; then the frame count and (size, offset) per frame
+
+
+def rle_rows(data, at, width, height):
+    """One MB 0x1003 picture body from at: (RGBA picture, end)."""
+    rows = []
+    for _ in range(abs(height)):
+        row = []
+        while True:
+            repeat, literal = data[at], data[at+1]
+            at += 2
+            if not repeat and not literal:
+                break
+            row += struct.unpack_from(f'>{literal}H', data, at)
+            at += 2*literal
+            if repeat:
+                row += [struct.unpack_from('>H', data, at)[0]]*repeat
+                at += 2
+        if len(row) != width:
+            raise ValueError(f'MV row of {len(row)} pixels, expected {width}')
+        rows.append(row)
+    if height > 0:
+        rows.reverse()
+    picture = Image.new('RGBA', (width, abs(height)))
+    picture.putdata([(0, 0, 0, 0) if p == TRANSPARENT else (*rgb(p), 255) for row in rows for p in row])
+    return picture, at
+
+
+def decode_mv(data, address=0):
+    """Frames of an MV animation (resource animation table): the MB header with 'MV',
+    a frame count, (size, offset from the header) per frame, RLE frames."""
+    if data[address:address+2] != b'MV':
+        raise ValueError('MV signature missing')
+    data_at, = struct.unpack_from('>I', data, address+10)
+    width, height = struct.unpack_from('>ii', data, address+18)
+    bpp, compression = struct.unpack_from('>HI', data, address+28)
+    if data_at != MV_HEADER or bpp != 16 or compression != 0x1003:
+        raise ValueError('Unsupported MV animation')
+    count, = struct.unpack_from('>I', data, address+data_at)
+    frames = []
+    for n in range(count):
+        size, offset = struct.unpack_from('>II', data, address+data_at+4+8*n)
+        picture, end = rle_rows(data, address+offset, width, height)
+        if end-(address+offset) > size:
+            raise ValueError('MV frame longer than its table size')
+        frames.append(picture)
+    return frames
+
+
+def encode_mv(frames, template):
+    """An MV animation of frames (same size) on the header of template (an original MV)."""
+    width, height = frames[0].size
+    bodies = [b''.join(rle_row(row) for row in reversed(mb_pixels(f))) for f in frames]
+    table = struct.pack('>I', len(frames))
+    at = MV_HEADER+4+8*len(frames)
+    for body in bodies:
+        table += struct.pack('>II', len(body), at)
+        at += len(body)
+    header = bytearray(template[:MV_HEADER])
+    struct.pack_into('>I', header, 2, at)
+    struct.pack_into('>ii', header, 18, width, height)
+    return bytes(header+table+b''.join(bodies))
+
+
 DECODERS = {'0x1': decode_mb, '0x30c': decode_abmp}
 ENCODERS = {'0x1': encode_mb, '0x30c': encode_abmp}
 
