@@ -213,10 +213,16 @@ class InteractiveSession:
             pc = self.board.uc.reg_read(UC_ARM_REG_PC)
             if self.board.uc.reg_read(UC_ARM_REG_CPSR)&0x20:
                 pc |= 1
+            # Commands (key edges) are read between slices. While a key is held or
+            # queued, slices are short: a 0.2 s slice rounds a click up to 0.4 s of
+            # firmware time, past the ~0.35 s auto-repeat threshold (arrows moved twice).
+            keypad = self.board.keypad
+            busy = getattr(keypad,'held',None) or getattr(keypad,'queue',None)
+            slice_seconds = 0.03 if busy else 0.2
             if self.debugger:
-                step = self.debugger.run(self.args.instructions,0.2,until=self.args.until,step=self.step_requested)
+                step = self.debugger.run(self.args.instructions,slice_seconds,until=self.args.until,step=self.step_requested)
             else:
-                step = self.board.run(self.args.instructions,0.2,entry=pc,until=self.args.until,report=False)
+                step = self.board.run(self.args.instructions,slice_seconds,entry=pc,until=self.args.until,report=False)
             self.step_requested = False
             self.active_seconds += step['elapsed_seconds']
             self.network.update()
