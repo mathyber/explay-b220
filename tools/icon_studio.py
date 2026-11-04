@@ -4,7 +4,8 @@ Run as python -m tools.icon_studio (or "Start B220 ICONS.cmd"). Shows the images
 of the current firmware by group; an edited icon is saved as
 icons/<module>/<index>.png (RGBA, original size), which is all the firmware
 build needs to know where it goes. icons/unused.txt lists icons marked as
-probably unused. Sizes are computed with tools.image_codec, the encoder the
+probably unused; icons/removed.txt lists images the build replaces with an
+empty picture, freeing their space. Sizes are computed with tools.image_codec, the encoder the
 replacement uses.
 """
 import argparse
@@ -73,6 +74,8 @@ class Studio:
         self.entries = [e for e in catalog(self.rom) if e['type'] in DECODERS]
         self.unused_path = output/'unused.txt'
         self.unused = set(self.unused_path.read_text(encoding='utf-8').split()) if self.unused_path.exists() else set()
+        self.removed_path = output/'removed.txt'
+        self.removed = set(self.removed_path.read_text(encoding='utf-8').split()) if self.removed_path.exists() else set()
         self.originals = {}
         self.current = None
         self.picture = None
@@ -159,6 +162,9 @@ class Studio:
         self.unused_var = tk.BooleanVar()
         ttk.Checkbutton(actions, text='Похоже, не используется', variable=self.unused_var,
                         command=self.toggle_unused).pack(anchor='w', pady=(6, 0))
+        self.removed_var = tk.BooleanVar()
+        ttk.Checkbutton(actions, text='Удалить из прошивки (пустая)', variable=self.removed_var,
+                        command=self.toggle_removed).pack(anchor='w')
 
         paste = ttk.LabelFrame(work, text='Вставить картинку', padding=6)
         paste.pack(side='left', fill='y', padx=(4, 0))
@@ -236,13 +242,13 @@ class Studio:
             thumb.thumbnail((THUMB, THUMB))
             photo = ImageTk.PhotoImage(thumb)
             self.thumbs.append(photo)
-            unused = self.key(entry) in self.unused
-            outline = '#3fd06a' if path.exists() else ('#a05050' if unused else '#55555f')
+            unused, removed = self.key(entry) in self.unused, self.key(entry) in self.removed
+            outline = '#3fd06a' if path.exists() else '#d08030' if removed else ('#a05050' if unused else '#55555f')
             tag = f'icon{n}'
             self.grid.create_rectangle(x, y, x+THUMB+4, y+THUMB+4, outline=outline, width=2,
                                        fill='#26262c', tags=tag)
             self.grid.create_image(x+2+THUMB//2, y+2+THUMB//2, image=photo, tags=tag)
-            label = f'{entry["index"]}' + (' ✎' if path.exists() else '') + (' ✗' if unused else '')
+            label = f'{entry["index"]}' + (' ✎' if path.exists() else '') + (' ✗' if unused else '') + (' ⌫' if removed else '')
             self.grid.create_text(x+THUMB//2+2, y+THUMB+12, text=label, fill='#e0e0e0', font=('Segoe UI', 8), tags=tag)
             self.grid.tag_bind(tag, '<Button-1>', lambda _, e=entry: self.select(e))
         rows = (len(self.visible)+COLUMNS-1)//COLUMNS
@@ -263,6 +269,7 @@ class Studio:
         self.title['text'] = f'{entry["module"]}/{entry["index"]}  —  {entry["width"]}×{entry["height"]} px'
         self.format['text'] = FORMATS[entry['type']] + ('   (ваша версия)' if path.exists() else '')
         self.unused_var.set(self.key(entry) in self.unused)
+        self.removed_var.set(self.key(entry) in self.removed)
         common = Counter(p for p in self.original(entry).getdata() if p[3]).most_common(16)
         for child in self.palette.winfo_children():
             child.destroy()
@@ -519,6 +526,14 @@ class Studio:
             self.redraw()
             self.show_group_keep()
             self.update_total()
+
+    def toggle_removed(self):
+        if not self.current:
+            return
+        (self.removed.add if self.removed_var.get() else self.removed.discard)(self.key(self.current))
+        self.output.mkdir(parents=True, exist_ok=True)
+        self.removed_path.write_text(''.join(f'{k}\n' for k in sorted(self.removed)), encoding='utf-8')
+        self.show_group_keep()
 
     def toggle_unused(self):
         if not self.current:
