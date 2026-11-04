@@ -155,6 +155,19 @@ class CutTests(unittest.TestCase):
         tables = [c for c in self.manifest['changes'] if c['kind'].startswith('font ') and '4bpp alpha' in c['kind']]
         self.assertEqual([c['size'] for c in tables], [4*(s.end-s.bitmap) for s in SETS])
 
+    def test_squeezed_glyphs_move_to_their_own_width(self):
+        from tools.build_font_patch import SETS
+        moved = [c for c in self.manifest['changes'] if c['kind'].endswith(' moved')]
+        region = next(c for c in self.manifest['changes'] if 'own width (1bpp)' in c['kind'])
+        start = int(region['start'], 0)
+        self.assertTrue(moved)
+        for change in moved:
+            fontset = next(s for s in SETS if change['kind'].startswith(f'font {s.name}:'))
+            index = (int(change['start'], 0)-fontset.offsets)//4
+            pointer = (fontset.bitmap+struct.unpack_from('>I', self.output, fontset.offsets+4*index)[0]) & 0xffffffff
+            self.assertTrue(start <= pointer < start+region['size'])
+            self.assertGreater(self.output[fontset.widths+index], self.source[fontset.widths+index])
+
     def test_wrong_source_is_rejected(self):
         broken = bytearray(self.source)
         broken[0x1c9ade:0x1c9ae0] = b'\x21\x07'

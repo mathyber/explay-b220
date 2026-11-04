@@ -15,7 +15,7 @@ from pathlib import Path
 from PIL import Image, ImageFont
 
 from emulator.firmware import ROOT
-from .build_font_patch import BASELINE_SHIFTS, SETS, glyph, mask, pack, raster, sha
+from .build_font_patch import BASELINE_SHIFTS, SETS, baseline_row, glyph, layout, mask, pack, raster, sha
 
 FONT = ROOT/'analysis/donor-fonts/k550/Sans-Serif_Europe_Reg.ttf'
 HEIGHTS = {16: 0x5b8716, 14: 0x5b871e}   # MOVS r0,#height of the large and small sets
@@ -32,30 +32,52 @@ def heights(image):
     return result
 
 
-def grey(font, char, height, width, baseline_shift):
-    """The glyph with grey levels at the place tools.build_font_patch.raster puts its 1bpp ink,
-    or None when that raster was fitted (resized) into the cell."""
-    ink, (left, top) = mask(font, char)
-    bounds = ink.getbbox()
-    if not bounds:
-        return Image.new('L', (width, height))
-    x = max(0, left+bounds[0])
-    y = top+bounds[1]+height-2+baseline_shift
-    w, h = bounds[2]-bounds[0], bounds[3]-bounds[1]
-    x = min(x, max(0, width-2))
-    if w > (width-x-1 if width > 1 else 1) or h > height:
-        return None
-    y = max(0, min(y, height-h))
-    # The outline at SCALE times the size, box-filtered down into exactly the 1bpp
-    # ink box: grey edges, the same advance, place and spacing as the 1bpp text.
-    big = ImageFont.truetype(font.path, font.size*SCALE)
-    pixels, _ = big.getmask2(char, mode='L', anchor='ls')
-    level = Image.frombytes('L', pixels.size, bytes(pixels))
-    level = level.crop(level.getbbox()).resize((w, h), Image.Resampling.BOX)
-    level = level.point(lambda v: min(255, round(v*GAIN)))
+def grey(font, char, height, width, baseline_shift, baseline):
+    """The glyph with grey levels laid out like tools.build_font_patch.raster lays out its
+    1bpp ink (same box, baseline and shrunk parts): the outline at SCALE times the size,
+    each part box-filtered down into its rows."""
+    width, ink, x, w, pieces = layout(font, char, height, width, baseline, baseline_shift)
     cell = Image.new('L', (width, height))
-    cell.paste(level, (x, y))
+    if ink is None:
+        return cell
+    big = ImageFont.truetype(font.path, font.size*SCALE)
+    pixels, (_, top) = big.getmask2(char, mode='L', anchor='ls')
+    level = Image.frombytes('L', pixels.size, bytes(pixels))
+    bounds = level.getbbox()
+    level = level.crop(bounds)
+    split = max(0, min(level.height, -(top+bounds[1])))   # the baseline row in the big ink
+    parts = [(0, split), (split, level.height)] if len(pieces) == 2 else             [(0, split) if pieces[0][0] < 0 else (split, level.height)]
+    for (start, stop), (_, _, row, rows) in zip(parts, pieces):
+        if stop <= start:
+            start, stop = (0, level.height)
+        part = level.crop((0, start, level.width, stop)).resize((w, rows), Image.Resampling.BOX)
+        cell.paste(part.point(lambda v: min(255, round(v*GAIN))), (x, row))
     return cell
+
+
+def scale2x(cell):
+    """EPX/Scale2x of a two-level image: corners follow matching neighbours (diagonals)."""
+    w, h = cell.size
+    p = cell.load()
+    out = Image.new('L', (2*w, 2*h))
+    q = out.load()
+
+    def at(x, y):
+        return p[x, y] if 0 <= x < w and 0 <= y < h else 0
+    for y in range(h):
+        for x in range(w):
+            P, A, B, C, D = p[x, y], at(x, y-1), at(x+1, y), at(x-1, y), at(x, y+1)
+            q[2*x, 2*y] = A if C == A and C != D and A != B else P
+            q[2*x+1, 2*y] = B if A == B and A != C and B != D else P
+            q[2*x, 2*y+1] = C if D == C and D != B and C != A else P
+            q[2*x+1, 2*y+1] = D if B == D and B != A and D != C else P
+    return out
+
+
+def smooth(bits):
+    """Grey edges for a bitmap glyph without an outline: Scale2x twice, then a 4x4 box."""
+    big = scale2x(scale2x(bits.convert('L')))
+    return big.resize(bits.size, Image.Resampling.BOX)
 
 
 def nibbles(cell, size):
@@ -66,18 +88,55 @@ def nibbles(cell, size):
     return result
 
 
-def alpha_sets(image, font_path=FONT):
-    """[(FontSet, alpha bytes, grey glyph count)] for the patched image."""
+def detect_font(image, sample='AaBbEeHhOoSsxАаБбВвЖжОоЯя'):
+    """The donor TTF (analysis/donor-fonts) the font patch rasterized into this image:
+    the one reproducing most sample glyphs bit for bit; None for none (stock font)."""
     size = heights(image)
+    best, score = None, 0
+    for path in [FONT]+sorted(p for p in (ROOT/'analysis/donor-fonts').rglob('*.ttf') if p != FONT):
+        if not path.exists():
+            continue
+        found = 0
+        for fontset in (SETS[0], SETS[2]):
+            height = size[fontset.height]
+            font = ImageFont.truetype(str(path), height-2)
+            missing_ink, _ = mask(font, '￿')
+            missing = missing_ink.size, missing_ink.tobytes()
+            digest = sha(path.read_bytes())
+            for char in sample:
+                if ord(char) not in fontset.codepoints:
+                    continue
+                index = fontset.codepoints.index(ord(char))
+                width = image[fontset.widths+index]
+                start = fontset.bitmap+struct.unpack_from('>I', image, fontset.offsets+index*4)[0]
+                bits = glyph(image, fontset, index, height)
+                again, fallback = raster(font, char, height, width, missing, bits,
+                                         BASELINE_SHIFTS.get((digest, height-2, ord(char)), 0))
+                found += not fallback and pack(again) == image[start:start+(width*height+7)//8]
+        if found > score:
+            best, score = path, found
+    return best if score*2 > len(sample) else None
+
+
+def alpha_sets(image, font_path=None, smooth_bitmaps=False):
+    """[(FontSet, alpha bytes, grey glyph count, wider)] for the patched image.
+    wider: [(index, width, 1bpp bytes, alpha bytes)] of TTF glyphs the font patch had to
+    squeeze into their slots, at their own width (tools.build_cut moves them to free ROM).
+    font_path: the donor TTF, None: detect_font. smooth_bitmaps: glyphs not drawn
+    from the TTF get Scale2x grey edges instead of their 1bpp shape."""
+    size = heights(image)
+    font_path = font_path or detect_font(image) or FONT
     digest = sha(font_path.read_bytes())
     result = []
     for s in SETS:
         height = size[s.height]
         font = ImageFont.truetype(str(font_path), height-2)
+        baseline = baseline_row(font, height)
         missing_ink, _ = mask(font, '￿')
         missing = missing_ink.size, missing_ink.tobytes()
         table = bytearray(4*(s.end-s.bitmap))
         grey_count = 0
+        wider = []
         for index, cp in enumerate(s.codepoints):
             width = image[s.widths+index]
             offset = struct.unpack_from('>I', image, s.offsets+index*4)[0]
@@ -87,17 +146,24 @@ def alpha_sets(image, font_path=FONT):
             cell = None
             if width:
                 shift = BASELINE_SHIFTS.get((digest, height-2, cp), 0)
-                again, fallback = raster(font, chr(cp), height, width, missing, bits, shift)
+                again, fallback = raster(font, chr(cp), height, width, missing, bits, shift, baseline)
                 # Only a glyph this TTF reproduces bit for bit (same cell width) gets grey levels.
                 if not fallback and again.width == width and pack(again) == image[start:start+capacity]:
-                    cell = grey(font, chr(cp), height, width, shift)
-            if cell is None:
+                    cell = grey(font, chr(cp), height, width, shift, baseline)
+                    own, _ = raster(font, chr(cp), height, 255, missing, bits, shift, baseline)
+                    if own.width > width:
+                        wide = grey(font, chr(cp), height, own.width, shift, baseline)
+                        wider.append((index, own.width, pack(own), bytes(nibbles(wide, (own.width*height+1)//2))))
+            if cell is None and smooth_bitmaps and width:
+                cell = smooth(bits)
+                grey_count += 1
+            elif cell is None:
                 cell = bits.convert('L')
             else:
                 grey_count += 1
             data = nibbles(cell, (width*height+1)//2)
             table[4*offset:4*offset+len(data)] = data
-        result.append((s, bytes(table), grey_count))
+        result.append((s, bytes(table), grey_count, wider))
     return result
 
 
@@ -107,7 +173,7 @@ def render(image, alpha, text, original_height, fg=(255, 255, 255), bg=(0, 0, 0)
     height = size[original_height]
     cells = []
     for char in text:
-        for s, table, _ in alpha:
+        for s, table, *_ in alpha:
             if s.height == original_height and ord(char) in s.codepoints:
                 index = s.codepoints.index(ord(char))
                 width = image[s.widths+index]

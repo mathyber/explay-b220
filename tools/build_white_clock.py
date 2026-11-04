@@ -9,7 +9,7 @@ from emulator.firmware import ROOT, load_firmware, protect_outputs
 from .research_clock_digits import DIGITS, COLON, decode, extract
 
 DIRECTORY = ROOT/'analysis/firmware-patches/white-clock'
-DEFAULT_SOURCE = ROOT/'analysis/firmware-patches/k550-font/b220-narrow.bin'
+DEFAULT_SOURCE = ROOT/'analysis/firmware-patches/main-font/b220-narrow.bin'   # Nokia font (Start B220 WHITE CLOCK.cmd)
 OLD, NEW = 0xff55, 0xffff
 
 

@@ -82,38 +82,84 @@ def mask(font, char):
     return Image.frombytes('L', pixels.size, bytes(pixels)), offset
 
 
-def raster(font, char, height, max_width, missing, original, baseline_shift=0):
+DESCENDERS = 'gjpqyдрруфцщДЦЩ'
+
+
+def baseline_row(font, height):
+    """Cell row of the baseline shared by a whole set: room below it for the deepest
+    common descender (at least two rows, at most a third of the cell)."""
+    deepest = 2
+    for char in DESCENDERS:
+        ink, (_, top) = mask(font, char)
+        bounds = ink.getbbox()
+        if bounds:
+            deepest = max(deepest, top+bounds[3])
+    return height-min(deepest, height//3)
+
+
+def squeeze(ink, size):
+    """A 1bpp ink box made smaller: up to twice smaller a pixel is ink if any of its source
+    is (NEAREST would drop every other stem or row), stronger shrinking takes NEAREST."""
+    if size == ink.size:
+        return ink
+    if ink.width <= 2*size[0] and ink.height <= 2*size[1]:
+        return ink.convert('L').resize(size, Image.Resampling.BOX).point(lambda v: 255 if v else 0).convert('1')
+    return ink.resize(size, Image.Resampling.NEAREST)
+
+
+def layout(font, char, height, max_width, baseline, baseline_shift=0):
+    """Where a glyph's ink goes in its cell: (cell width, ink box or None, x, ink width,
+    pieces). The ink keeps the shared baseline; a part above it (or below it) that does
+    not fit is shrunk on its own. pieces: (font rows from, to, cell row, rows) per side."""
     ink, (left, top) = mask(font, char)
+    bounds = ink.getbbox()
+    advance = max(1, math.ceil(font.getlength(char)))
+    if not bounds:
+        return min(max_width, advance), None, 0, 0, ()
+    left = max(0, left+bounds[0])
+    ink = ink.crop(bounds).convert('1')
+    advance = max(advance, left+ink.width+1)
+    width = min(max_width, advance)
+    x = min(left, max(0, width-2))
+    if ink.width > width-x-1 and width > 1:
+        x = max(0, width-1-ink.width)   # too wide: give up the left bearing before squeezing
+    w = max(1, min(ink.width, width-x-1 if width > 1 else 1))
+    t0 = top+bounds[1]+baseline_shift      # font rows, baseline 0
+    t1 = t0+ink.height
+    pieces = []
+    if t0 < 0:                             # above the baseline: ends at the baseline or above it
+        bottom = baseline+min(t1, 0)
+        rows = max(1, min(min(t1, 0)-t0, bottom))
+        pieces.append((t0, min(t1, 0), max(0, bottom-rows), rows))
+    if t1 > 0:                             # on/below the baseline: starts there or below it
+        first = max(t0, 0)
+        row = min(baseline+first, height-1)
+        rows = max(1, min(t1-first, height-row))
+        pieces.append((first, t1, row, rows))
+    return width, ink, x, w, tuple(pieces)
+
+
+def raster(font, char, height, max_width, missing, original, baseline_shift=0, baseline=None):
+    ink, _ = mask(font, char)
     if (ink.size, ink.tobytes()) == missing:
         # Preserve uncommon characters absent from the selected desktop font.
         width = max(1, min(max_width, round(max_width*height/original.height)))
         return original.resize((width, height), Image.Resampling.NEAREST), True
-    bounds = ink.getbbox()
-    advance = max(1, math.ceil(font.getlength(char)))
-    if bounds:
-        left = max(0, left+bounds[0])
-        top += bounds[1]+height-2+baseline_shift  # shared baseline, two rows for descenders
-        ink = ink.crop(bounds).convert('1')
-        advance = max(advance, left+ink.width+1)
-    width = min(max_width, advance)
+    if baseline is None:
+        baseline = baseline_row(font, height)
+    width, ink, x, w, pieces = layout(font, char, height, max_width, baseline, baseline_shift)
     result = Image.new('1', (width, height))
-    if bounds:
-        # A few accented/extended glyphs exceed the cell. Fit the entire ink,
-        # including descenders, rather than dropping rows or writing next glyph.
-        left = min(left, max(0, width-2))
-        size = (max(1, min(ink.width, width-left-1 if width>1 else 1)), min(ink.height, height))
-        if size[0] < ink.width <= 2*size[0]:
-            # Up to twice narrower: a pixel is ink if any of its source is. NEAREST would
-            # keep every other column and lose a stem ("l" with a foot became a dot).
-            ink = ink.convert('L').resize(size, Image.Resampling.BOX).point(lambda v: 255 if v else 0).convert('1')
-        else:
-            ink = ink.resize(size, Image.Resampling.NEAREST)
-        top = max(0, min(top, height-ink.height))
-        result.paste(ink, (left, top))
+    if ink is not None:
+        t0 = pieces[0][0]
+        for start, stop, row, rows in pieces:
+            part = ink.crop((0, start-t0, ink.width, stop-t0))
+            result.paste(squeeze(part, (w, rows)), (x, row))
     return result, False
 
 
-def build(image, font_path=DEFAULT_FONT, large_height=14, small_height=12):
+def build(image, font_path=DEFAULT_FONT, large_height=14, small_height=12, wide_cells=False):
+    """wide_cells: a glyph may be as wide as its slot holds at the new (lower) height,
+    not only its stock width (a wider donor font is squeezed less)."""
     if not (8 <= small_height <= 14 and small_height <= large_height <= 16):
         raise ValueError('Expected 8 <= small height <= 14 and small <= large <= 16')
     output = bytearray(image)
@@ -125,6 +171,7 @@ def build(image, font_path=DEFAULT_FONT, large_height=14, small_height=12):
             raise ValueError(f'Unsupported or already modified font block: {s.name}')
         height = large_height if s.height == 16 else small_height
         font = ImageFont.truetype(str(font_path), height-2)
+        baseline = baseline_row(font, height)
         missing_ink, _ = mask(font, '\uffff')
         missing = missing_ink.size, missing_ink.tobytes()
         for required in 'AОЁЙя':
@@ -142,7 +189,8 @@ def build(image, font_path=DEFAULT_FONT, large_height=14, small_height=12):
             if start+capacity != end:
                 raise ValueError(f'Unexpected glyph slot in {s.name} U+{cp:04X}')
             baseline_shift = BASELINE_SHIFTS.get((font_digest, height-2, cp), 0)
-            bitmap, fallback = (raster(font, chr(cp), height, old.width, missing, old, baseline_shift)
+            max_width = min(255, capacity*8//height) if wide_cells else old.width
+            bitmap, fallback = (raster(font, chr(cp), height, max_width, missing, old, baseline_shift, baseline)
                                 if old.width else (Image.new('1', (0, height)), False))
             data = pack(bitmap)
             if len(data)>capacity:
@@ -216,6 +264,7 @@ def main():
     parser.add_argument('--font', type=Path, default=DEFAULT_FONT)
     parser.add_argument('--large-height', type=int, default=14)
     parser.add_argument('--small-height', type=int, default=12)
+    parser.add_argument('--wide-cells', action='store_true', help='glyphs as wide as their slots hold')
     parser.add_argument('--prepare-card', action='store_true')
     args = parser.parse_args()
     try:
@@ -225,7 +274,7 @@ def main():
         protect_outputs(profile, identity, paths, inputs=(args.font,))
         if len({p.resolve() for p in paths}) != len(paths):
             raise ValueError('Output paths must be distinct')
-        output, manifest = build(image, args.font, args.large_height, args.small_height)
+        output, manifest = build(image, args.font, args.large_height, args.small_height, args.wide_cells)
         args.directory.mkdir(parents=True, exist_ok=True)
         paths[0].write_bytes(image); paths[1].write_bytes(output)
         preview(image, output, manifest, paths[3])

@@ -447,18 +447,38 @@ def glyph_helpers(base, table):
 def antialias_fonts(image, output, free):
     """Grey-level copies of the four font sets (tools.font_alpha) go to freed ROM;
     the native glyph loops take each pixel's alpha from them and blend."""
-    from .font_alpha import alpha_sets
+    from .font_alpha import alpha_sets, heights
     from .thumb_asm import bl_bytes
     for test, skip, store in GLYPH_LOOPS:
         if (image[test:test+17].hex() != GLYPH_BIT_TEST or image[test+16:test+18] != b'\xd0'+bytes([(skip-(test+20)) >> 1 & 0xff])
                 or image[store:store+20].hex() != GLYPH_STORE):
             raise ValueError(f'Unexpected glyph drawing loop at {test:#x}')
-    changes, table = [], b''
-    for fontset, data, grey in alpha_sets(image):
+    changes, table, moved = [], b'', []
+    stock = heights(image) == {16: 16, 14: 14}     # stock bitmap font: no outline, Scale2x edges
+    for fontset, data, grey, wider in alpha_sets(image, smooth_bitmaps=stock):
         at = take_free(free, len(data), 0)
         output[at:at+len(data)] = data
         table += struct.pack('>III', fontset.bitmap, fontset.end, at)
         changes.append(dict(start=hex(at), size=len(data), kind=f'font {fontset.name}: 4bpp alpha ({grey} grey glyphs)'))
+        moved += [(fontset, *glyph) for glyph in wider]
+    if moved:
+        # Glyphs squeezed into their slots get their own width: 1bpp data in freed ROM
+        # (offset = new place - set base, the firmware adds it modulo 2^32), alpha 4x after it.
+        bits_size = sum(len(g[3]) for g in moved)
+        bits_at = take_free(free, bits_size, 0)
+        alpha_at = take_free(free, 4*bits_size, 0)
+        place = bits_at
+        for fontset, index, width, bits, alpha in moved:
+            output[place:place+len(bits)] = bits
+            output[alpha_at+4*(place-bits_at):alpha_at+4*(place-bits_at)+len(alpha)] = alpha
+            output[fontset.widths+index] = width
+            struct.pack_into('>I', output, fontset.offsets+4*index, (place-fontset.bitmap) & 0xffffffff)
+            changes += [dict(start=hex(fontset.widths+index), size=1, kind=f'font {fontset.name}: glyph {index} own width'),
+                        dict(start=hex(fontset.offsets+4*index), size=4, kind=f'font {fontset.name}: glyph {index} moved')]
+            place += len(bits)
+        table += struct.pack('>III', bits_at, bits_at+bits_size, alpha_at)
+        changes += [dict(start=hex(bits_at), size=bits_size, kind=f'font: {len(moved)} glyphs at their own width (1bpp)'),
+                    dict(start=hex(alpha_at), size=4*bits_size, kind='font: their 4bpp alpha')]
     table += bytes(4)
     at = take_free(free, len(table), 0)
     output[at:at+len(table)] = table

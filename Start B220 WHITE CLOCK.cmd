@@ -1,4 +1,6 @@
 @echo off
+rem Intermediate step (white clock, still the stock boot animation, wallpapers and
+rem menus). The main firmware is "Start B220 CUT.cmd".
 setlocal
 cd /d "%~dp0"
 if not exist ".venv\Scripts\python.exe" (
@@ -6,9 +8,12 @@ if not exist ".venv\Scripts\python.exe" (
     pause
     exit /b 1
 )
-if not exist "analysis\firmware-patches\k550-font\b220-narrow.bin" (
-    ".venv\Scripts\python.exe" -X utf8 -m tools.extract_k550_fonts --download
-    if errorlevel 1 (
+rem Main font: Nokia Standard Multiscript (Nokia S60), 15/13 px, glyphs as wide as their slots hold.
+set FONT=analysis\donor-fonts\font\NokiaStandardMultiscript.ttf
+if not exist "analysis\firmware-patches\main-font\b220-narrow.bin" (
+    if not exist "%FONT%" (
+        echo The main font was not found: %FONT%
+        echo Put NokiaStandardMultiscript.ttf there, see CUT_RU.md.
         pause
         exit /b 1
     )
@@ -19,7 +24,7 @@ if not exist "analysis\firmware-patches\k550-font\b220-narrow.bin" (
             exit /b 1
         )
     )
-    ".venv\Scripts\python.exe" -X utf8 -m tools.build_font_patch --font "analysis\donor-fonts\k550\Sans-Serif_Europe_Reg.ttf" --directory "analysis\firmware-patches\k550-font"
+    ".venv\Scripts\python.exe" -X utf8 -m tools.build_font_patch --font "%FONT%" --directory "analysis\firmware-patches\main-font" --large-height 15 --small-height 13 --wide-cells
     if errorlevel 1 (
         pause
         exit /b 1
