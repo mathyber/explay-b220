@@ -63,6 +63,16 @@ static void host_write(void *context, int stream, const char *bytes, uint32_t le
 
 static uint32_t host_ms(void *context) { (void)context; return (uint32_t)GetTickCount(); }
 
+/* Local time as milliseconds since 1970, like the phone (see JvmHost.now). */
+static int64_t host_now(void *context) {
+    (void)context;
+    FILETIME utc, local;
+    GetSystemTimeAsFileTime(&utc);
+    FileTimeToLocalFileTime(&utc, &local);
+    int64_t t = ((int64_t)local.dwHighDateTime<<32)|local.dwLowDateTime;
+    return (t-116444736000000000LL)/10000;
+}
+
 static uint16_t frame[JVM_SCREEN_WIDTH*JVM_SCREEN_HEIGHT];
 static uint16_t *host_screen(void *context) { (void)context; return frame; }
 static void host_flush(void *context, int x, int y, int w, int h) { (void)context; (void)x; (void)y; (void)w; (void)h; }
@@ -226,7 +236,7 @@ int main(int argc, char **argv) {
             }
         } else main_class = argv[i];
     }
-    JvmHost host = {host_read, host_release, host_write, host_ms, &h, host_screen, host_flush, host_stream, &card_io};
+    JvmHost host = {host_read, host_release, host_write, host_ms, &h, host_screen, host_flush, host_stream, &card_io, host_now};
     char manifest_main[128];
     if (!main_class && jvm_main_class(&host, manifest_main, sizeof(manifest_main))) main_class = manifest_main;
     if (!main_class) { fprintf(stderr, "usage: go1jvm [-heap KB] [-meta KB] [-cp dirs] [-jar app.jar] [-run ms] [-keys ms:code,...] [-shot file.ppm] [Main]\n"); return 64; }

@@ -211,20 +211,34 @@ static int draw_region(Thread *t, u32 *args, u32 *result) {
     Clip c = clip_of(&d, I(9), I(10), I(11), I(12));
     int swap = transform >= 4;
     i32 dw = swap ? h : w, dh = swap ? w : h;
-    for (i32 dy = 0; dy < dh; dy++) {
-        i32 ty = y+dy;
-        if (ty < c.y0 || ty >= c.y1) continue;
-        for (i32 dx = 0; dx < dw; dx++) {
-            i32 tx = x+dx;
-            if (tx < c.x0 || tx >= c.x1) continue;
-            i32 px, py;
-            transform_point(transform, dx, dy, w, h, &px, &py);
-            u32 at = (u32)((sy0+py)*src.width+sx0+px);
-            u32 a = src.alpha ? src.alpha[at] : 255;
+    /* Clip the destination rectangle once instead of testing every pixel:
+       games draw large backgrounds and leave most of them to the clip. */
+    i32 dx0 = c.x0-x > 0 ? c.x0-x : 0, dy0 = c.y0-y > 0 ? c.y0-y : 0;
+    i32 dx1 = c.x1-x < dw ? c.x1-x : dw, dy1 = c.y1-y < dh ? c.y1-y : dh;
+    if (dx0 >= dx1 || dy0 >= dy1) return 0;
+    /* Every transform is affine: the source index moves by a fixed step per
+       destination pixel and per destination row. */
+    i32 px, py, qx, qy, rx, ry;
+    transform_point(transform, dx0, dy0, w, h, &px, &py);
+    transform_point(transform, dx0+1, dy0, w, h, &qx, &qy);
+    transform_point(transform, dx0, dy0+1, w, h, &rx, &ry);
+    i32 step = (qy-py)*src.width+(qx-px), row_step = (ry-py)*src.width+(rx-px);
+    i32 row = (sy0+py)*src.width+sx0+px, n = dx1-dx0;
+    for (i32 dy = dy0; dy < dy1; dy++, row += row_step) {
+        u16 *to = &d.pixels[(y+dy)*d.width+x+dx0];
+        u8 *to_alpha = d.alpha ? &d.alpha[(y+dy)*d.width+x+dx0] : 0;
+        const u16 *from = src.pixels;
+        i32 at = row;
+        if (!src.alpha) {
+            for (i32 i = 0; i < n; i++, at += step) to[i] = from[at];
+            if (to_alpha) for (i32 i = 0; i < n; i++) to_alpha[i] = 255;
+            continue;
+        }
+        for (i32 i = 0; i < n; i++, at += step) {
+            u32 a = src.alpha[at];
             if (!a) continue;
-            u16 *p = &d.pixels[ty*d.width+tx];
-            *p = blend(*p, src.pixels[at], a);
-            if (d.alpha && a > d.alpha[ty*d.width+tx]) d.alpha[ty*d.width+tx] = (u8)a;
+            to[i] = a >= 255 ? from[at] : blend(to[i], from[at], a);
+            if (to_alpha && a > to_alpha[i]) to_alpha[i] = (u8)a;
         }
     }
     return 0;

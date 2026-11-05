@@ -113,6 +113,7 @@ class NativeVmTests(unittest.TestCase):
         uc.mem_map(0,0x800000);uc.mem_write(0,self.image)
         uc.mem_map(0x04000000,0x400000);uc.mem_map(0x40000000,0x10000)
         uc.mem_map(0x81003000,0x1000)  # system counter (api->ms)
+        uc.mem_map(0x89000000,0x1000)  # RTC (api->clock): all zero, 1980-01-01
         # Dynamic App Heap as a ThreadX byte pool with one free 1.5 MiB block;
         # only its headers are read, allocations come from the stub below.
         pool_start,pool_size=0x04300000,pool_free

@@ -351,6 +351,19 @@ static void host_write(void *context, int stream, const char *bytes, uint32_t le
 }
 
 static uint32_t host_ms(void *context) { (void)context; return api->ms(); }
+
+/* The RTC (api->clock) counts local seconds from 1980-01-01; the millisecond
+   counter gives the fraction, so the value moves smoothly. A change of the
+   phone clock by more than a few seconds is followed. */
+static int64_t host_now(void *context) {
+    static uint32_t ms0, s0;
+    static int set;
+    (void)context;
+    uint32_t ms = api->ms(), s = api->clock();
+    int64_t estimate = (int64_t)s0*1000+(uint32_t)(ms-ms0), rtc = (int64_t)s*1000;
+    if (!set || estimate < rtc-2000 || estimate > rtc+3000) { ms0 = ms; s0 = s; set = 1; estimate = rtc; }
+    return estimate+315532800LL*1000;  /* 1970-01-01 to 1980-01-01 */
+}
 static uint16_t *host_screen(void *context) { (void)context; return api->screen(); }
 static void host_flush(void *context, int x, int y, int w, int h) { (void)context; api->flush((u32)x, (u32)y, (u32)w, (u32)h); }
 
@@ -466,9 +479,10 @@ static const JvmIo phone_io = {io_open, io_read, io_write, io_seek, io_size, io_
 
 static void start(const u16 *path) {
     free_infos();
-    static JvmHost host = {host_read, host_release, host_write, host_ms, 0, host_screen, host_flush, host_stream, 0};
+    static JvmHost host = {host_read, host_release, host_write, host_ms, 0, host_screen, host_flush, host_stream, 0, 0};
     /* Older loaders lack file writing and the network: go1.Files/Net then throw IOException. */
     host.io = api->size >= sizeof(Go1Api) ? &phone_io : 0;
+    host.now = api->size >= sizeof(Go1Api) ? host_now : 0;
     u16 library_path[20];
     row = column = 0;
     for (u32 i = 0; i < LINES; i++) console[i][0] = 0;

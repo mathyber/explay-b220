@@ -73,6 +73,32 @@ class JvmTests(unittest.TestCase):
         self.assertEqual(files[0], 'JAVA/RMS/APP/STORES.IDX')
         self.assertTrue(files[1].startswith('JAVA/RMS/APP/scores_') and files[1].endswith('.RMS'), files)
 
+    def test_current_time_is_the_local_wall_clock(self):
+        import time
+        out = Path(self.folder.name)/'clocktest'
+        javac([ROOT/'jvm/iotests/ClockTest.java'], out)
+        run = subprocess.run([str(HOST), '-cp', f'{LIBRARY};{out}', 'ClockTest'],
+                             capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        seconds, calendar = run.stdout.splitlines()[:2]
+        # Local time shown as GMT, as on the phone (the RTC holds local time).
+        local = time.time()+time.localtime().tm_gmtoff
+        self.assertLess(abs(int(seconds)-local), 30)
+        shown = time.gmtime(int(seconds))
+        self.assertEqual(calendar, f'{shown.tm_year} {shown.tm_hour}:{shown.tm_min}')
+
+    def test_draw_region_transforms_clipping_and_alpha(self):
+        import hashlib
+        out = Path(self.folder.name)/'regiontest'
+        javac([ROOT/'jvm/iotests/RegionTest.java'], out)
+        run = subprocess.run([str(HOST), '-cp', f'{LIBRARY};{out}', 'RegionTest'],
+                             capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(run.stdout.splitlines()), 300)
+        # Checksums of the per-pixel implementation before the clipped, stepped blit.
+        self.assertEqual(hashlib.sha256(run.stdout.encode()).hexdigest(),
+                         '7fb9384590991f4942efc4a716afd5e78dd01b74f8338624c20439d4e90759c1')
+
     def make_jar(self, classes, path):
         """Classes deflated, small resources stored and deflated, a large one deflated (dynamic codes)."""
         import random, struct, zipfile

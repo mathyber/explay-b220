@@ -40,7 +40,7 @@ DEVICES = ('flash','lcd','dsp','irq','keypad','jpeg','rtc')
 EXCLUDED_FIELDS = {
     'profile','explore','fast_cpu','frame_callback','uc','ram','md','_cpsr_value',
     'mmio_windows','window_log_pointer','backlight_log_pointer','image_sha256','firmware',
-    'chip_id','known_registers','sliced','instructions_per_ms','slice_instructions','slice_credit','slice_clock_reads','slice_waiting','slice_ran','guest_deadline','idle_skips','idle_skipped_units','flash_overlays','spi','spi_controllers',
+    'chip_id','known_registers','sliced','instructions_per_ms','slice_instructions','slice_credit','slice_clock_reads','slice_waiting','slice_ran','guest_deadline','idle_skips','idle_skipped_units','idle_irq_entries','flash_overlays','spi','spi_controllers',
     'countdown_timers','lcd_ports','pages','pending_frame_stop','stop_after_frames',
     'irq_entries','key_callbacks','dma_transfers','mmio_counts','mmio_pc_counts',
     'mmio_samples','mmio_tail','blocks','block_tail','logs','milestones',

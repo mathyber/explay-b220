@@ -4,8 +4,10 @@ Register identities/window layout: Linux drivers/gpu/drm/tiny/ili9225.c.
 Bus lane and ID read sequence: this firmware's _LCM_ReadID at 0x6bd464.
 This does not model analog power, scan timing, gamma, or panel orientation pins.
 """
+import array
 import collections
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -47,6 +49,43 @@ class Lcd9225:
         self.data_hi = None
         self.write_word(word)
         return True
+
+    def write_data(self,data):
+        """Bytes on the data port, as write(True,2,byte<<8) per byte (LCD DMA).
+
+        GRAM writes in the usual mode (left to right, then down; window inside
+        the panel) are copied a row segment at a time; everything else takes
+        the per-word path."""
+        i = 0
+        if self.data_hi is not None and data:
+            self.write(True,2,data[0]<<8)
+            i = 1
+        r = self.registers
+        mode,x,y = r[3],r[0x20],r[0x21]
+        xmin,xmax,ymin,ymax = r[0x37],r[0x36],r[0x39],r[0x38]
+        if (self.index == 0x22 and mode&0x38 == 0x30 and 0 <= xmin <= x <= xmax < self.width and
+                0 <= ymin <= y <= ymax < self.height):
+            n = (len(data)-i)//2
+            words = array.array('H',bytes(data[i:i+2*n]))
+            if sys.byteorder == 'little':
+                words.byteswap()
+            k = 0
+            while k < n:
+                run = min(xmax-x+1,n-k)
+                start = y*self.width+x
+                self.gram[start:start+run] = words[k:k+run]
+                k += run
+                x += run
+                if x > xmax:
+                    x = xmin
+                    y += 1
+                    if y > ymax:
+                        y = ymin
+            self.pixel_writes += n
+            r[0x20],r[0x21] = x,y
+            i += 2*n
+        for byte in data[i:]:
+            self.write(True,2,byte<<8)
 
     def write_word(self,word):
         if self.index != 0x22:

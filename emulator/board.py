@@ -190,6 +190,7 @@ class Board:
         self.slice_ran = 0
         self.guest_deadline = None
         self.idle_skips = self.idle_skipped_units = 0
+        self.idle_irq_entries = 0
         if not self.sliced:
             uc.hook_add(UC_HOOK_BLOCK, self._block)
         idle = cpu.get('idle_entry') if self.sliced else None
@@ -687,8 +688,7 @@ class Board:
         payload = b''.join(bytes(self.uc.mem_read(source+row*row_stride,min(row_bytes,count-row*row_bytes)))
                            for row in range(rows))
         previous_pixels = self.lcd.pixel_writes
-        for byte in payload:
-            self.lcd.write(True,2,byte<<8)
+        self.lcd.write_data(payload)
         self._dma_complete(channel)
         self.dma_transfers.append(dict(channel=channel,pc=hex(pc),source=hex(source),target=hex(target),
                                        count=count,sha256=hashlib.sha256(payload).hexdigest(),
@@ -840,7 +840,18 @@ class Board:
         happens while an interrupt is pending or an event is due but not serviced.
         The firmware then runs its sleep code as usual. Time without work: the
         guest gets fewer instructions per millisecond, never more."""
-        if not self._running or (self.irq and self.irq.pending):
+        if not self._running:
+            return
+        if self.irq and self.block_serial >= self.next_timer_block:
+            self._sync_timer_events()
+        if self.irq and self.irq.pending:
+            cpsr = uc.reg_read(UC_ARM_REG_CPSR)
+            if not cpsr&0x80:
+                # IRQs are open here only for a few instructions per idle pass:
+                # take the interrupt now, as the CPU would, not at the slice end.
+                self._enter_irq(address,cpsr)
+                self.idle_irq_entries += 1
+                uc.reg_write(UC_ARM_REG_PC,0x18)
             return
         target = min(self.next_timer_block,self.block_serial+self.IDLE_MAX_UNITS)
         if self.guest_deadline is not None:
@@ -886,17 +897,21 @@ class Board:
             elif self.rtc:
                 self.sync_rtc()
         if self.irq and self.irq.pending and not cpsr&0x80:
-            # IRQ entry: bank SP/LR, save old CPSR, clear T, set I, preserve F/E.
-            uc.reg_write(UC_ARM_REG_CPSR,(cpsr&~0x3f)|0x92)
-            uc.reg_write(UC_ARM_REG_SPSR,cpsr)
-            uc.reg_write(UC_ARM_REG_LR,pc+4)
-            if len(self.irq_entries) < 1000:
-                self.irq_entries.append(dict(resume_pc=hex(pc),cpsr=hex(cpsr),pending=hex(self.irq.pending),
-                                             irq_sp=hex(uc.reg_read(UC_ARM_REG_SP))))
+            self._enter_irq(pc,cpsr)
             return 0x18
         if thumb is None:
             thumb = bool(cpsr&0x20)
         return pc|1 if thumb else pc
+
+    def _enter_irq(self,pc,cpsr):
+        """IRQ entry: bank SP/LR, save old CPSR, clear T, set I, preserve F/E."""
+        uc = self.uc
+        uc.reg_write(UC_ARM_REG_CPSR,(cpsr&~0x3f)|0x92)
+        uc.reg_write(UC_ARM_REG_SPSR,cpsr)
+        uc.reg_write(UC_ARM_REG_LR,pc+4)
+        if len(self.irq_entries) < 1000:
+            self.irq_entries.append(dict(resume_pc=hex(pc),cpsr=hex(cpsr),pending=hex(self.irq.pending),
+                                         irq_sp=hex(uc.reg_read(UC_ARM_REG_SP))))
 
     def _run_slices(self,entry,until,instructions):
         uc = self.uc

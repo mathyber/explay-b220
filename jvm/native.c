@@ -189,7 +189,7 @@ static int system_arraycopy(Thread *t, u32 *args, u32 *result) {
 static int system_time(Thread *t, u32 *args, u32 *result) {
     (void)args;
     Jvm *vm = thread_vm(t);
-    Wide w; w.l = vm->host.ms(vm->host.context);
+    Wide w; w.l = vm->host.now ? vm->host.now(vm->host.context) : vm->host.ms(vm->host.context);
     result[0] = w.w[0]; result[1] = w.w[1];
     return 0;
 }

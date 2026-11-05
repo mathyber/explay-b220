@@ -33,6 +33,10 @@ typedef struct JvmHost {
     /* Optional files and network for go1.Files / go1.Net (record stores,
        javax.microedition.io); 0 makes them throw IOException. */
     const struct JvmIo *io;
+    /* Optional wall clock for System.currentTimeMillis: milliseconds since
+       1970-01-01 in local time (the default TimeZone is GMT, so local time shows
+       as it is, as on phones of the time). 0: milliseconds from ms(). */
+    int64_t (*now)(void *context);
 } JvmHost;
 
 /* Files take UTF-8 paths such as "E:\\JAVA\\RMS\\GAME\\scores.rms". Nothing
