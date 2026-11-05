@@ -71,6 +71,7 @@ class InteractiveSession:
         self.debugger = debugger
         self.debug_stopped = False
         self.step_requested = False
+        self.governor = None
         if getattr(board,'rtc',None):
             # Battery-backed clock: start on the host's local time and mark the RTC
             # valid (status bit17, PS 0x18e6ea), so boot keeps it instead of 2012-01-01.
@@ -184,6 +185,21 @@ class InteractiveSession:
                     last_input_error=self.last_error,instruction_budget_scope='per execution slice')
         return value
 
+    def govern(self):
+        """Never faster than the phone: sleep while guest time is ahead of the wall
+        clock. A backlog (slow host, pause, breakpoint) is forgiven, not caught up."""
+        now = time.monotonic()
+        guest_ms = self.board.block_serial/128
+        if self.governor is None:
+            self.governor = (now,guest_ms)
+            return
+        wall0,guest0 = self.governor
+        ahead = (guest_ms-guest0)/1000-(now-wall0)
+        if ahead > 0:
+            time.sleep(min(ahead,0.5))
+        elif ahead < -0.25:
+            self.governor = (now,guest_ms)
+
     def follow_clock(self):
         if getattr(self.board,'rtc',None):
             self.board.rtc.follow(self.board.block_serial,host_seconds())
@@ -217,6 +233,7 @@ class InteractiveSession:
             self.network.update()
             if self.paused and not self.step_requested:
                 self.publish()
+                self.governor = None  # restart the guest/wall comparison after a pause
                 time.sleep(0.02)
                 continue
             if not self.ready and self.active_seconds >= self.args.seconds:
@@ -232,11 +249,21 @@ class InteractiveSession:
             busy = getattr(keypad,'held',None) or getattr(keypad,'queue',None)
             slice_seconds = 0.03 if busy else 0.2
             self.follow_clock()
+            board = self.board
+            # With a calibrated CPU (profile "cpu") a slice gets the instructions
+            # the phone would run in slice_seconds, and the governor below keeps
+            # guest time from running ahead of the wall clock.
+            budget = (int(board.instructions_per_ms*slice_seconds*1000) if getattr(board,'sliced',False)
+                      else self.args.instructions)
+            wall_limit = slice_seconds*4 if getattr(board,'sliced',False) else slice_seconds
             if self.debugger:
-                step = self.debugger.run(self.args.instructions,slice_seconds,until=self.args.until,step=self.step_requested)
+                step = self.debugger.run(budget,wall_limit,until=self.args.until,step=self.step_requested)
             else:
-                step = self.board.run(self.args.instructions,slice_seconds,entry=pc,until=self.args.until,report=False)
+                step = board.run(budget,wall_limit,entry=pc,until=self.args.until,report=False,
+                                 **(dict(guest_seconds=slice_seconds) if getattr(board,'sliced',False) else {}))
             self.step_requested = False
+            if getattr(board,'sliced',False):
+                self.govern()
             self.active_seconds += step['elapsed_seconds']
             self.network.update()
             if step['stop']['reason'] in ('breakpoint','debug step'):

@@ -2,6 +2,12 @@
   "name": "Explay B220 L7A (inferred, no physical-device measurements)",
   "ps_sha256": "7bd1dd7b3ce3a3efa65f957eb24e4e4b3114775c8b7770121f98b39816bacbeb",
   "chip_id": "0x66007019",
+  "cpu": {
+    "instructions_per_ms": 20000,
+    "slice_ms": 0.5,
+    "idle_entry": {"address": "0x495dda", "code": "b5f820c0", "evidence": "Idle sleep entry (PS 0x495dda): masks IRQ/FIQ (0x6a488c 0xc0), reads the ms counter, checks the peripheral sleep table (0x1e7648), saves GPIO state, sleeps and restores (0x495f24). No WFI anywhere in the PS or SRAM code; the halt is a power-controller sequence the emulator does not stop on, so idle re-entered it ~4000 times per guest second. The emulator skips guest time here to the next countdown event (at most 10 ms)."},
+    "evidence": "Emulated CPU speed: the guest gets this many instructions per millisecond of its own time (timers, RTC, frames). Deliberately below the real B220 (ARM926EJ-S, SC6600L, assumed about 80-100 MHz executing from NOR): no measurement on hardware yet; apps/card_bench.c run on the phone and in the emulator gives the factor. Interrupts, timers and keys are serviced between slices of slice_ms."
+  },
   "unimplemented_peripherals": [],
   "shared_memory": [
     {

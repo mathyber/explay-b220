@@ -32,7 +32,7 @@ CP15 = ((1,0,0),(2,0,0),(3,0,0),(5,0,0),(5,0,1),(6,0,0),
 STATE_FIELDS = {
     'lcd_backlight','last_window_id','nv_seed','loaded_flash','storage',
     'dma_gate','timer','block_serial','next_timer_block','timer_epoch',
-    'lcd_dma','dma_enabled','full_lcd_frames','_lcd_frame_pixels','adc',
+    'lcd_dma','dma_enabled','full_lcd_frames','_lcd_frame_pixels','adc','time_remainder',
 }
 DEVICES = ('flash','lcd','dsp','irq','keypad','jpeg','rtc')
 # Constructor-derived configuration, host execution controls and diagnostics.
@@ -40,7 +40,7 @@ DEVICES = ('flash','lcd','dsp','irq','keypad','jpeg','rtc')
 EXCLUDED_FIELDS = {
     'profile','explore','fast_cpu','frame_callback','uc','ram','md','_cpsr_value',
     'mmio_windows','window_log_pointer','backlight_log_pointer','image_sha256','firmware',
-    'chip_id','known_registers','flash_overlays','spi','spi_controllers',
+    'chip_id','known_registers','sliced','instructions_per_ms','slice_instructions','slice_credit','slice_clock_reads','slice_waiting','slice_ran','guest_deadline','idle_skips','idle_skipped_units','flash_overlays','spi','spi_controllers',
     'countdown_timers','lcd_ports','pages','pending_frame_stop','stop_after_frames',
     'irq_entries','key_callbacks','dma_transfers','mmio_counts','mmio_pc_counts',
     'mmio_samples','mmio_tail','blocks','block_tail','logs','milestones',
@@ -380,7 +380,7 @@ def _load(archive,profile,frame_callback,firmware_path):
         initial = getattr(board,key)
         if initial is not None and type(value) is not type(initial) and not (key == 'nv_seed' and value is None):
             raise SnapshotError(f'Invalid board field type: {key}')
-    if any(type(state[k]) is not int or state[k] < 0 for k in ('block_serial','next_timer_block','timer_epoch','dma_enabled','full_lcd_frames','_lcd_frame_pixels')):
+    if any(type(state[k]) is not int or state[k] < 0 for k in ('block_serial','next_timer_block','timer_epoch','dma_enabled','full_lcd_frames','_lcd_frame_pixels','time_remainder')):
         raise SnapshotError('Invalid virtual clock/DMA/frame counters')
     for key,values in device_states.items():
         vars(devices[key]).update(values)

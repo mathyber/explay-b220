@@ -177,10 +177,38 @@ class Board:
         self.md = {False: Cs(CS_ARCH_ARM, CS_MODE_ARM | CS_MODE_BIG_ENDIAN),
                    True: Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_BIG_ENDIAN)}
         self.uc.reg_write(UC_ARM_REG_CPSR, 0x2d3)
-        uc.hook_add(UC_HOOK_BLOCK, self._block)
+        # Time: block_serial counts 1/128 ms of guest time. With a profile CPU
+        # speed the CPU runs in instruction slices (no per-block Python hook)
+        # and time advances by instructions; otherwise one block = one unit.
+        cpu = self.profile.get('cpu')
+        self.sliced = bool(cpu) and self.fast_cpu
+        self.instructions_per_ms = int(cpu['instructions_per_ms']) if cpu else 0
+        self.slice_instructions = max(100,int(self.instructions_per_ms*float(cpu.get('slice_ms',0.5)))) if cpu else 0
+        self.time_remainder = 0
+        self.slice_credit = self.slice_clock_reads = 0
+        self.slice_waiting = False
+        self.slice_ran = 0
+        self.guest_deadline = None
+        self.idle_skips = self.idle_skipped_units = 0
+        if not self.sliced:
+            uc.hook_add(UC_HOOK_BLOCK, self._block)
+        idle = cpu.get('idle_entry') if self.sliced else None
+        if idle:
+            # The sleep entry of the idle task: on the phone the CPU halts there
+            # until an interrupt. Only hooked when the code is what was analysed.
+            address,expected = int(idle['address'],16),bytes.fromhex(idle['code'])
+            if bytes(uc.mem_read(address,len(expected))) == expected:
+                uc.hook_add(UC_HOOK_CODE,self._idle,begin=address,end=address)
         uc.hook_add(UC_HOOK_MEM_INVALID, self._invalid)
         uc.hook_add(UC_HOOK_MEM_WRITE,self._nor_write,begin=0,end=0x7fffff)
-        uc.hook_add(UC_HOOK_MEM_READ,self._nor_read,begin=0,end=0x7fffff)
+        if self.sliced:
+            # NOR command-mode reads (status, autoselect) were only seen at the
+            # command page and in the settings area after the PS; array reads of
+            # the PS stay out of Python.
+            uc.hook_add(UC_HOOK_MEM_READ,self._nor_read,begin=0,end=0xfff)
+            uc.hook_add(UC_HOOK_MEM_READ,self._nor_read,begin=len(image)&~0xffff,end=0x7fffff)
+        else:
+            uc.hook_add(UC_HOOK_MEM_READ,self._nor_read,begin=0,end=0x7fffff)
         if self.dsp:
             uc.hook_add(UC_HOOK_MEM_READ|UC_HOOK_MEM_WRITE,self._dsp_mailbox,begin=0x10000000,end=0x10000007)
         for start,end in self.mmio_windows:
@@ -351,6 +379,8 @@ class Board:
         pc = uc.reg_read(UC_ARM_REG_PC)
         word = address & ~3
         write = access == UC_MEM_WRITE
+        if not write and self.sliced:
+            self._mmio_read_time()
         page = address & ~0xfff
         if page not in self.pages:
             uc.mem_map(page,0x1000,UC_PROT_READ|UC_PROT_WRITE)
@@ -446,6 +476,8 @@ class Board:
                 if write:
                     device.write(word-timer_base,value,self.block_serial)
                 else:
+                    if word-timer_base == 4:
+                        self._mmio_read_time(clock=True)
                     value = device.read(word-timer_base,self.block_serial)
                     uc.mem_write(address,value.to_bytes(4,'big'))
                 if self.fast_cpu:
@@ -571,6 +603,7 @@ class Board:
                 ack = self.dma_gate['ack_mask']
                 register_value = (register_value & ~ack) | (ack if register_value & self.dma_gate['request_mask'] else 0)
             if self.timer and word == self.timer['counter']:
+                self._mmio_read_time(clock=True)
                 enabled = self.storage.get(self.timer['control'],0)&self.timer['enable_mask']
                 register_value = ((self.block_serial-self.timer_epoch)//self.timer['blocks_per_tick'])&0xffffffff if enabled else 0
             value = (register_value >> shift) & mask
@@ -749,7 +782,155 @@ class Board:
             self.milestones.append(dict(pc=hex(address),r0=hex(uc.reg_read(UC_ARM_REG_R0)),
                                         normalized_chip=bytes(uc.mem_read(0x04296450,4)).hex()))
 
-    def run(self, instructions=2000000, seconds=20, entry=0, until=0xffffffff,report=True):
+    # ---------- instruction slices (profile "cpu") ----------
+
+    def _advance(self,instructions):
+        """Guest time for executed instructions: 128 units = 1 ms at instructions_per_ms."""
+        total = instructions*128+self.time_remainder
+        self.block_serial += total//self.instructions_per_ms
+        self.time_remainder = total%self.instructions_per_ms
+
+    POLL_INSTRUCTIONS = 16    # instructions credited per MMIO read (a polling-loop iteration)
+    POLL_STREAK = 4           # time-register reads in one slice that make it a wait loop
+
+    def _mmio_read_time(self,clock=False):
+        """Guest time inside a slice, which otherwise only moves when the slice ends.
+
+        Each MMIO read credits POLL_INSTRUCTIONS executed instructions, so devices
+        see time pass while the CPU polls them. Past POLL_STREAK reads of a time
+        register (system counter, countdown value) in one slice the code is a wait
+        loop, and each further read moves half a slice: the wait ends at the same
+        guest time with fewer iterations. Credited time is not added again when
+        the slice ends, so the guest never gets more instructions per millisecond."""
+        if not self.sliced or not self._running:
+            return
+        credit = self.POLL_INSTRUCTIONS
+        if clock:
+            credit = 0  # _mmio has credited this read already
+            self.slice_clock_reads += 1
+            if self.slice_clock_reads > self.POLL_STREAK and self._may_skip_wait():
+                # A wait loop: the rest of the slice is spent waiting; end it now.
+                # Instructions run so far are estimated from the credited polls.
+                self.slice_ran = max(1,self.slice_credit)
+                credit = self.slice_instructions
+                self.slice_waiting = True
+                self.uc.emu_stop()
+        self.slice_credit += credit
+        self._advance(credit)
+
+    def _may_skip_wait(self):
+        """Whether a wait loop may end its slice early.
+
+        With IRQs masked only while no IRQ is pending or due: a slice must then
+        run its full length and end somewhere _service can deliver the IRQ. Code
+        that reads the clocks with IRQs off on every pass (the idle sleep check)
+        would otherwise end every slice inside the masked section and starve
+        interrupts for good."""
+        if not self.uc.reg_read(UC_ARM_REG_CPSR)&0x80:
+            return True
+        return not (self.irq and self.irq.pending) and self.block_serial < self.next_timer_block
+
+    IDLE_MAX_UNITS = 10*128   # at most 10 ms of halt per idle entry
+
+    def _idle(self,uc,address,size,_):
+        """The idle task is about to sleep: model the halt until the next interrupt.
+
+        Guest time jumps to the next countdown event (at most IDLE_MAX_UNITS and the
+        run's guest deadline), not past it: the event is serviced first, and no jump
+        happens while an interrupt is pending or an event is due but not serviced.
+        The firmware then runs its sleep code as usual. Time without work: the
+        guest gets fewer instructions per millisecond, never more."""
+        if not self._running or (self.irq and self.irq.pending):
+            return
+        target = min(self.next_timer_block,self.block_serial+self.IDLE_MAX_UNITS)
+        if self.guest_deadline is not None:
+            target = min(target,self.guest_deadline)
+        if target > self.block_serial:
+            self.idle_skips += 1
+            self.idle_skipped_units += target-self.block_serial
+            self.block_serial = target
+
+    def _slice_length(self,budget):
+        n = min(budget,self.slice_instructions)
+        if self.next_timer_block < (1<<62):
+            # Stop no later than the next countdown event, so its IRQ is on time.
+            units = self.next_timer_block-self.block_serial
+            if units <= 0:
+                return 1
+            n = min(n,max(1,(units*self.instructions_per_ms-self.time_remainder+127)//128))
+        return n
+
+    def _service(self,pc,thumb=None):
+        """Between slices: what _block does per block. Returns the PC to resume at
+        (with the Thumb bit; thumb None takes it from CPSR)."""
+        uc = self.uc
+        if self.flash_overlays:
+            self._restore_flash_overlays()
+        cpsr = uc.reg_read(UC_ARM_REG_CPSR)
+        if not cpsr & 0x200:
+            uc.reg_write(UC_ARM_REG_CPSR,cpsr|0x200)
+            cpsr |= 0x200
+            if len(self.endian_repairs) < 100:
+                self.endian_repairs.append(hex(pc))
+        if self.keypad and self.irq:
+            if cpsr&0x1f != 0x12:
+                self.keypad.pump(self.block_serial,self.storage.get(0x8a000018,0))
+            if bool(self.irq.raw&0x100) != self.keypad.pending:
+                self.irq.set_line(8,self.keypad.pending)
+            power_pending = bool(self.keypad.power_raw&self.storage.get(0x8a000018,0))
+            if bool(self.irq.raw&0x40) != power_pending:
+                self.irq.set_line(6,power_pending)
+        if self.irq:
+            if self.block_serial >= self.next_timer_block:
+                self._sync_timer_events()
+            elif self.rtc:
+                self.sync_rtc()
+        if self.irq and self.irq.pending and not cpsr&0x80:
+            # IRQ entry: bank SP/LR, save old CPSR, clear T, set I, preserve F/E.
+            uc.reg_write(UC_ARM_REG_CPSR,(cpsr&~0x3f)|0x92)
+            uc.reg_write(UC_ARM_REG_SPSR,cpsr)
+            uc.reg_write(UC_ARM_REG_LR,pc+4)
+            if len(self.irq_entries) < 1000:
+                self.irq_entries.append(dict(resume_pc=hex(pc),cpsr=hex(cpsr),pending=hex(self.irq.pending),
+                                             irq_sp=hex(uc.reg_read(UC_ARM_REG_SP))))
+            return 0x18
+        if thumb is None:
+            thumb = bool(cpsr&0x20)
+        return pc|1 if thumb else pc
+
+    def _run_slices(self,entry,until,instructions):
+        uc = self.uc
+        left = instructions
+        pc = self._service(entry&~1,thumb=bool(entry&1))  # the caller's Thumb bit, as emu_start takes it
+        while left > 0:
+            n = self._slice_length(left)
+            self.slice_credit = self.slice_clock_reads = 0
+            self.slice_waiting = False
+            uc.emu_start(pc,until,count=n)
+            if self.slice_waiting:  # a wait loop ended the slice: its time is credited
+                left -= min(n,self.slice_ran)
+            else:
+                left -= n
+                self._advance(max(0,n-self.slice_credit))
+            if self.stop:
+                return
+            here = uc.reg_read(UC_ARM_REG_PC)
+            if here == until:
+                return
+            if self.pending_frame_stop:
+                self.stop = self.pending_frame_stop
+                self.stop['pc'] = hex(here)
+                self.pending_frame_stop = None
+                return
+            if time.monotonic() >= self.deadline:
+                self.stop = dict(reason='wall time budget',pc=hex(here))
+                return
+            if self.guest_deadline is not None and self.block_serial >= self.guest_deadline:
+                self.stop = dict(reason='instruction budget',pc=hex(here))  # the slice's share of time is used
+                return
+            pc = self._service(here)
+
+    def run(self, instructions=2000000, seconds=20, entry=0, until=0xffffffff,report=True,guest_seconds=None):
         if self._running:
             raise ValueError('CPU execution is already active')
         if instructions <= 0 or not 0 < seconds < float('inf'):
@@ -760,7 +941,14 @@ class Board:
         error = None
         self._running = True
         try:
-            self.uc.emu_start(entry, until, count=instructions)
+            if self.sliced:
+                # guest_seconds caps guest time too: idle wait slices use almost no
+                # instruction budget, so the budget alone could run far ahead.
+                self.guest_deadline = (self.block_serial+int(guest_seconds*128000)
+                                       if guest_seconds else None)
+                self._run_slices(entry,until,instructions)
+            else:
+                self.uc.emu_start(entry, until, count=instructions)
         except UcError as exc:
             error = str(exc)
         finally:
