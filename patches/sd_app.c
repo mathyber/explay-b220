@@ -333,8 +333,16 @@ static void api_flush(u32 x,u32 y,u32 w,u32 h) {
     FN(0x1d081f,Invalidate)(dev,point(x,y),point(x+w-1,y+h-1));
 }
 /* RAM word incremented by the 1 ms system tick (measured against virtual time). */
-#define MS_COUNTER (*(volatile u32 *)0x042ccec0u)
-static u32 api_ms(void) { return MS_COUNTER; }
+/* The firmware millisecond counter (PS 0x484f88 double-reads it until stable;
+   the delay loop 0x48a9ec waits on it). Not the word 0x042ccec0: that is only
+   the time saved when the idle task goes to sleep, so it stands still while a
+   program keeps the CPU busy. */
+#define MS_COUNTER (*(volatile u32 *)0x81003004u)
+static u32 api_ms(void) {
+    u32 a, b;
+    do { a = MS_COUNTER; b = MS_COUNTER; } while (a != b);
+    return a;
+}
 /* SFS_SetFilePointer(handle, 64-bit offset in r1:r2 (ADS order: high, low), origin 0 = begin). */
 typedef u32 (*Seek)(u32,u32,u32,u32);
 static u32 api_seek(u32 handle,u32 offset) { return FN(0x5ee527,Seek)(handle,0,offset,0); }

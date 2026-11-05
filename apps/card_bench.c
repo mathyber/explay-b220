@@ -92,6 +92,7 @@ static void draw(void) {
     api->text(10, "BENCHMARK", 0xffe0);
     for (u32 i = 0; i < line_count; i++) api->text(40+i*24, lines[i], 0xffff);
     api->text(130, "OK: again", 0x07ff);
+    api->text(150, "Right soft: exit", 0x07ff);
 }
 
 __attribute__((used, section(".entry")))
@@ -100,5 +101,6 @@ u32 go1_main(const Go1Api *program_api, u32 message, u32 parameter) {
     api = program_api;
     if (message == GO1_OPEN || message == GO1_KEY_OK) { bench(); draw(); }
     else if (message == GO1_PAINT) draw();
+    else if (message == GO1_KEY_SOFT_RIGHT) api->exit();
     return 1;
 }

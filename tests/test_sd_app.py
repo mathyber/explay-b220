@@ -112,6 +112,7 @@ class NativeVmTests(unittest.TestCase):
         uc.ctl_set_cpu_model(UC_CPU_ARM_926)
         uc.mem_map(0,0x800000);uc.mem_write(0,self.image)
         uc.mem_map(0x04000000,0x400000);uc.mem_map(0x40000000,0x10000)
+        uc.mem_map(0x81003000,0x1000)  # system counter (api->ms)
         # Dynamic App Heap as a ThreadX byte pool with one free 1.5 MiB block;
         # only its headers are read, allocations come from the stub below.
         pool_start,pool_size=0x04300000,pool_free
@@ -209,8 +210,8 @@ class NativeVmTests(unittest.TestCase):
             uc.reg_write(UC_ARM_REG_R0+2,param)
             if msg==0xf020:
                 uc.mem_write(param,bytes([7]))  # stub timer id
-                clock=int.from_bytes(uc.mem_read(0x042ccec0,4),'big')+20  # 20 ms per tick
-                uc.mem_write(0x042ccec0,clock.to_bytes(4,'big'))
+                clock=int.from_bytes(uc.mem_read(0x81003004,4),'big')+20  # system counter, 20 ms per tick
+                uc.mem_write(0x81003004,clock.to_bytes(4,'big'))
             uc.emu_start(entrypoint or self.entry,0x4000f000,count=budget)
             self.assertEqual(uc.reg_read(UC_ARM_REG_PC),0x4000f000)
             self.assertEqual(uc.reg_read(UC_ARM_REG_SP),0x4000e000)

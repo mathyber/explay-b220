@@ -64,6 +64,6 @@ u32 go1_main(const Go1Api *program_api, u32 message, u32 parameter) {
     }
     if (message == GO1_OPEN) { result = check(); draw(); }
     else if (message == GO1_PAINT) draw();
-    else if (message == GO1_KEY_OK) api->exit();
+    else if (message == GO1_KEY_OK || message == GO1_KEY_SOFT_RIGHT) api->exit();
     return 1;
 }

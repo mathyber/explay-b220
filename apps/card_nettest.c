@@ -91,6 +91,7 @@ u32 go1_main(const Go1Api *program_api, u32 message, u32 parameter) {
     else if (message == GO1_TIMER) tick();
     else if (message == GO1_PAINT) draw();
     else if (message == GO1_KEY_OK && !step) { begin(); draw(); }
+    else if (message == GO1_KEY_SOFT_RIGHT) api->exit();
     else if (message == GO1_CLOSE && sock) { api->tcp_close(sock); sock = 0; }
     return 1;
 }

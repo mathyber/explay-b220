@@ -26,7 +26,7 @@ u32 go1_main(const Go1Api *api, u32 message, u32 parameter) {
     if (api->version != GO1_API_VERSION || api->size < sizeof(Go1Api) || message == GO1_CLOSE) return 0;
     u16 *screen = api->screen();
     if (message == GO1_OPEN) api->timer(500, 1);
-    if (message == GO1_KEY_OK) { api->exit(); return 1; }
+    if (message == GO1_KEY_OK || message == GO1_KEY_SOFT_RIGHT) { api->exit(); return 1; }
     if (message == GO1_KEY_UP) step = 0;
     if (message == GO1_KEY_DOWN) step = 4;
     if (message == GO1_TIMER) {
