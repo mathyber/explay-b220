@@ -810,6 +810,8 @@ static void wake_threads(Jvm *vm) {
     }
 }
 
+#define THREAD_SLICE 16000
+
 int jvm_run(Jvm *vm, u32 budget) {
     jvm_current_vm = vm;
     if (vm->status == JVM_ERROR) return JVM_ERROR;
@@ -819,7 +821,12 @@ int jvm_run(Jvm *vm, u32 budget) {
         for (Thread *t = vm->threads; t && budget; t = t->next) {
             if (t->state != THREAD_RUNNABLE) continue;
             any = 1;
-            u32 slice = budget < 4000 ? budget : 4000;
+            /* Bytecodes before switching threads. Phone JVMs switch on a timer
+               of tens of milliseconds; switching every few thousand bytecodes
+               exposes races in MIDlets (Opera Mini 4.2 feeds its 4-byte entropy
+               buffer from two threads under different locks and overran it at
+               startup with 4000). A thread that sleeps or waits yields at once. */
+            u32 slice = budget < THREAD_SLICE ? budget : THREAD_SLICE;
             vm->current = t;
             execute(vm, t, slice);
             budget -= slice;
