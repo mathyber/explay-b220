@@ -30,7 +30,36 @@ typedef struct JvmHost {
     /* Optional: open a resource for reading on demand (see jar.h); with
        stream 0 only report its size. Returns 0 when it does not exist. */
     int (*stream)(void *context, const char *path, struct JarStream *stream, uint32_t *size);
+    /* Optional files and network for go1.Files / go1.Net (record stores,
+       javax.microedition.io); 0 makes them throw IOException. */
+    const struct JvmIo *io;
 } JvmHost;
+
+/* Files take UTF-8 paths such as "E:\\JAVA\\RMS\\GAME\\scores.rms". Nothing
+   blocks: the network calls return JVM_IO_AGAIN and Java code waits with
+   Thread.sleep, so other Java threads and the phone keep running. */
+#define JVM_IO_AGAIN 0xfffffffeu
+#define JVM_IO_ERROR 0xffffffffu
+enum { JVM_FILE_READ, JVM_FILE_CREATE, JVM_FILE_UPDATE, JVM_FILE_APPEND };
+typedef struct JvmIo {
+    uint32_t (*open)(void *context, const char *path, int mode);  /* handle or 0 */
+    uint32_t (*read)(void *context, uint32_t file, void *buffer, uint32_t length);  /* bytes or ERROR */
+    uint32_t (*write)(void *context, uint32_t file, const void *data, uint32_t length);
+    int (*seek)(void *context, uint32_t file, uint32_t position);  /* 0 on success */
+    uint32_t (*size)(void *context, uint32_t file);
+    void (*close)(void *context, uint32_t file);
+    int (*remove)(void *context, const char *path);   /* 0 on success */
+    int (*make_dir)(void *context, const char *path); /* 0 on success or when it exists */
+    /* Packet data and TCP as in the GO1 API; 0 when this host has no network. */
+    uint32_t (*net_start)(void *context);  /* starts packet data; 0 off, 1 connecting, 2 ready */
+    uint32_t (*net_state)(void *context);  /* the same state without starting anything */
+    uint32_t (*dns)(void *context, const char *host);  /* IPv4 or 0 while pending */
+    uint32_t (*tcp_open)(void *context);
+    uint32_t (*tcp_connect)(void *context, uint32_t socket, uint32_t ipv4, uint32_t port);
+    uint32_t (*tcp_send)(void *context, uint32_t socket, const void *data, uint32_t length);
+    uint32_t (*tcp_recv)(void *context, uint32_t socket, void *buffer, uint32_t length);
+    void (*tcp_close)(void *context, uint32_t socket);
+} JvmIo;
 
 /* Resources at least this large are streamed when the host can; smaller ones
    are read whole. */

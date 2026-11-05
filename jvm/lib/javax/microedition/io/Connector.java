@@ -6,9 +6,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 
-/* Generic Connection Framework. No protocol is available yet: the network
-   (http, socket) needs firmware sockets, and file/sms are not implemented, so
-   every open reports ConnectionNotFoundException as a phone without them would. */
+/* Generic Connection Framework: socket:// and http:// over the firmware's
+   packet data (go1.Net). https needs TLS in the VM and file/sms are not
+   implemented: they report ConnectionNotFoundException as such a phone would. */
 public class Connector {
     public static final int READ = 1;
     public static final int WRITE = 2;
@@ -29,7 +29,18 @@ public class Connector {
         if (mode < READ || mode > READ_WRITE) throw new IllegalArgumentException("Bad mode");
         int colon = name.indexOf(':');
         if (colon <= 0) throw new IllegalArgumentException("No scheme: " + name);
-        throw new ConnectionNotFoundException("Not supported: " + name.substring(0, colon));
+        String scheme = name.substring(0, colon).toLowerCase();
+        if (scheme.equals("http")) return new go1.HttpClient(name);
+        if (scheme.equals("socket") && name.startsWith("//", colon+1)) {
+            String address = name.substring(colon+3);
+            int semicolon = address.indexOf(';');
+            if (semicolon >= 0) address = address.substring(0, semicolon);
+            int port = address.lastIndexOf(':');
+            if (port <= 0 || port == address.length()-1)
+                throw new ConnectionNotFoundException("Server sockets are not supported: " + name);
+            return new go1.TcpConnection(address.substring(0, port), Integer.parseInt(address.substring(port+1)));
+        }
+        throw new ConnectionNotFoundException("Not supported: " + scheme);
     }
 
     public static InputStream openInputStream(String name) throws IOException {

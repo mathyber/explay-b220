@@ -137,11 +137,26 @@ class NativeVmTests(unittest.TestCase):
             args=[uc.reg_read(UC_ARM_REG_R0+i) for i in range(4)]
             r0,r1,r2,r3=args;result=0
             self.assertEqual(uc.reg_read(UC_ARM_REG_SP)&7,0)
-            if pc==0x5edc5e:
+            if pc==0x5edc5e:  # SFS_CreateFile: modes 0x31 read, 0x22 create, 0x33 update, 0x52 append
                 name=wide(r0)
                 calls['opens'].append((name,r1))
+                if r1==0x22 or (r1==0x52 and name not in files):
+                    files[name]=b''
                 if name in files:
-                    result=len(handles)+1;handles[result]=name;positions[result]=0
+                    result=len(handles)+1;handles[result]=name
+                    positions[result]=len(files[name]) if r1==0x52 else 0
+            elif pc==0x5ee4d0:  # SFS_WriteFile(handle, data, size, &written, 0)
+                name=handles[r0];at=positions[r0];data=bytes(uc.mem_read(r1,r2));old=files[name]
+                files[name]=old[:at]+data+old[at+len(data):];positions[r0]=at+len(data)
+                uc.mem_write(r3,len(data).to_bytes(4,'big'));calls.setdefault('writes',[]).append((name,data))
+            elif pc==0x5edf3c:result=0 if files.pop(wide(r0),None) is not None else 5  # SFS_DeleteFile
+            elif pc==0x5ede70:  # SFS_CreateDirectory: an error when it exists
+                folders=calls.setdefault('folders',set());name=wide(r0).lower()
+                result=0x10 if name in folders else 0;folders.add(name)
+            elif pc==0x5ee04a:  # SFS_RenameFile(from, to, 0)
+                old,new=wide(r0),wide(r1)
+                result=5 if old not in files or new in files else 0
+                if not result:files[new]=files.pop(old)
             elif pc==0x5ee59e:uc.mem_write(r1,len(files[handles[r0]]).to_bytes(4,'big'))
             elif pc==0x6a5438:
                 calls['allocation_sizes'].append(r0);calls['heaps'].append(r1);result=heap_next
@@ -179,7 +194,8 @@ class NativeVmTests(unittest.TestCase):
             uc.reg_write(UC_ARM_REG_R0,result)
             uc.reg_write(UC_ARM_REG_PC,uc.reg_read(UC_ARM_REG_LR))
         for pc in (0x60f74e,0x4c5b68,0x5edc5e,0x5ee59e,0x6a5438,0x5ee49e,0x5ee484,0x6a5468,0x4c65ac,0x4cf432,0x4d7da2,
-                   0x1f55ee,0x1f5640,0x4d67d2,0x1d081e,0x5ee526,0x5ee5c0,0x5ee8ba,0x5ee94a):
+                   0x1f55ee,0x1f5640,0x4d67d2,0x1d081e,0x5ee526,0x5ee5c0,0x5ee8ba,0x5ee94a,
+                   0x5ee4d0,0x5edf3c,0x5ede70,0x5ee04a):
             uc.hook_add(UC_HOOK_CODE,stub,begin=pc,end=pc)
         class Guest:pass
         guest=Guest();guest.uc=uc
@@ -415,6 +431,20 @@ class NativeVmTests(unittest.TestCase):
         event,calls=self.fixture(bytes(broken))
         event(0xf021)
         self.assertEqual(event(0xfa1b)['status'],5)
+
+    def test_program_writes_appends_renames_and_deletes_files(self):
+        program=compile_native(ROOT/'apps/card_files.c')
+        event,calls=self.fixture(program)
+        event(0xf021);result=event(0xfa1b)
+        self.assertEqual(result['status'],0)
+        self.assertIn('FILES OK',calls['texts'])
+        self.assertEqual([m for n,m in calls['opens'] if n.endswith('A.TXT')][:3],[0x22,0x52,0x33])
+        self.assertEqual(calls['writes'],[(r'E:\GO1TEST\A.TXT',b'hello'),(r'E:\GO1TEST\A.TXT',b' world'),
+                                          (r'E:\GO1TEST\A.TXT',b'J')])
+        self.assertEqual(calls['folders'],{r'e:\go1test'})
+        self.assertFalse([n for n in calls['opens'] if 'GO1TEST' in n[0] and n[0] not in (r'E:\GO1TEST\A.TXT',r'E:\GO1TEST\B.TXT')])
+        event(0xfa1b);event(0xf022)
+        self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))
 
     def test_title_replaces_the_file_name_in_the_list(self):
         program=compile_native(ROOT/'apps/card_native.c',icon=ROOT/'jvm/phone_main.png',title='Тест: Ява')

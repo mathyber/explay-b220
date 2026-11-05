@@ -150,7 +150,7 @@ def main():
         program, anchors = build()
         from .install_sd_app import install
         card = args.card or default_card()
-        install(OUTPUT/'BROWSER.GO1', card, ensure=True)
+        install(OUTPUT/'BROWSER.GO1', card)  # replaces an older build
     except (OSError, ValueError) as exc:
         parser.error(f'{exc}. Close the emulator before changing its SD image.')
     print(f'BROWSER.GO1: {len(program)} bytes, {anchors} trust anchors -> {card}')

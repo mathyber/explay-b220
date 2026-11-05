@@ -1028,7 +1028,7 @@ static u32 scroll, selected, editing;
 
 static const char start_page[] =
     "<title>Браузер GO1</title><h1>Браузер GO1</h1>"
-    "<p>Левая экранная — адрес или поиск, правая — назад. Вверх/вниз — ссылки, влево/вправо — страницы. * — обновить, # — сюда.</p>"
+    "<p>Левая экранная — адрес или поиск, правая — назад. Вверх/вниз — ссылки, влево/вправо — страницы. * — обновить, 0 — в закладки, # — сюда.</p>"
     "<ul><li><a href=\"https://lite.duckduckgo.com/lite/\">DuckDuckGo Lite</a> — поиск"
     "<li><a href=\"https://ru.m.wikipedia.org/\">Википедия</a>"
     "<li><a href=\"https://text.npr.org/\">NPR Text</a>"
@@ -1046,6 +1046,123 @@ static void show_internal(const char *html, const char *address_text) {
     copy(current, address_text, sizeof(current));
     scroll = 0; selected = 0;
     status[0] = 0;
+}
+
+/* ---------- card files: TLS seed and bookmarks (E:\BROWSER) ---------- */
+
+static const u16 folder_path[] = {'E', ':', '\\', 'B', 'R', 'O', 'W', 'S', 'E', 'R', 0};
+static const u16 seed_path[] = {'E', ':', '\\', 'B', 'R', 'O', 'W', 'S', 'E', 'R', '\\', 'S', 'E', 'E', 'D', '.', 'B', 'I', 'N', 0};
+static const u16 marks_path[] = {'E', ':', '\\', 'B', 'R', 'O', 'W', 'S', 'E', 'R', '\\',
+                                 'B', 'O', 'O', 'K', 'M', 'A', 'R', 'K', 'S', '.', 'T', 'X', 'T', 0};
+#define MARKS_MAX 4096
+static char marks[MARKS_MAX];
+static u32 marks_len;
+static char start_html[MARKS_MAX*2+1024];
+
+/* Older loaders cannot write files: the browser then keeps nothing between runs. */
+static int can_write(void) { return api->size >= sizeof(Go1Api); }
+
+/* The seed file carries entropy from earlier runs into the pool; it is
+   rewritten at once (and after pages) so a value is never reused. */
+static void seed_load(void) {
+    u32 h = api->open_wide(seed_path);
+    if (!h) return;
+    u8 seed[32];
+    u32 n = api->read(h, seed, sizeof(seed));
+    api->close(h);
+    if (n == sizeof(seed)) stir(seed, sizeof(seed));
+}
+
+static void seed_store(void) {
+    if (!can_write()) return;
+    u8 seed[32];
+    stir_time();
+    br_sha256_context snapshot = pool;
+    br_sha256_update(&snapshot, "GO1 seed file", 13);  /* not the value given to TLS */
+    br_sha256_out(&snapshot, seed);
+    api->make_dir(folder_path);
+    u32 h = api->create(seed_path);
+    if (h) { api->write(h, seed, sizeof(seed)); api->close(h); }
+}
+
+static void marks_load(void) {
+    marks_len = 0;
+    marks[0] = 0;
+    u32 h = api->open_wide(marks_path);
+    if (!h) return;
+    u32 n = api->read(h, marks, MARKS_MAX-1);
+    api->close(h);
+    marks_len = n == GO1_ERROR ? 0 : n;
+    marks[marks_len] = 0;
+}
+
+static void put_utf8(char *out, u32 *n, u32 capacity, u32 c) {
+    if (c < 0x80) { if (*n+1 < capacity) out[(*n)++] = (char)c; }
+    else if (c < 0x800) { if (*n+2 < capacity) { out[(*n)++] = (char)(0xc0 | c >> 6); out[(*n)++] = (char)(0x80 | (c & 63)); } }
+    else if (*n+3 < capacity) {
+        out[(*n)++] = (char)(0xe0 | c >> 12);
+        out[(*n)++] = (char)(0x80 | (c >> 6 & 63));
+        out[(*n)++] = (char)(0x80 | (c & 63));
+    }
+    out[*n] = 0;
+}
+
+/* Line "URL<tab>title" appended to BOOKMARKS.TXT (UTF-8). */
+static void marks_add(void) {
+    if (starts(current, "about:")) return;
+    if (!can_write()) { set_status("Прошивка не умеет писать"); return; }
+    char line[800];
+    u32 n = 0;
+    add(line, &n, sizeof(line), current);
+    add(line, &n, sizeof(line), "\t");
+    for (u32 i = 0; page_title[i] && n+5 < sizeof(line); i++) {
+        u32 c = page_title[i];
+        put_utf8(line, &n, sizeof(line), c == '\t' || c == '\n' ? ' ' : c);
+    }
+    add(line, &n, sizeof(line), "\n");
+    if (marks_len+n >= MARKS_MAX) { set_status("Закладок слишком много"); return; }
+    api->make_dir(folder_path);
+    u32 h = api->open_append(marks_path);
+    u32 written = h ? api->write(h, line, n) : GO1_ERROR;
+    if (h) api->close(h);
+    if (written != n) { set_status("Не удалось сохранить"); return; }
+    marks_load();
+    set_status("Добавлено в закладки");
+}
+
+static void add_escaped(char *out, u32 *n, u32 capacity, const char *s, u32 length) {
+    for (u32 i = 0; i < length; i++) {
+        char c = s[i];
+        if (c == '&') add(out, n, capacity, "&amp;");
+        else if (c == '<') add(out, n, capacity, "&lt;");
+        else if (c == '>') add(out, n, capacity, "&gt;");
+        else if (c == '"') add(out, n, capacity, "&quot;");
+        else if (*n+1 < capacity) { out[(*n)++] = c; out[*n] = 0; }
+    }
+}
+
+static const char *start_page_html(void) {
+    u32 n = 0;
+    start_html[0] = 0;
+    add(start_html, &n, sizeof(start_html), start_page);
+    if (!marks_len) return start_html;
+    add(start_html, &n, sizeof(start_html), "<h2>Закладки</h2><ul>");
+    for (const char *line = marks; *line;) {
+        const char *end = line, *tab = 0;
+        while (*end && *end != '\n') { if (*end == '\t' && !tab) tab = end; end++; }
+        const char *url_end = tab ? tab : end, *title = tab ? tab+1 : end;
+        if (url_end > line) {
+            add(start_html, &n, sizeof(start_html), "<li><a href=\"");
+            add_escaped(start_html, &n, sizeof(start_html), line, (u32)(url_end-line));
+            add(start_html, &n, sizeof(start_html), "\">");
+            if (end > title) add_escaped(start_html, &n, sizeof(start_html), title, (u32)(end-title));
+            else add_escaped(start_html, &n, sizeof(start_html), line, (u32)(url_end-line));
+            add(start_html, &n, sizeof(start_html), "</a>");
+        }
+        line = *end ? end+1 : end;
+    }
+    add(start_html, &n, sizeof(start_html), "</ul>");
+    return start_html;
 }
 
 static void finish(const char *error) {
@@ -1080,6 +1197,7 @@ static void finish(const char *error) {
     } else if (truncated) set_status("Страница обрезана: велика");
     else status[0] = 0;
     close_line();
+    if (!error && use_tls) seed_store();
 }
 
 static void load(const char *address_text, int remember) {
@@ -1092,7 +1210,7 @@ static void load(const char *address_text, int remember) {
         copy(history[history_count++], current, sizeof(history[0]));
     }
     if (remember) redirects = 0;
-    if (starts(address_text, "about:start")) { show_internal(start_page, "about:start"); net_step = N_IDLE; return; }
+    if (starts(address_text, "about:start")) { show_internal(start_page_html(), "about:start"); net_step = N_IDLE; return; }
     copy(current, address_text, sizeof(current));
     page_reset();
     http_reset();
@@ -1340,6 +1458,7 @@ static int page_key(u32 kind, u32 code) {
         redirects = 0;
         load(again, 0);
     } else if (code == GO1_HASH) load("about:start", 1);
+    else if (code == GO1_0) marks_add();
     return 1;
 }
 
@@ -1369,8 +1488,11 @@ u32 go1_main(const Go1Api *program_api, u32 message, u32 parameter) {
         stir((const void *)0x04080000u, 0x10000);  /* MMI task stacks and queues */
         stir_time();
         br_ssl_client_init_full(&sc, &xc, browser_anchors, browser_anchor_count);
+        seed_load();
+        seed_store();
+        marks_load();
         history_count = 0; editing = 0; net_step = N_IDLE; sock = 0;
-        show_internal(start_page, "about:start");
+        show_internal(start_page_html(), "about:start");
         draw();
         return 1;
     }

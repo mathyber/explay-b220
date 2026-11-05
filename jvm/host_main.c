@@ -125,6 +125,72 @@ static void stats(Jvm *vm) {
         fprintf(stderr, "%9u %6u %s\n", usage[i].bytes, usage[i].count, usage[i].name);
 }
 
+/* -card DIR: go1.Files paths "E:\..." map into DIR (no network on this host). */
+static char card_root[260];
+static FILE *open_files[32];
+
+static void card_path(const char *path, char *out, size_t capacity) {
+    const char *rest = (path[0] == 'E' || path[0] == 'e') && path[1] == ':' ? path+2 : path;
+    snprintf(out, capacity, "%s%s", card_root, rest);
+    for (char *c = out; *c; c++) if (*c == '\\') *c = '/';
+}
+
+static uint32_t io_open(void *context, const char *path, int mode) {
+    (void)context;
+    char real[600];
+    static const char *const modes[] = {"rb", "wb", "r+b", "ab"};
+    if (!card_root[0] || mode < 0 || mode > 3) return 0;
+    card_path(path, real, sizeof(real));
+    for (uint32_t i = 0; i < 32; i++)
+        if (!open_files[i]) { open_files[i] = fopen(real, modes[mode]); return open_files[i] ? i+1 : 0; }
+    return 0;
+}
+static FILE *file_of(uint32_t file) { return file && file <= 32 ? open_files[file-1] : 0; }
+static uint32_t io_read(void *context, uint32_t file, void *buffer, uint32_t length) {
+    (void)context;
+    FILE *f = file_of(file);
+    return f ? (uint32_t)fread(buffer, 1, length, f) : JVM_IO_ERROR;
+}
+static uint32_t io_write(void *context, uint32_t file, const void *data, uint32_t length) {
+    (void)context;
+    FILE *f = file_of(file);
+    return f ? (uint32_t)fwrite(data, 1, length, f) : JVM_IO_ERROR;
+}
+static int io_seek(void *context, uint32_t file, uint32_t position) {
+    (void)context;
+    FILE *f = file_of(file);
+    return f ? fseek(f, (long)position, SEEK_SET) : -1;
+}
+static uint32_t io_size(void *context, uint32_t file) {
+    (void)context;
+    FILE *f = file_of(file);
+    if (!f) return JVM_IO_ERROR;
+    long at = ftell(f);
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, at, SEEK_SET);
+    return (uint32_t)size;
+}
+static void io_close(void *context, uint32_t file) {
+    (void)context;
+    FILE *f = file_of(file);
+    if (f) { fclose(f); open_files[file-1] = 0; }
+}
+static int io_remove(void *context, const char *path) {
+    (void)context;
+    char real[600];
+    card_path(path, real, sizeof(real));
+    return remove(real);
+}
+static int io_make_dir(void *context, const char *path) {
+    (void)context;
+    char real[600];
+    card_path(path, real, sizeof(real));
+    return CreateDirectoryA(real, 0) || GetLastError() == ERROR_ALREADY_EXISTS ? 0 : -1;
+}
+static const JvmIo card_io = {io_open, io_read, io_write, io_seek, io_size, io_close, io_remove, io_make_dir,
+                              0, 0, 0, 0, 0, 0, 0, 0};
+
 int main(int argc, char **argv) {
     Host h = {0};
     uint32_t heap_kb = 1024, meta_kb = 512, run_ms = 0;
@@ -143,7 +209,8 @@ int main(int argc, char **argv) {
             JarIo io = {archive_read, archive_alloc, archive_release, &h, (uint32_t)ftell(h.archive)};
             if (!jar_open(&h.jar, &io)) { fprintf(stderr, "not a JAR: %s\n", argv[i]); return 66; }
             h.has_jar = 1;
-        } else if (!strcmp(argv[i], "-heap") && i+1 < argc) heap_kb = (uint32_t)atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "-card") && i+1 < argc) snprintf(card_root, sizeof(card_root), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "-heap") && i+1 < argc) heap_kb = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "-meta") && i+1 < argc) meta_kb = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "-run") && i+1 < argc) run_ms = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "-shot") && i+1 < argc) shot = argv[++i];
@@ -159,7 +226,7 @@ int main(int argc, char **argv) {
             }
         } else main_class = argv[i];
     }
-    JvmHost host = {host_read, host_release, host_write, host_ms, &h, host_screen, host_flush, host_stream};
+    JvmHost host = {host_read, host_release, host_write, host_ms, &h, host_screen, host_flush, host_stream, &card_io};
     char manifest_main[128];
     if (!main_class && jvm_main_class(&host, manifest_main, sizeof(manifest_main))) main_class = manifest_main;
     if (!main_class) { fprintf(stderr, "usage: go1jvm [-heap KB] [-meta KB] [-cp dirs] [-jar app.jar] [-run ms] [-keys ms:code,...] [-shot file.ppm] [Main]\n"); return 64; }

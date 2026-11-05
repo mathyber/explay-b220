@@ -54,6 +54,25 @@ class JvmTests(unittest.TestCase):
                 self.assertEqual(ours.returncode, 0, ours.stderr)
                 self.assertEqual(ours.stdout, expected.stdout)
 
+    def test_record_stores_are_saved_on_the_card(self):
+        out, card = Path(self.folder.name)/'iotests', Path(self.folder.name)/'card'
+        javac([ROOT/'jvm/iotests/StoreTest.java'], out)
+        card.mkdir()
+        command = [str(HOST), '-card', str(card), '-cp', f'{LIBRARY};{out}', 'StoreTest']
+        runs = [subprocess.run(command, capture_output=True, text=True, encoding='utf-8', timeout=120) for _ in range(2)]
+        for run in runs:
+            self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(runs[0].stdout.splitlines()[0], 'saved 2 next 3')
+        self.assertEqual(runs[1].stdout.splitlines()[:2], ['loaded one TWO! next 3', 'stores 1 scores'])
+        for run in runs:
+            self.assertIn('no network: no network on this host', run.stdout)
+            self.assertIn('https: Not supported: https', run.stdout)
+        # The deleted "temporary" store leaves no file: the index and one store remain.
+        files = sorted(p.relative_to(card).as_posix() for p in card.rglob('*') if p.is_file())
+        self.assertEqual(len(files), 2, files)
+        self.assertEqual(files[0], 'JAVA/RMS/APP/STORES.IDX')
+        self.assertTrue(files[1].startswith('JAVA/RMS/APP/scores_') and files[1].endswith('.RMS'), files)
+
     def make_jar(self, classes, path):
         """Classes deflated, small resources stored and deflated, a large one deflated (dynamic codes)."""
         import random, struct, zipfile

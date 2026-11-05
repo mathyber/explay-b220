@@ -437,12 +437,32 @@ static u32 api_clock(void) {
     }
     return 0;
 }
+/* ---------- writing files: SFS_CreateFile 0x5edc5e modes as the PS uses them:
+   read 1, write 2, then 0x10 create new, 0x20 create always, 0x30 open existing,
+   0x50 append. SFS_WriteFile 0x5ee4d0 (handle, data, size, &written, 0),
+   SFS_DeleteFile 0x5edf3c (path, 0), SFS_CreateDirectory 0x5ede70 (path),
+   SFS_RenameFile 0x5ee04a (from, to, 0); 0 is success. ---------- */
+typedef u32 (*WriteFile)(u32,const void *,u32,u32 *,u32);
+typedef u32 (*Path2)(const u16 *,u32);
+typedef u32 (*Path1)(const u16 *);
+typedef u32 (*Rename)(const u16 *,const u16 *,u32);
+static u32 api_create(const u16 *path) { return FN(0x5edc5f,Open)(path,0x22,0,0); }
+static u32 api_open_update(const u16 *path) { return FN(0x5edc5f,Open)(path,0x33,0,0); }
+static u32 api_open_append(const u16 *path) { return FN(0x5edc5f,Open)(path,0x52,0,0); }
+static u32 api_write(u32 handle,const void *data,u32 size) {
+    u32 written=0;
+    return FN(0x5ee4d1,WriteFile)(handle,data,size,&written,0)?GO1_ERROR:written;
+}
+static u32 api_remove(const u16 *path) { return FN(0x5edf3d,Path2)(path,0); }
+static u32 api_make_dir(const u16 *path) { return FN(0x5ede71,Path1)(path); }
+static u32 api_rename(const u16 *from,const u16 *to) { return FN(0x5ee04b,Rename)(from,to,0); }
 static const Go1Api api={GO1_API_VERSION,sizeof(Go1Api),api_alloc,api_free,api_open,api_size,api_read,
                          api_close,fill,api_text,api_exit,api_heap_free,api_screen,api_flush,
                          api_timer,api_ms,api_seek,api_open_wide,api_text_wide,
                          api_find_first,api_find_next,api_find_close,api_text_at,
                          api_net_start,api_net_state,api_dns,api_tcp_open,api_tcp_connect,
-                         api_tcp_send,api_tcp_recv,api_tcp_close,api_clock};
+                         api_tcp_send,api_tcp_recv,api_tcp_close,api_clock,
+                         api_create,api_open_update,api_open_append,api_write,api_remove,api_make_dir,api_rename};
 /* Relocate a GO1N file in place: the image starts after the 32-byte header,
    .bss follows the image and may overwrite the already applied table.
    Takes ownership of the file buffer and frees it on failure. */

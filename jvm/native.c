@@ -589,7 +589,8 @@ Native native_for(Jvm *vm, Class *c, Utf8 name, Utf8 desc) {
     for (u32 i = 0; i < sizeof(natives)/sizeof(natives[0]); i++)
         if (utf8_equals(c->name, natives[i].cls) && utf8_equals(name, natives[i].name) && utf8_equals(desc, natives[i].desc))
             return natives[i].fn;
-    return midp_native_for(c->name, name, desc);
+    Native midp = midp_native_for(c->name, name, desc);
+    return midp ? midp : io_native_for(c->name, name, desc);
 }
 
 /* ---------- VM creation ---------- */

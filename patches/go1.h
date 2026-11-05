@@ -139,6 +139,21 @@ typedef struct Go1Api {
     void (*tcp_close)(go1_u32 socket);
     /* Local time from the RTC: seconds since 1980-01-01 00:00, 0 if invalid. */
     go1_u32 (*clock)(void);
+    /* Writing files (fields from 2026-11-06). UCS-2 paths such as L"E:\\DATA\\A.BIN".
+       create: new empty file (an existing one is truncated); open_update: an
+       existing file for reading and writing; open_append: writes go to the end
+       (the file is created when missing). All return a handle or 0; read, seek,
+       file_size and close work on these handles too. */
+    go1_u32 (*create)(const unsigned short *path);
+    go1_u32 (*open_update)(const unsigned short *path);
+    go1_u32 (*open_append)(const unsigned short *path);
+    /* Bytes written, GO1_ERROR on failure (card full, read-only handle). */
+    go1_u32 (*write)(go1_u32 handle, const void *data, go1_u32 size);
+    /* 0 on success, else a firmware SFS error code. make_dir fails when the
+       folder exists; rename does not replace an existing target. */
+    go1_u32 (*remove)(const unsigned short *path);
+    go1_u32 (*make_dir)(const unsigned short *path);
+    go1_u32 (*rename)(const unsigned short *from, const unsigned short *to);
 } Go1Api;
 
 #define GO1_NET_OFF 0

@@ -1,9 +1,16 @@
 package javax.microedition.rms;
 
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
 import java.util.Hashtable;
 import java.util.Vector;
+import go1.Files;
 
-/* Record stores kept in memory for the life of the VM (not saved to the card yet). */
+/* Record stores saved on the memory card: E:\JAVA\RMS\<MIDlet-Name>\<store>.RMS,
+   rewritten after every change, plus STORES.IDX with the store names. Without
+   file access (a host with no card) they stay in memory for the life of the VM. */
 public class RecordStore {
     public static final int AUTHMODE_PRIVATE = 0;
     public static final int AUTHMODE_ANY = 1;
@@ -19,14 +26,104 @@ public class RecordStore {
 
     private RecordStore(String name) { this.name = name; }
 
+    /* ---------- card storage ---------- */
+
+    private static String folder;
+    private static boolean indexLoaded;
+
+    private static String folder() {
+        if (folder == null) {
+            String suite = go1.Launcher.getProperty("MIDlet-Name");
+            folder = "E:\\JAVA\\RMS\\" + Files.safeName(suite == null ? "APP" : suite);
+        }
+        return folder;
+    }
+
+    private static String fileOf(String name) {
+        return folder() + "\\" + Files.safeName(name) + "_" + Integer.toHexString(name.hashCode()) + ".RMS";
+    }
+
+    /* Names of the stores saved on the card (into the in-memory table). */
+    private static void loadIndex() {
+        if (indexLoaded) return;
+        indexLoaded = true;
+        try {
+            byte[] data = Files.readAll(folder() + "\\STORES.IDX");
+            if (data == null) return;
+            DataInputStream in = new DataInputStream(new java.io.ByteArrayInputStream(data));
+            for (int n = in.readInt(); n > 0; n--) {
+                String name = in.readUTF();
+                if (!stores.containsKey(name)) stores.put(name, Boolean.TRUE);  /* on the card, not loaded */
+            }
+        } catch (Throwable e) {}
+    }
+
+    private static void saveIndex() {
+        try {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            DataOutputStream out = new DataOutputStream(bytes);
+            out.writeInt(stores.size());
+            for (java.util.Enumeration e = stores.keys(); e.hasMoreElements();) out.writeUTF((String) e.nextElement());
+            Files.makeDirs(folder());
+            Files.writeAll(folder() + "\\STORES.IDX", bytes.toByteArray(), bytes.size());
+        } catch (Throwable e) {}
+    }
+
+    private static RecordStore load(String name) {
+        try {
+            byte[] data = Files.readAll(fileOf(name));
+            if (data == null) return null;
+            DataInputStream in = new DataInputStream(new java.io.ByteArrayInputStream(data));
+            if (in.readInt() != 0x474f3152 || !in.readUTF().equals(name)) return null;  /* "GO1R" */
+            RecordStore store = new RecordStore(name);
+            store.version = in.readInt();
+            store.nextId = in.readInt();
+            store.modified = in.readLong();
+            for (int n = in.readInt(); n > 0; n--) {
+                store.ids.addElement(new Integer(in.readInt()));
+                byte[] record = new byte[in.readInt()];
+                in.readFully(record);
+                store.records.addElement(record);
+            }
+            return store;
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
+    private void save() {
+        try {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            DataOutputStream out = new DataOutputStream(bytes);
+            out.writeInt(0x474f3152);
+            out.writeUTF(name);
+            out.writeInt(version);
+            out.writeInt(nextId);
+            out.writeLong(modified);
+            out.writeInt(ids.size());
+            for (int i = 0; i < ids.size(); i++) {
+                byte[] record = (byte[]) records.elementAt(i);
+                out.writeInt(((Integer) ids.elementAt(i)).intValue());
+                out.writeInt(record.length);
+                out.write(record);
+            }
+            Files.makeDirs(folder());
+            Files.writeAll(fileOf(name), bytes.toByteArray(), bytes.size());
+        } catch (Throwable e) {}
+    }
+
     public static synchronized RecordStore openRecordStore(String name, boolean create) throws RecordStoreException {
         if (name == null || name.length() == 0 || name.length() > 32) throw new IllegalArgumentException();
-        RecordStore store = (RecordStore) stores.get(name);
+        loadIndex();
+        Object known = stores.get(name);
+        RecordStore store = known instanceof RecordStore ? (RecordStore) known : load(name);
         if (store == null) {
             if (!create) throw new RecordStoreNotFoundException(name);
             store = new RecordStore(name);
             stores.put(name, store);
-        }
+            store.save();
+            saveIndex();
+        } else stores.put(name, store);
         store.opened++;
         return store;
     }
@@ -40,13 +137,17 @@ public class RecordStore {
     }
 
     public static synchronized void deleteRecordStore(String name) throws RecordStoreException {
-        RecordStore store = (RecordStore) stores.get(name);
+        loadIndex();
+        Object store = stores.get(name);
         if (store == null) throw new RecordStoreNotFoundException(name);
-        if (store.opened > 0) throw new RecordStoreException("Record store is open");
+        if (store instanceof RecordStore && ((RecordStore) store).opened > 0) throw new RecordStoreException("Record store is open");
         stores.remove(name);
+        try { Files.remove(fileOf(name)); } catch (Throwable e) {}
+        saveIndex();
     }
 
     public static synchronized String[] listRecordStores() {
+        loadIndex();
         if (stores.isEmpty()) return null;
         String[] names = new String[stores.size()];
         int i = 0;
@@ -67,6 +168,7 @@ public class RecordStore {
     private void changed() {
         version++;
         modified = System.currentTimeMillis();
+        save();
     }
 
     private static byte[] copy(byte[] data, int offset, int length) {

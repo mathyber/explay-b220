@@ -390,9 +390,85 @@ static void shutdown(void) {
     vm = 0;
 }
 
+/* ---------- files and network for go1.Files / go1.Net (GO1 API from 2026-11-06) ---------- */
+
+static void wide_path(const char *s, u16 *out, u32 capacity) {
+    const unsigned char *p = (const unsigned char *)s;
+    u32 n = 0;
+    while (*p && n+1 < capacity) {
+        u32 c = *p++;
+        if (c >= 0xe0 && p[0] && p[1]) { c = (c & 15) << 12 | (p[0] & 63) << 6 | (p[1] & 63); p += 2; }
+        else if (c >= 0xc0 && p[0]) { c = (c & 31) << 6 | (p[0] & 63); p++; }
+        out[n++] = (u16)c;
+    }
+    out[n] = 0;
+}
+
+static uint32_t io_open(void *context, const char *path, int mode) {
+    (void)context;
+    u16 wide[300];
+    wide_path(path, wide, 300);
+    switch (mode) {
+    case JVM_FILE_READ: return api->open_wide(wide);
+    case JVM_FILE_CREATE: return api->create(wide);
+    case JVM_FILE_UPDATE: return api->open_update(wide);
+    case JVM_FILE_APPEND: return api->open_append(wide);
+    default: return 0;
+    }
+}
+static uint32_t io_read(void *context, uint32_t file, void *buffer, uint32_t length) {
+    (void)context;
+    return api->read(file, buffer, length);
+}
+static uint32_t io_write(void *context, uint32_t file, const void *data, uint32_t length) {
+    (void)context;
+    return api->write(file, data, length);
+}
+static int io_seek(void *context, uint32_t file, uint32_t position) { (void)context; return api->seek(file, position) ? -1 : 0; }
+static uint32_t io_size(void *context, uint32_t file) { (void)context; return api->file_size(file); }
+static void io_close(void *context, uint32_t file) { (void)context; api->close(file); }
+static int io_remove(void *context, const char *path) {
+    (void)context;
+    u16 wide[300];
+    wide_path(path, wide, 300);
+    return api->remove(wide) ? -1 : 0;
+}
+/* Success also when the folder is already there. */
+static int io_make_dir(void *context, const char *path) {
+    (void)context;
+    u16 wide[300];
+    wide_path(path, wide, 300);
+    if (!api->make_dir(wide)) return 0;
+    u32 search = api->find_first(wide, &entry);
+    if (!search) return -1;
+    api->find_close(search);
+    return entry.attributes & GO1_ATTR_DIRECTORY ? 0 : -1;
+}
+static uint32_t io_net_start(void *context) { (void)context; return api->net_start(); }
+static uint32_t io_net_state(void *context) { (void)context; return api->net_state(); }
+static uint32_t io_dns(void *context, const char *host) { (void)context; return api->dns(host); }
+static uint32_t io_tcp_open(void *context) { (void)context; return api->tcp_open(); }
+static uint32_t io_tcp_connect(void *context, uint32_t socket, uint32_t ipv4, uint32_t port) {
+    (void)context;
+    return api->tcp_connect(socket, ipv4, port);
+}
+static uint32_t io_tcp_send(void *context, uint32_t socket, const void *data, uint32_t length) {
+    (void)context;
+    return api->tcp_send(socket, data, length);
+}
+static uint32_t io_tcp_recv(void *context, uint32_t socket, void *buffer, uint32_t length) {
+    (void)context;
+    return api->tcp_recv(socket, buffer, length);
+}
+static void io_tcp_close(void *context, uint32_t socket) { (void)context; api->tcp_close(socket); }
+static const JvmIo phone_io = {io_open, io_read, io_write, io_seek, io_size, io_close, io_remove, io_make_dir,
+                               io_net_start, io_net_state, io_dns, io_tcp_open, io_tcp_connect, io_tcp_send, io_tcp_recv, io_tcp_close};
+
 static void start(const u16 *path) {
     free_infos();
-    static const JvmHost host = {host_read, host_release, host_write, host_ms, 0, host_screen, host_flush, host_stream};
+    static JvmHost host = {host_read, host_release, host_write, host_ms, 0, host_screen, host_flush, host_stream, 0};
+    /* Older loaders lack file writing and the network: go1.Files/Net then throw IOException. */
+    host.io = api->size >= sizeof(Go1Api) ? &phone_io : 0;
     u16 library_path[20];
     row = column = 0;
     for (u32 i = 0; i < LINES; i++) console[i][0] = 0;

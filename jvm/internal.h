@@ -223,6 +223,7 @@ int monitor_exit(Thread *t, Object *o);
 
 /* midp.c */
 Native midp_native_for(Utf8 class_name, Utf8 name, Utf8 desc);
+Native io_native_for(Utf8 class_name, Utf8 name, Utf8 desc);
 
 /* native.c */
 Native native_for(Jvm *vm, Class *c, Utf8 name, Utf8 desc);
