@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .virtual_network import VirtualNetwork
 from .host_network import InternetNetwork
-from .network_trace import network_code_matches
+from .network_trace import network_code_matches,network_window
 
 
 class WindowNetwork:
@@ -51,7 +51,7 @@ class WindowNetwork:
             self.url_input = None
         if self.dirty and not self.service and self.enabled:
             window = self.board.last_window_id
-            if window is None or not 0x40000 <= window <= 0x400ff:
+            if not network_window(window):
                 return  # Browser settings do not exist yet during cold boot.
             if bytes(self.board.uc.mem_read(0x0433613c,4)) != bytes.fromhex('01010100'):
                 return

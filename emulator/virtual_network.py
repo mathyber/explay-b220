@@ -9,7 +9,7 @@ can supply the data calls; this control-plane class creates no host sockets.
 from unicorn import UC_HOOK_CODE
 from unicorn.arm_const import UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,UC_ARM_REG_PC
 
-from .network_trace import PS_SHA256,network_code_matches
+from .network_trace import PS_SHA256,network_code_matches,network_window
 
 
 class VirtualNetwork:
@@ -18,8 +18,8 @@ class VirtualNetwork:
             raise ValueError('Virtual network requires the pinned B220 PS network code')
         if getattr(board,'_running',False) or hasattr(board,'experimental_network'):
             raise ValueError('Virtual network requires a stopped, unmodified laboratory session')
-        if board.last_window_id is None or not 0x40000 <= board.last_window_id <= 0x400ff:
-            raise ValueError('Open the browser menu or URL editor before enabling the experiment')
+        if not network_window(board.last_window_id):
+            raise ValueError('Open the browser menu, URL editor or SD Apps before enabling the experiment')
         # Only slot 0 / profile 0 is recovered and supported by this experiment.
         # Validate all preconditions before making any writes.
         uc = board.uc

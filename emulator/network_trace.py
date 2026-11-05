@@ -23,6 +23,15 @@ NETWORK_CODE = ((0x1d4900,0x1d4b00),(0x23fe00,0x240400),(0x2cf900,0x2cfe00),(0x2
                 (0x59e500,0x59e600),(0x5eca00,0x5ece00),(0x652300,0x652400))
 
 
+# Windows that may start packet data: the stock browser's and SD Apps (0x160002),
+# whose GO1 programs call the browser's own GPRS activation (patches/sd_app.c).
+SD_APPS_WINDOW = 0x160002
+
+
+def network_window(window):
+    return window is not None and (0x40000 <= window <= 0x400ff or window == SD_APPS_WINDOW)
+
+
 def network_code_matches(board):
     """True for the pinned PS, or a PS whose network-related code is unchanged."""
     if board.image_sha256 == PS_SHA256:

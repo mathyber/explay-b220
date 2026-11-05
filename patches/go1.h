@@ -119,7 +119,33 @@ typedef struct Go1Api {
     /* Fields below exist when api->size covers them (loaders from 2026-11-05). */
     /* UCS-2 text, left-aligned from x, up to 64 characters, Y = 0..156. */
     void (*text_at)(go1_u32 x, go1_u32 y, const unsigned short *text, go1_u32 color);
+    /* Packet data and TCP (fields from 2026-11-05 too). net_start asks the
+       firmware for GPRS with the stock browser's access point profile (the same
+       call as its own browser); poll net_state until GO1_NET_READY. Nothing
+       here blocks: poll from the window timer. */
+    go1_u32 (*net_start)(void);
+    go1_u32 (*net_state)(void);
+    /* IPv4 address of a host name (big-endian, as on the wire), 0 while the
+       firmware is still resolving it or when it fails: retry for a while. */
+    go1_u32 (*dns)(const char *host);
+    /* Nonblocking TCP socket: handle or 0. */
+    go1_u32 (*tcp_open)(void);
+    /* 0 when connected, GO1_AGAIN while connecting, GO1_ERROR on failure. */
+    go1_u32 (*tcp_connect)(go1_u32 socket, go1_u32 ipv4, go1_u32 port);
+    /* Bytes sent or received; GO1_AGAIN when nothing can move now; recv
+       returns 0 when the peer closed the connection. */
+    go1_u32 (*tcp_send)(go1_u32 socket, const void *data, go1_u32 length);
+    go1_u32 (*tcp_recv)(go1_u32 socket, void *buffer, go1_u32 length);
+    void (*tcp_close)(go1_u32 socket);
+    /* Local time from the RTC: seconds since 1980-01-01 00:00, 0 if invalid. */
+    go1_u32 (*clock)(void);
 } Go1Api;
+
+#define GO1_NET_OFF 0
+#define GO1_NET_CONNECTING 1
+#define GO1_NET_READY 2
+#define GO1_AGAIN 0xfffffffeu
+#define GO1_ERROR 0xffffffffu
 
 
 #define GO1_SCREEN_WIDTH 176

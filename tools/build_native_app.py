@@ -7,6 +7,8 @@ table. Firmware addresses are plain constants and are not relocated.
 See patches/go1.h for the file format and the loader interface.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -130,16 +132,17 @@ def with_extras(program, title=None, icon=None):
     return bytes(result)
 
 
-def compile_native(source, sources=(), includes=(), icon=None, title=None):
+def compile_native(source, sources=(), includes=(), icon=None, title=None, libraries=(), library_flags=()):
     """GO1N program. Defaults: the title from a 'go1-title:' line in the source,
     the icon from a 16x16 PNG with the source's name; both are optional."""
     png = Path(source).with_suffix('.png')
     icon = icon or (png if png.exists() else None)
     title = title or source_title(source)
-    return with_extras(_compile(source, sources, includes), title, icon)
+    return with_extras(_compile(source, sources, includes, libraries, library_flags), title, icon)
 
 
-def _compile(source, sources=(), includes=()):
+def _compile(source, sources=(), includes=(), libraries=(), library_flags=()):
+    """libraries: third-party C files, compiled without warnings and cached by content and flags."""
     if not EXECUTABLE.exists():
         raise ValueError('Run python -m tools.setup_arm_toolchain first')
     environment = os.environ.copy()
@@ -151,15 +154,33 @@ def _compile(source, sources=(), includes=()):
         if run.returncode:
             raise ValueError(f'ARM build failed:\n{" ".join(command)}\n{run.stdout}\n{run.stderr}')
     runtime = compiler_rt(execute)
+    common = ['cc', '-c', '-target', 'thumbeb-freestanding-eabi', '-mcpu=arm7tdmi', '-mthumb', '-Oz',
+              '-ffreestanding', '-fno-builtin', '-fno-stack-protector', '-fno-unwind-tables',
+              '-fno-asynchronous-unwind-tables', '-ffunction-sections', '-fdata-sections',
+              '-Ipatches', *[f'-I{i}' for i in includes]]
+    cache = ROOT/'analysis/toolchains/objects'
+    cache.mkdir(parents=True, exist_ok=True)
+
+    def library_object(item):
+        flags = [*common, '-w', *library_flags]
+        if '-marm' in library_flags:  # ARM state: the triple decides, not -marm alone
+            flags = ['armeb-freestanding-eabi' if f == 'thumbeb-freestanding-eabi' else f
+                     for f in flags if f not in ('-mthumb', '-marm')]
+        key = hashlib.sha256(Path(item).read_bytes()+'|'.join(flags).encode()).hexdigest()
+        target = cache/f'{key}.o'
+        if not target.exists():
+            temporary = target.with_suffix(f'.{os.getpid()}.tmp')
+            execute([str(EXECUTABLE), *flags, str(item), '-o', str(temporary)])
+            temporary.replace(target)
+        return str(target)
     with tempfile.TemporaryDirectory() as folder:
         objects = []
         # zig cc filters unknown linker flags, so compile here and link with ld.lld.
         for index, item in enumerate((source, *sources)):
             objects.append(str(Path(folder)/f'{index}.o'))
-            execute([str(EXECUTABLE), 'cc', '-c', '-target', 'thumbeb-freestanding-eabi', '-mcpu=arm7tdmi', '-mthumb',
-                     '-Oz', '-Wall', '-Wextra', '-Werror', '-ffreestanding', '-fno-builtin', '-fno-stack-protector',
-                     '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-ffunction-sections', '-fdata-sections',
-                     '-Ipatches', *[f'-I{i}' for i in includes], str(item), '-o', objects[-1]])
+            execute([str(EXECUTABLE), *common, '-Wall', '-Wextra', '-Werror', str(item), '-o', objects[-1]])
+        with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+            objects += list(pool.map(library_object, libraries))
         script = (ROOT/LINKER).read_text(encoding='utf-8')
         images = []
         for base in (0, DELTA):
@@ -168,6 +189,8 @@ def _compile(source, sources=(), includes=()):
             execute([str(EXECUTABLE), 'ld.lld', '-T', str(linker), '--gc-sections', '--build-id=none',
                      '-e', 'go1_main', *objects, str(runtime), '-o', str(elf)])
             images.append(elf.read_bytes())
+            if base == 0 and os.environ.get('GO1_KEEP_ELF'):
+                Path(os.environ['GO1_KEEP_ELF']).write_bytes(images[-1])  # symbols for debugging
         return native_file(*images)
 
 

@@ -377,10 +377,72 @@ static void api_text_at(u32 x,u32 y,const u16 *wide,u32 color) {
     while (count<64 && wide[count]) count++;
     text_wide_at(x,y,wide,count,color,TEXT_LEFT);
 }
+/* ---------- packet data and TCP (firmware socket layer, as the stock browser) ----------
+   MMIBRW_AcitvieGPRS 0x5991e6 activates PDP with the browser's access point profile;
+   its state s_wap_context.gprs_state (0x436e868+0x48): 3 activating, 1 active.
+   Socket calls 0x2cfb32 socket(2,1,0,net 1), 0x2cfb92 mode 0x1014 (nonblocking, as CMS),
+   0x2cfb6e connect, 0x2cfbca send, 0x2cfbaa recv, 0x2cfc2c close, 0x2cfc38 last error
+   (6 would block, 13 closed), 0x2cf9c6 host lookup (hostent, 0 while pending). */
+#define GPRS_STATE (*(volatile u32 *)(0x0436e868u+0x48))
+typedef void (*Void)(void);
+typedef u32 (*Call1)(u32);
+typedef u32 (*Call3)(u32,u32,u32);
+typedef u32 (*Call4)(u32,u32,u32,u32);
+static u32 api_net_state(void) {
+    u32 state=GPRS_STATE;
+    return state==1?GO1_NET_READY:state==3?GO1_NET_CONNECTING:GO1_NET_OFF;
+}
+static u32 api_net_start(void) {
+    u32 state=GPRS_STATE;
+    if (state!=1 && state!=3) FN(0x5991e7,Void)();
+    return api_net_state();
+}
+static u32 api_dns(const char *host) {
+    const u32 *entry=(const u32 *)FN(0x2cf9c7,Call1)((u32)host);
+    if (!entry || entry[3]!=4 || !entry[4]) return 0;
+    const u32 *list=(const u32 *)entry[4];
+    return list[0]?*(const u32 *)list[0]:0;
+}
+static u32 socket_error(u32 handle) { return FN(0x2cfc39,Call1)(handle); }
+static u32 api_tcp_open(void) {
+    u32 handle=FN(0x2cfb33,Call4)(2,1,0,1);
+    if (handle==0xffffffffu || !handle) return 0;
+    FN(0x2cfb93,Call3)(handle,0x1014,0);
+    return handle;
+}
+static u32 api_tcp_connect(u32 handle,u32 ipv4,u32 port) {
+    u8 address[16]={0,2,(u8)(port>>8),(u8)port,(u8)(ipv4>>24),(u8)(ipv4>>16),(u8)(ipv4>>8),(u8)ipv4};
+    if (!FN(0x2cfb6f,Call3)(handle,(u32)address,16)) return 0;
+    u32 error=socket_error(handle);
+    return error==6 || error==22 || error==36 || error==37 || error==115 || error==119?GO1_AGAIN:GO1_ERROR;
+}
+static u32 transfer(u32 function,u32 handle,u32 data,u32 length) {
+    u32 count=FN(function,Call4)(handle,data,length,0);
+    if (count!=0xffffffffu) return count;
+    u32 error=socket_error(handle);
+    return error==6?GO1_AGAIN:error==13?0:GO1_ERROR;
+}
+static u32 api_tcp_send(u32 handle,const void *data,u32 length) { return transfer(0x2cfbcb,handle,(u32)data,length); }
+static u32 api_tcp_recv(u32 handle,void *buffer,u32 length) { return transfer(0x2cfbab,handle,(u32)buffer,length); }
+static void api_tcp_close(u32 handle) { FN(0x2cfc2d,Call1)(handle); }
+/* RTC counters (as RTC_GetTime 0x18e6cc reads them, without its wait for pending
+   shadow writes, which sleeps in 20 ms steps): +0 second, +4 minute, +8 hour,
+   +0xc day since 1980. Read twice so a carry between the reads is not mixed in. */
+#define RTC ((volatile u32 *)0x89000000u)
+static u32 api_clock(void) {
+    for (u32 attempt=0;attempt<3;attempt++) {
+        u32 s=RTC[0]&63,m=RTC[1]&63,h=RTC[2]&31,d=RTC[3]&0xffff;
+        if (s==(RTC[0]&63) && m==(RTC[1]&63) && h==(RTC[2]&31) && d==(RTC[3]&0xffff))
+            return s>59 || m>59 || h>23?0:d*86400u+h*3600u+m*60u+s;
+    }
+    return 0;
+}
 static const Go1Api api={GO1_API_VERSION,sizeof(Go1Api),api_alloc,api_free,api_open,api_size,api_read,
                          api_close,fill,api_text,api_exit,api_heap_free,api_screen,api_flush,
                          api_timer,api_ms,api_seek,api_open_wide,api_text_wide,
-                         api_find_first,api_find_next,api_find_close,api_text_at};
+                         api_find_first,api_find_next,api_find_close,api_text_at,
+                         api_net_start,api_net_state,api_dns,api_tcp_open,api_tcp_connect,
+                         api_tcp_send,api_tcp_recv,api_tcp_close,api_clock};
 /* Relocate a GO1N file in place: the image starts after the 32-byte header,
    .bss follows the image and may overwrite the already applied table.
    Takes ownership of the file buffer and frees it on failure. */
