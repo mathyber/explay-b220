@@ -26,6 +26,9 @@ typedef uint16_t u16;
 #define NAME_CHARS 80        /* longer names are skipped */
 #define ROWS 6
 #define FOLDER "E:\\JAVA\\"
+#define TITLE_CHARS 40       /* MIDlet-Name shown in the list */
+#define ICON 16
+#define ICON_SOURCE_MAX 256  /* larger icons are not decoded */
 
 static const Go1Api *api;
 static Jvm *vm;
@@ -39,6 +42,11 @@ static int dirty;
 static u16 games[GAMES][NAME_CHARS+1];
 static u32 game_count, selected;
 static Go1FindEntry entry;
+/* List details from each JAR's manifest: name and icon (16x16, centred,
+   scaled down by area averaging). Allocated while the list is shown and
+   freed before a VM starts, so the Java heap does not lose this memory. */
+typedef struct GameInfo { u16 title[TITLE_CHARS+1]; u16 pixels[ICON*ICON]; uint8_t alpha[ICON*ICON]; uint8_t has_icon; } GameInfo;
+static GameInfo *infos;
 
 static int is_launcher(const char *name) {
     const char *launcher = "go1/Launcher";
@@ -112,39 +120,6 @@ static void scan(void) {
     api->find_close(search);
 }
 
-static void draw_list(void) {
-    static const u16 title[] = {'J', 'a', 'v', 'a', 0};
-    api->fill(0, 0, 176, 176, 0);
-    api->text_wide(2, title, 0xffe0);
-    if (!game_count) {
-        api->text(50, "No games", 0xffff);
-        api->text(76, "Put .jar files into", 0xffff);
-        api->text(96, FOLDER, 0x07ff);
-        return;
-    }
-    u32 first = selected/ROWS*ROWS;
-    for (u32 i = 0; i < ROWS && first+i < game_count; i++) {
-        u32 y = 28+i*22, current = first+i == selected;
-        u16 shown[NAME_CHARS+1];
-        u32 n = 0;
-        while ((shown[n] = games[first+i][n]) != 0) n++;
-        if (n > 4 && shown[n-4] == '.') shown[n-4] = 0;  /* hide ".jar" */
-        if (current) api->fill(0, y-1, 176, 21, 0x2104);
-        api->text_wide(y, shown, current ? 0x07ff : 0xffff);
-    }
-    if (game_count > ROWS) {
-        char page[8];
-        u32 at = 0, value = first/ROWS+1, pages = (game_count+ROWS-1)/ROWS;
-        if (value >= 10) page[at++] = (char)('0'+value/10);
-        page[at++] = (char)('0'+value%10);
-        page[at++] = '/';
-        if (pages >= 10) page[at++] = (char)('0'+pages/10);
-        page[at++] = (char)('0'+pages%10);
-        page[at] = 0;
-        api->text(156, page, 0x8410);
-    }
-}
-
 /* After a MIDlet the whole frame buffer is its picture: clear it. */
 static void clear_screen(void) {
     uint16_t *screen = api->screen();
@@ -180,6 +155,176 @@ static int open_archive(Jar *jar, u32 *handle, const u16 *path) {
     if (size == 0xffffffffu || !jar_open(jar, &io)) { api->close(h); return 0; }
     *handle = h;
     return 1;
+}
+
+/* ---------- names and icons from the manifests ---------- */
+
+static u32 utf8_to_ucs2(const char *in, u16 *out, u32 capacity) {
+    const unsigned char *p = (const unsigned char *)in;
+    u32 n = 0;
+    while (*p && n < capacity) {
+        u32 c = *p++;
+        if (c >= 0xe0 && p[0] && p[1]) { c = (c & 15) << 12 | (p[0] & 63) << 6 | (p[1] & 63); p += 2; }
+        else if (c >= 0xc0 && p[0]) { c = (c & 31) << 6 | (p[0] & 63); p++; }
+        else if (c >= 0x80) c = '?';
+        out[n++] = c < 32 ? ' ' : (u16)c;
+    }
+    out[n] = 0;
+    return n;
+}
+
+static void fit_icon(const u16 *src, const uint8_t *src_alpha, u32 w, u32 h, GameInfo *info) {
+    for (u32 i = 0; i < ICON*ICON; i++) { info->alpha[i] = 0; info->pixels[i] = 0; }
+    u32 big = w > h ? w : h, tw = w, th = h;
+    if (big > ICON) { tw = (w*ICON+big/2)/big; th = (h*ICON+big/2)/big; }
+    if (!tw) tw = 1;
+    if (!th) th = 1;
+    u32 ox = (ICON-tw)/2, oy = (ICON-th)/2;
+    for (u32 ty = 0; ty < th; ty++)
+        for (u32 tx = 0; tx < tw; tx++) {
+            u32 x0 = tx*w/tw, x1 = (tx+1)*w/tw, y0 = ty*h/th, y1 = (ty+1)*h/th;
+            if (x1 <= x0) x1 = x0+1;
+            if (y1 <= y0) y1 = y0+1;
+            u32 r = 0, g = 0, b = 0, a = 0, count = 0;
+            for (u32 y = y0; y < y1; y++)
+                for (u32 x = x0; x < x1; x++) {
+                    u32 c = src[y*w+x], k = src_alpha ? src_alpha[y*w+x] : 255;
+                    u32 cr = c >> 11, cg = (c >> 5) & 63, cb = c & 31;
+                    r += ((cr << 3) | (cr >> 2))*k; g += ((cg << 2) | (cg >> 4))*k; b += ((cb << 3) | (cb >> 2))*k;
+                    a += k; count++;
+                }
+            u32 at = (oy+ty)*ICON+ox+tx;
+            info->alpha[at] = (uint8_t)(a/count);
+            if (a) info->pixels[at] = (u16)((r/a >> 3) << 11 | (g/a >> 2) << 5 | (b/a >> 3));
+        }
+    info->has_icon = 1;
+}
+
+static void decode_icon(Jar *jar, const char *path, GameInfo *info) {
+    while (*path == '/') path++;
+    u32 size = 0;
+    uint8_t *png = *path ? jar_read(jar, path, &size) : 0;
+    if (!png) return;
+    JvmPngInfo image;
+    if (jvm_png_info(png, size, &image) && image.width <= ICON_SOURCE_MAX && image.height <= ICON_SOURCE_MAX) {
+        u32 count = image.width*image.height;
+        uint8_t *packed = api->alloc(image.packed_size), *raw = api->alloc(image.raw_size);
+        u16 *pixels = api->alloc(count*2);
+        uint8_t *alpha = image.has_alpha ? api->alloc(count) : 0;
+        if (packed && raw && pixels && (alpha || !image.has_alpha) &&
+            jvm_png_decode(png, size, packed, raw, pixels, alpha))
+            fit_icon(pixels, alpha, image.width, image.height, info);
+        if (alpha) api->free(alpha);
+        if (pixels) api->free(pixels);
+        if (raw) api->free(raw);
+        if (packed) api->free(packed);
+    }
+    archive_release(0, png);
+}
+
+static void read_info(u32 index, GameInfo *info) {
+    info->title[0] = 0;
+    info->has_icon = 0;
+    u16 path[NAME_CHARS+12];
+    u32 n = widen(path, FOLDER);
+    for (u32 i = 0; (path[n+i] = games[index][i]) != 0; i++) {}
+    Jar jar;
+    u32 handle;
+    if (!open_archive(&jar, &handle, path)) return;
+    u32 size = 0;
+    uint8_t *manifest = jar_read(&jar, "META-INF/MANIFEST.MF", &size);
+    if (manifest) {
+        char value[128];
+        if (jvm_manifest_value(manifest, size, "MIDlet-Name", value, sizeof(value)))
+            utf8_to_ucs2(value, info->title, TITLE_CHARS);
+        /* MIDlet-Icon, else the icon field of MIDlet-1: "name, icon, class". */
+        char icon[96];
+        if (!jvm_manifest_value(manifest, size, "MIDlet-Icon", icon, sizeof(icon))) {
+            u32 at = 0, out = 0;
+            if (jvm_manifest_value(manifest, size, "MIDlet-1", value, sizeof(value))) {
+                while (value[at] && value[at] != ',') at++;
+                if (value[at] == ',') at++;
+                while (value[at] == ' ') at++;
+                while (value[at] && value[at] != ',' && out+1 < sizeof(icon)) icon[out++] = value[at++];
+                while (out && icon[out-1] == ' ') out--;
+            }
+            icon[out] = 0;
+        }
+        archive_release(0, manifest);
+        decode_icon(&jar, icon, info);
+    }
+    jar_close(&jar);
+    api->close(handle);
+}
+
+static void free_infos(void) {
+    if (infos) { api->free(infos); infos = 0; }
+}
+
+static void load_infos(void) {
+    free_infos();
+    if (!game_count || api->size < sizeof(Go1Api)) return;
+    infos = api->alloc(game_count*sizeof(GameInfo));
+    if (!infos) return;
+    for (u32 i = 0; i < game_count; i++) read_info(i, &infos[i]);
+}
+
+static void draw_icon(u32 x, u32 y, const GameInfo *info) {
+    u16 *screen = api->screen();
+    for (u32 row = 0; row < ICON; row++)
+        for (u32 col = 0; col < ICON; col++) {
+            u32 i = row*ICON+col, a = info->alpha[i];
+            if (!a) continue;
+            u16 *target = screen+(y+row)*GO1_SCREEN_WIDTH+x+col, front = info->pixels[i], back = *target;
+            if (a < 255) {
+                u32 r = ((u32)(front >> 11)*a+(u32)(back >> 11)*(255-a))/255;
+                u32 g = ((u32)((front >> 5) & 63)*a+(u32)((back >> 5) & 63)*(255-a))/255;
+                u32 b = ((u32)(front & 31)*a+(u32)(back & 31)*(255-a))/255;
+                front = (u16)(r << 11 | g << 5 | b);
+            }
+            *target = front;
+        }
+    api->flush(x, y, ICON, ICON);
+}
+
+static void draw_list(void) {
+    static const u16 title[] = {'J', 'a', 'v', 'a', 0};
+    api->fill(0, 0, 176, 176, 0);
+    api->text_wide(2, title, 0xffe0);
+    if (!game_count) {
+        api->text(50, "No games", 0xffff);
+        api->text(76, "Put .jar files into", 0xffff);
+        api->text(96, FOLDER, 0x07ff);
+        return;
+    }
+    u32 first = selected/ROWS*ROWS;
+    for (u32 i = 0; i < ROWS && first+i < game_count; i++) {
+        u32 y = 28+i*22, current = first+i == selected;
+        u16 shown[NAME_CHARS+1];
+        u32 n = 0;
+        const GameInfo *info = infos ? &infos[first+i] : 0;
+        const u16 *name = info && info->title[0] ? info->title : games[first+i];
+        while ((shown[n] = name[n]) != 0) n++;
+        if (name == games[first+i] && n > 4 && shown[n-4] == '.') shown[n-4] = 0;  /* hide ".jar" */
+        if (current) api->fill(0, y-1, 176, 21, 0x2104);
+        u32 color = current ? 0x07ff : 0xffff;
+        /* Capitals take rows +3..+11 of the text box: +2 centres them in the bar y-1..y+19. */
+        if (info) {
+            api->text_at(28, y+2, shown, color);
+            if (info->has_icon) draw_icon(6, y+1, info);
+        } else api->text_wide(y+2, shown, color);
+    }
+    if (game_count > ROWS) {
+        char page[8];
+        u32 at = 0, value = first/ROWS+1, pages = (game_count+ROWS-1)/ROWS;
+        if (value >= 10) page[at++] = (char)('0'+value/10);
+        page[at++] = (char)('0'+value%10);
+        page[at++] = '/';
+        if (pages >= 10) page[at++] = (char)('0'+pages/10);
+        page[at++] = (char)('0'+pages%10);
+        page[at] = 0;
+        api->text(156, page, 0x8410);
+    }
 }
 
 static uint8_t *host_read(void *context, const char *path, uint32_t *size) {
@@ -246,6 +391,7 @@ static void shutdown(void) {
 }
 
 static void start(const u16 *path) {
+    free_infos();
     static const JvmHost host = {host_read, host_release, host_write, host_ms, 0, host_screen, host_flush, host_stream};
     u16 library_path[20];
     row = column = 0;
@@ -289,6 +435,7 @@ static void done(void) {
     choosing = 1;
     finished = 0;
     midp = 0;
+    load_infos();
     draw_list();
 }
 
@@ -300,6 +447,7 @@ static void open_list(void) {
     u32 old = from_list ? 0 : api->open_wide(fallback);
     if (old) { api->close(old); start(fallback); draw(); return; }
     choosing = 1;
+    load_infos();
     draw_list();
 }
 
@@ -331,7 +479,7 @@ u32 go1_main(const Go1Api *program_api, u32 message, u32 parameter) {
     api = program_api;
     if (api->version != GO1_API_VERSION) return 0;
     /* Older loaders lack file search and UCS-2 calls; text and exit always exist. */
-    if (api->size < sizeof(Go1Api)) {
+    if (api->size < __builtin_offsetof(Go1Api, text_at)) {
         if (message == GO1_OPEN || message == GO1_PAINT) {
             api->fill(0, 0, 176, 176, 0);
             api->text(50, "JAVA.GO1 needs", 0xffff);
@@ -340,7 +488,7 @@ u32 go1_main(const Go1Api *program_api, u32 message, u32 parameter) {
         } else if (message == GO1_KEY_OK) api->exit();
         return 1;
     }
-    if (message == GO1_CLOSE) { shutdown(); return 1; }
+    if (message == GO1_CLOSE) { shutdown(); free_infos(); return 1; }
     if (message == GO1_OPEN) { open_list(); return 1; }
     if (choosing) {
         if (GO1_IS_KEY(message)) choose(message);

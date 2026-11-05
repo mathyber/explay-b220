@@ -320,6 +320,42 @@ class NativeVmTests(unittest.TestCase):
         self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))
         self.assertEqual(calls['closed'],len([o for o in calls['opens'] if o[0] in files]))
 
+    def test_java_list_shows_midlet_names_and_icons(self):
+        import io,zipfile
+        from PIL import Image
+        from tools.build_java_phone import build_vm
+        def png(size,mode,color):
+            image=Image.new('RGBA',size,(0,0,0,0))
+            for x in range(1,size[0]-1):
+                for y in range(1,size[1]-1):image.putpixel((x,y),color)
+            if mode=='P':image=image.convert('P')
+            out=io.BytesIO();image.save(out,'PNG');return out.getvalue()
+        def jar(manifest,entries,method):
+            out=io.BytesIO()
+            with zipfile.ZipFile(out,'w',method) as archive:
+                archive.writestr('META-INF/MANIFEST.MF',manifest)
+                for name,data in entries.items():archive.writestr(name,data)
+            return out.getvalue()
+        red=png((28,28),'P',(255,0,0,255))   # MIDlet-Icon, stored, scaled down to 16x16
+        green=png((20,20),'RGBA',(0,255,0,255))   # icon field of MIDlet-1, deflated
+        files={'E:\\APPS.LST':b'JAVA.GO1\r\n','E:\\JAVA.GO1':build_vm(),
+               'E:\\JAVA\\a_long_file_name.jar':jar('Manifest-Version: 1.0\r\nMIDlet-Name: Игра\r\n'
+                                                    ' Тест\r\nMIDlet-Icon: /icon.png\r\nMIDlet-1: X, , Main\r\n',
+                                                    {'icon.png':red},zipfile.ZIP_STORED),
+               'E:\\JAVA\\b.jar':jar('MIDlet-1: Opera, /i.png, Main\r\nMIDlet-Name: Opera Mini\r\n',
+                                     {'i.png':green},zipfile.ZIP_DEFLATED),
+               'E:\\JAVA\\c.jar':jar('Main-Class: Hello\r\n',{},zipfile.ZIP_DEFLATED)}
+        event,calls=self.fixture(b'',files=files,budget=400000000)
+        event(0xf021);event(0xfa1b)
+        self.assertEqual(calls['texts'][-4:],['Java','ИграТест','Opera Mini','c'])
+        screen=lambda x,y:int.from_bytes(self.last_uc.mem_read(0x04280200+(y*176+x)*2,2),'big')
+        # Rows at y=28 and 50, icons at x=6, y+1: red scaled to the full 16x16, green 20x20 too.
+        self.assertEqual(screen(6+8,29+8),0xf800)
+        self.assertEqual(screen(6+8,51+8),0x07e0)
+        self.assertEqual(screen(6+8,73+8),0)      # no icon in the third row
+        event(0xfa17);event(0xf022)
+        self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))
+
     def test_java_vm_says_where_to_put_jars(self):
         from tools.build_java_phone import build_vm
         files={'E:\\APPS.LST':b'JAVA.GO1\r\n','E:\\JAVA.GO1':build_vm()}

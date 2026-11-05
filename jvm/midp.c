@@ -425,46 +425,23 @@ static u8 paeth(u8 a, u8 b, u8 c) {
     return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
 }
 
-/* Draw.decodePng(byte[] data, int offset, int length, Image into) -> success */
-static int draw_decode_png(Thread *t, u32 *args, u32 *result) {
-    Jvm *vm = thread_vm(t);
-    Array *source = (Array *)ARG_REF(0);
-    Object *image = ARG_REF(3);
-    if (!source || !image) { throw_new(t, "java/lang/NullPointerException", 0); return 1; }
-    if (I(1) < 0 || I(2) < 0 || (u32)I(1)+(u32)I(2) > source->length) { throw_new(t, "java/lang/ArrayIndexOutOfBoundsException", 0); return 1; }
-    if (!image_fields(vm)) return 1;
-    Png png;
-    result[0] = 0;
-    if (!png_parse(ARRAY_DATA(source)+I(1), (u32)I(2), &png)) return 0;
+/* IDAT payload -> packed, inflate -> raw (height*(row_bytes+1)), unfilter, then
+   RGB565 pixels and, when out_alpha is set, 8-bit alpha. Returns 1 on success. */
+static int png_decode_core(const u8 *p, u32 size, const Png *ppng, u8 *packed, u8 *raw, u16 *out, u8 *out_alpha) {
+    Png png = *ppng;
     u32 channels = png_channels(png.color), bits = channels*png.depth;
     u32 row_bytes = (png.width*bits+7)/8, bpp = bits >= 8 ? bits/8 : 1;
     u32 raw_size = png.height*(row_bytes+1);
-    int has_alpha = png.color == 4 || png.color == 6 || png.trns;
-    Class *bytes = primitive_array(vm, 'B'), *shorts = primitive_array(vm, 'S');
-    Array *packed = new_array(vm, bytes, png.idat);
-    if (!packed) { throw_new(t, "java/lang/OutOfMemoryError", 0); return 1; }
-    push_root(vm, (Object *)packed);
-    Array *raw = new_array(vm, bytes, raw_size);
-    if (raw) push_root(vm, (Object *)raw);
-    Array *pixels = raw ? new_array(vm, shorts, png.width*png.height) : 0;
-    if (pixels) push_root(vm, (Object *)pixels);
-    Array *alpha = pixels && has_alpha ? new_array(vm, bytes, png.width*png.height) : 0;
-    u32 roots = 1+(raw != 0)+(pixels != 0);
-    if (!raw || !pixels || (has_alpha && !alpha)) { pop_roots(vm, roots); throw_new(t, "java/lang/OutOfMemoryError", 0); return 1; }
-    /* Gather the IDAT payload (the source array cannot move: the heap is non-moving). */
-    const u8 *p = ARRAY_DATA(source)+I(1);
     u32 n = 0;
-    for (u32 at = 8; at+12 <= (u32)I(2);) {
+    for (u32 at = 8; at+12 <= size;) {
         u32 length = rd32(p+at);
-        if (!jvm_memcmp(p+at+4, "IDAT", 4)) { jvm_memcpy(ARRAY_DATA(packed)+n, p+at+8, length); n += length; }
+        if (!jvm_memcmp(p+at+4, "IDAT", 4)) { jvm_memcpy(packed+n, p+at+8, length); n += length; }
         if (!jvm_memcmp(p+at+4, "IEND", 4)) break;
         at += 12+length;
     }
     /* zlib: 2-byte header, deflate data, Adler-32 (not checked). */
-    int ok = n > 6 && jar_inflate(ARRAY_DATA(packed)+2, n-6, ARRAY_DATA(raw), raw_size);
-    pop_roots(vm, roots);
-    if (!ok) return 0;
-    u8 *d = ARRAY_DATA(raw);
+    if (!(n > 6 && jar_inflate(packed+2, n-6, raw, raw_size))) return 0;
+    u8 *d = raw;
     for (u32 y = 0; y < png.height; y++) {
         u8 *row = d+y*(row_bytes+1)+1, *above = y ? row-(row_bytes+1) : 0, filter = row[-1];
         for (u32 i = 0; i < row_bytes; i++) {
@@ -478,8 +455,6 @@ static int draw_decode_png(Thread *t, u32 *args, u32 *result) {
             }
         }
     }
-    u16 *out = (u16 *)ARRAY_DATA(pixels);
-    u8 *out_alpha = alpha ? ARRAY_DATA(alpha) : 0;
     u32 step = png.depth == 16 ? 2 : 1;
     for (u32 y = 0; y < png.height; y++) {
         const u8 *row = d+y*(row_bytes+1)+1;
@@ -522,6 +497,55 @@ static int draw_decode_png(Thread *t, u32 *args, u32 *result) {
             if (out_alpha) out_alpha[y*png.width+x] = (u8)a;
         }
     }
+    return 1;
+}
+
+int jvm_png_info(const uint8_t *data, uint32_t size, JvmPngInfo *info) {
+    Png png;
+    if (!png_parse(data, size, &png)) return 0;
+    u32 bits = png_channels(png.color)*png.depth;
+    info->width = png.width; info->height = png.height;
+    info->packed_size = png.idat;
+    info->raw_size = png.height*((png.width*bits+7)/8+1);
+    info->has_alpha = png.color == 4 || png.color == 6 || png.trns;
+    return 1;
+}
+
+int jvm_png_decode(const uint8_t *data, uint32_t size, uint8_t *packed, uint8_t *raw, uint16_t *pixels, uint8_t *alpha) {
+    Png png;
+    return png_parse(data, size, &png) && png_decode_core(data, size, &png, packed, raw, pixels, alpha);
+}
+
+/* Draw.decodePng(byte[] data, int offset, int length, Image into) -> success */
+static int draw_decode_png(Thread *t, u32 *args, u32 *result) {
+    Jvm *vm = thread_vm(t);
+    Array *source = (Array *)ARG_REF(0);
+    Object *image = ARG_REF(3);
+    if (!source || !image) { throw_new(t, "java/lang/NullPointerException", 0); return 1; }
+    if (I(1) < 0 || I(2) < 0 || (u32)I(1)+(u32)I(2) > source->length) { throw_new(t, "java/lang/ArrayIndexOutOfBoundsException", 0); return 1; }
+    if (!image_fields(vm)) return 1;
+    Png png;
+    result[0] = 0;
+    if (!png_parse(ARRAY_DATA(source)+I(1), (u32)I(2), &png)) return 0;
+    u32 bits = png_channels(png.color)*png.depth;
+    u32 raw_size = png.height*((png.width*bits+7)/8+1);
+    int has_alpha = png.color == 4 || png.color == 6 || png.trns;
+    Class *bytes = primitive_array(vm, 'B'), *shorts = primitive_array(vm, 'S');
+    Array *packed = new_array(vm, bytes, png.idat);
+    if (!packed) { throw_new(t, "java/lang/OutOfMemoryError", 0); return 1; }
+    push_root(vm, (Object *)packed);
+    Array *raw = new_array(vm, bytes, raw_size);
+    if (raw) push_root(vm, (Object *)raw);
+    Array *pixels = raw ? new_array(vm, shorts, png.width*png.height) : 0;
+    if (pixels) push_root(vm, (Object *)pixels);
+    Array *alpha = pixels && has_alpha ? new_array(vm, bytes, png.width*png.height) : 0;
+    u32 roots = 1+(raw != 0)+(pixels != 0);
+    if (!raw || !pixels || (has_alpha && !alpha)) { pop_roots(vm, roots); throw_new(t, "java/lang/OutOfMemoryError", 0); return 1; }
+    /* The source array cannot move: the heap is non-moving. */
+    int ok = png_decode_core(ARRAY_DATA(source)+I(1), (u32)I(2), &png, ARRAY_DATA(packed), ARRAY_DATA(raw),
+                             (u16 *)ARRAY_DATA(pixels), alpha ? ARRAY_DATA(alpha) : 0);
+    pop_roots(vm, roots);
+    if (!ok) return 0;
     FIELD(image, vm->image_pixels) = (u32)(uintptr_t)pixels;
     FIELD(image, vm->image_alpha) = (u32)(uintptr_t)alpha;
     FIELD(image, vm->image_width) = png.width;
@@ -585,4 +609,29 @@ int jvm_main_class(const JvmHost *host, char *name, uint32_t capacity) {
     }
     host->release(host->context, manifest);
     return found;
+}
+
+uint32_t jvm_manifest_value(const uint8_t *manifest, uint32_t size, const char *key, char *out, uint32_t capacity) {
+    u32 key_length = jvm_strlen(key), n = 0;
+    if (!capacity) return 0;
+    for (u32 i = 0; i < size; i++) {
+        if ((i && manifest[i-1] != '\n') || size-i < key_length+1 || jvm_memcmp(manifest+i, key, key_length) ||
+            manifest[i+key_length] != ':') continue;
+        u32 p = i+key_length+1;
+        while (p < size && manifest[p] == ' ') p++;
+        for (;;) {
+            while (p < size && manifest[p] != '\r' && manifest[p] != '\n') {
+                if (n+1 < capacity) out[n++] = (char)manifest[p];
+                p++;
+            }
+            if (p < size && manifest[p] == '\r') p++;
+            if (p < size && manifest[p] == '\n') p++;
+            if (p < size && manifest[p] == ' ') { p++; continue; }  /* continuation line */
+            break;
+        }
+        while (n && out[n-1] == ' ') n--;
+        break;
+    }
+    out[n] = 0;
+    return n;
 }

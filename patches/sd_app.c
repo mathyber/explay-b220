@@ -259,8 +259,9 @@ static void menu(void) {
         if (selected) fill(0,y,176,20,0x2104);
         u32 color=selected?0x07ff:0xffff,length=0;
         while (length<GO1_TITLE_MAX && CAT->titles[n][length]) length++;
-        if (length) text_wide_at(LIST_TEXT_X,y,CAT->titles[n],length,color,TEXT_LEFT);
-        else text_at(LIST_TEXT_X,y,CAT->names[n],color,TEXT_LEFT);
+        /* Capitals take rows +3..+11 of the text box: +2 centres them in the 20-row bar. */
+        if (length) text_wide_at(LIST_TEXT_X,y+2,CAT->titles[n],length,color,TEXT_LEFT);
+        else text_at(LIST_TEXT_X,y+2,CAT->names[n],color,TEXT_LEFT);
         if (CAT->has_icon[n]) draw_icon(LIST_ICON_X,y+2,CAT->pixels[n],CAT->alpha[n]);
     }
 }
@@ -371,10 +372,15 @@ static u32 api_find_next(u32 search,Go1FindEntry *entry) {
     return error;
 }
 static void api_find_close(u32 search) { FN(0x5ee94b,FindClose)(search); }
+static void api_text_at(u32 x,u32 y,const u16 *wide,u32 color) {
+    u32 count=0;
+    while (count<64 && wide[count]) count++;
+    text_wide_at(x,y,wide,count,color,TEXT_LEFT);
+}
 static const Go1Api api={GO1_API_VERSION,sizeof(Go1Api),api_alloc,api_free,api_open,api_size,api_read,
                          api_close,fill,api_text,api_exit,api_heap_free,api_screen,api_flush,
                          api_timer,api_ms,api_seek,api_open_wide,api_text_wide,
-                         api_find_first,api_find_next,api_find_close};
+                         api_find_first,api_find_next,api_find_close,api_text_at};
 /* Relocate a GO1N file in place: the image starts after the 32-byte header,
    .bss follows the image and may overwrite the already applied table.
    Takes ownership of the file buffer and frees it on failure. */

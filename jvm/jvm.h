@@ -89,5 +89,16 @@ int jvm_post_event(Jvm *vm, int type, int value);
 /* Main class for an application JAR, read through host->read: "go1/Launcher"
    when the manifest declares MIDlet-1, otherwise its Main-Class. */
 int jvm_main_class(const JvmHost *host, char *name, uint32_t capacity);
+/* Value of a manifest attribute ("MIDlet-Name"), continuation lines joined,
+   as UTF-8 without surrounding spaces. Returns its length, 0 when missing. */
+uint32_t jvm_manifest_value(const uint8_t *manifest, uint32_t size, const char *key, char *out, uint32_t capacity);
+
+/* PNG decoding without a VM (used before one exists, e.g. for list icons).
+   jvm_png_info gives the image size and the buffer sizes jvm_png_decode
+   needs: packed (IDAT), raw (unpacked rows), width*height pixels and,
+   when has_alpha, width*height alpha bytes (alpha may be 0 otherwise). */
+typedef struct JvmPngInfo { uint32_t width, height, packed_size, raw_size; int has_alpha; } JvmPngInfo;
+int jvm_png_info(const uint8_t *data, uint32_t size, JvmPngInfo *info);
+int jvm_png_decode(const uint8_t *data, uint32_t size, uint8_t *packed, uint8_t *raw, uint16_t *pixels, uint8_t *alpha);
 
 #endif

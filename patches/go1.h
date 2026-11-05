@@ -116,6 +116,9 @@ typedef struct Go1Api {
     go1_u32 (*find_first)(const unsigned short *pattern, Go1FindEntry *entry);
     go1_u32 (*find_next)(go1_u32 search, Go1FindEntry *entry);
     void (*find_close)(go1_u32 search);
+    /* Fields below exist when api->size covers them (loaders from 2026-11-05). */
+    /* UCS-2 text, left-aligned from x, up to 64 characters, Y = 0..156. */
+    void (*text_at)(go1_u32 x, go1_u32 y, const unsigned short *text, go1_u32 color);
 } Go1Api;
 
 
