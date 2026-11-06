@@ -138,24 +138,46 @@ static inline void plot(Surface *s, const Clip *c, i32 x, i32 y, u16 color) {
     if (s->alpha && !s->bits) s->alpha[y*s->width+x] = 255;
 }
 
+/* n pixels copied forward: two at a time when both rows are equally aligned. */
+static void copy16(u16 *to, const u16 *from, i32 n) {
+    if ((((uintptr_t)to ^ (uintptr_t)from) & 2) == 0) {
+        if (n > 0 && ((uintptr_t)to & 2)) { *to++ = *from++; n--; }
+        u32 *t = (u32 *)to;
+        const u32 *f = (const u32 *)from;
+        for (; n >= 2; n -= 2) *t++ = *f++;
+        to = (u16 *)t; from = (const u16 *)f;
+    }
+    while (n-- > 0) *to++ = *from++;
+}
+
+/* n pixels of one colour: two at a time where the row is word aligned. */
+static void fill16(u16 *p, i32 n, u16 color) {
+    if (n > 0 && ((uintptr_t)p & 2)) { *p++ = color; n--; }
+    u32 pair = (u32)color << 16 | color, *w = (u32 *)p;
+    for (; n >= 2; n -= 2) *w++ = pair;
+    if (n) *(u16 *)w = color;
+}
+
 static void span(Surface *s, const Clip *c, i32 y, i32 x0, i32 x1, u16 color) {
     if (y < c->y0 || y >= c->y1) return;
     if (x0 < c->x0) x0 = c->x0;
     if (x1 > c->x1) x1 = c->x1;
-    for (i32 x = x0; x < x1; x++) {
-        s->pixels[y*s->width+x] = color;
-        if (s->alpha && !s->bits) s->alpha[y*s->width+x] = 255;
-    }
+    if (x0 >= x1) return;
+    fill16(&s->pixels[y*s->width+x0], x1-x0, color);
+    if (s->alpha && !s->bits) jvm_memset(&s->alpha[y*s->width+x0], 255, (u32)(x1-x0));
 }
 
-/* Draw.fillRect(target, x, y, w, h, rgb, clip x, y, w, h) */
+/* Draw.fillRect(target, x, y, w, h, rgb, clip x, y, w, h): clipped once. */
 static int draw_fill_rect(Thread *t, u32 *args, u32 *result) {
     (void)result;
     Surface s;
     if (!surface(t, ARG_REF(0), &s)) return 1;
     Clip c = clip_of(&s, I(6), I(7), I(8), I(9));
     u16 color = rgb565(args[5]);
-    for (i32 y = I(2); y < I(2)+I(4); y++) span(&s, &c, y, I(1), I(1)+I(3), color);
+    i32 y0 = I(2), y1 = I(2)+I(4);
+    if (y0 < c.y0) y0 = c.y0;
+    if (y1 > c.y1) y1 = c.y1;
+    for (i32 y = y0; y < y1; y++) span(&s, &c, y, I(1), I(1)+I(3), color);
     return 0;
 }
 
@@ -251,12 +273,36 @@ static int draw_region(Thread *t, u32 *args, u32 *result) {
         const u16 *from = src.pixels;
         i32 at = row;
         if (!src.alpha) {
-            for (i32 i = 0; i < n; i++, at += step) to[i] = from[at];
+            if (step == 1) copy16(to, from+at, n);
+            else for (i32 i = 0; i < n; i++, at += step) to[i] = from[at];
             if (to_alpha) for (i32 i = 0; i < n; i++) to_alpha[i] = 255;
             continue;
         }
+        if (src.bits) {
+            /* A bit per pixel: copy or skip; left to right, whole mask bytes at once. */
+            const u8 *mask = src.alpha;
+            for (i32 i = 0; i < n;) {
+                if (step == 1 && !(at & 7) && n-i >= 8) {
+                    u8 m8 = mask[at >> 3];
+                    if (m8 == 0xff) {
+                        for (i32 k = 0; k < 8; k++) to[i+k] = from[at+k];
+                        if (to_alpha) for (i32 k = 0; k < 8; k++) to_alpha[i+k] = 255;
+                        i += 8; at += 8;
+                        continue;
+                    }
+                    if (!m8) { i += 8; at += 8; continue; }
+                }
+                if ((mask[at >> 3] >> (at & 7)) & 1) {
+                    to[i] = from[at];
+                    if (to_alpha) to_alpha[i] = 255;
+                }
+                i++; at += step;
+            }
+            continue;
+        }
+        const u8 *alpha = src.alpha;
         for (i32 i = 0; i < n; i++, at += step) {
-            u32 a = alpha_at(&src, (u32)at);
+            u32 a = alpha[at];
             if (!a) continue;
             to[i] = a >= 255 ? from[at] : blend(to[i], from[at], a);
             if (to_alpha && a > to_alpha[i]) to_alpha[i] = (u8)a;
