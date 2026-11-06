@@ -26,8 +26,15 @@ DIRECTORY = ROOT/'analysis/jvm/phone'
 FIRMWARE = ROOT/'analysis/firmware-patches/cut/b220-cut.bin'
 
 
+# The interpreter and the drawing code run in ARM state: in Thumb the interpreter
+# spilled pc/sp/locals to the stack on almost every bytecode (23 instructions for
+# simple bytecodes, 17 in ARM).
+ARM_FILES = ('interp.c', 'midp.c')  # midp.c: drawing loops
+
+
 def build_vm():
-    return compile_native(SOURCES/'phone_main.c', [SOURCES/f for f in VM_FILES], includes=[SOURCES])
+    return compile_native(SOURCES/'phone_main.c', [SOURCES/f for f in VM_FILES if f not in ARM_FILES],
+                          includes=[SOURCES], arm_sources=[SOURCES/f for f in ARM_FILES])
 
 
 def zip_directory(directory, path, manifest=None):

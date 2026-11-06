@@ -157,7 +157,7 @@ struct Jvm {
     u32 used, gc_count, uncaught, peak_live;
     Class *classes;
     Thread *threads, *current;
-    u32 turn;  /* round-robin start: which thread jvm_run begins with */
+    u32 turn;  /* bytecodes left in the current thread's turn (0: pick the next thread) */
     u8 halted; /* go1.Launcher.halt(): the MIDlet is finished, other threads or not */
     Monitor monitors[MAX_MONITORS];
     Object *temp_roots[MAX_TEMP_ROOTS];

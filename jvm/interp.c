@@ -819,7 +819,23 @@ static void wake_threads(Jvm *vm) {
     }
 }
 
+/* Bytecodes a thread runs before the next runnable thread gets its turn. Phone
+   JVMs switch on a timer of tens of milliseconds; switching every few thousand
+   bytecodes exposes races in MIDlets (Opera Mini 4.2 feeds its 4-byte entropy
+   buffer from two threads under different locks and overran it at startup with
+   4000). A thread that sleeps or waits yields at once. The turn survives across
+   jvm_run calls, so callers may run the VM in small budgets. */
 #define THREAD_SLICE 16000
+
+/* The runnable thread after `from` in list order (wrapping), or 0. */
+static Thread *next_runnable(Jvm *vm, Thread *from) {
+    Thread *t = from;
+    for (Thread *k = vm->threads; k; k = k->next) {
+        t = t && t->next ? t->next : vm->threads;
+        if (t->state == THREAD_RUNNABLE) return t;
+    }
+    return 0;
+}
 
 int jvm_run(Jvm *vm, u32 budget) {
     jvm_current_vm = vm;
@@ -827,37 +843,26 @@ int jvm_run(Jvm *vm, u32 budget) {
     if (vm->halted) return JVM_DONE;
     while (budget) {
         wake_threads(vm);
-        int any = 0;
-        /* Start one thread further each pass: with slices close to the budget
-           the first threads in the list would otherwise get every tick. */
-        u32 count = 0;
-        for (Thread *t = vm->threads; t; t = t->next) count++;
-        Thread *first = vm->threads;
-        for (u32 skip = count ? vm->turn++ % count : 0; skip; skip--) first = first->next;
-        for (u32 k = 0; k < count && budget; k++) {
-            Thread *t = first;
-            for (u32 step = 0; step < k; step++) t = t->next ? t->next : vm->threads;
-            if (t->state != THREAD_RUNNABLE) continue;
-            any = 1;
-            /* Bytecodes before switching threads. Phone JVMs switch on a timer
-               of tens of milliseconds; switching every few thousand bytecodes
-               exposes races in MIDlets (Opera Mini 4.2 feeds its 4-byte entropy
-               buffer from two threads under different locks and overran it at
-               startup with 4000). A thread that sleeps or waits yields at once. */
-            u32 slice = budget < THREAD_SLICE ? budget : THREAD_SLICE;
-            vm->current = t;
-            /* Charge what ran: a thread that soon sleeps or waits leaves the
-               rest of the budget to the others. */
-            u32 used = execute(vm, t, slice);
-            budget -= used ? used : 1;
-            if (vm->status == JVM_ERROR) return JVM_ERROR;
-            if (vm->halted) return JVM_DONE;
+        Thread *t = vm->current;
+        if (!t || t->state != THREAD_RUNNABLE || !vm->turn) {
+            t = next_runnable(vm, vm->current);
+            if (!t) {
+                for (Thread *k = vm->threads; k; k = k->next)
+                    if (k->state != THREAD_DEAD) return JVM_IDLE;
+                return JVM_DONE;
+            }
+            vm->turn = THREAD_SLICE;
         }
-        if (!any) {
-            for (Thread *t = vm->threads; t; t = t->next)
-                if (t->state != THREAD_DEAD) return JVM_IDLE;
-            return JVM_DONE;
-        }
+        vm->current = t;
+        /* Charge what ran: a thread that soon sleeps or waits leaves the rest
+           of the budget to the others. */
+        u32 used = execute(vm, t, budget < vm->turn ? budget : vm->turn);
+        if (!used) used = 1;
+        budget -= used < budget ? used : budget;
+        vm->turn -= used < vm->turn ? used : vm->turn;
+        if (t->state != THREAD_RUNNABLE) vm->turn = 0;
+        if (vm->status == JVM_ERROR) return JVM_ERROR;
+        if (vm->halted) return JVM_DONE;
     }
     return JVM_RUNNING;
 }

@@ -291,7 +291,7 @@ class NativeVmTests(unittest.TestCase):
         event,calls=self.fixture(b'',files=files,budget=400000000)
         event(0xf021);loaded=event(0xfa1b)
         self.assertEqual((loaded['mode'],loaded['status']),(2,0))
-        self.assertEqual(calls['timers'],[(0x160002,20,1)])
+        self.assertEqual(calls['timers'][0],(0x160002,1,0))  # one-shot; each tick arms the next
         for _ in range(200):
             event(0xf020,param=0x40000100)
             if '[finished]' in calls['texts']:break
@@ -332,7 +332,8 @@ class NativeVmTests(unittest.TestCase):
         event(0xfa1b)  # OK after the end: VM memory freed, list again
         self.assertEqual(calls['texts'][-3:],['Java','Zeta Hello','Игра'])
         self.assertIn(calls['allocated'][calls['allocation_sizes'].index(block)],calls['freed'])
-        self.assertEqual(calls['stopped'][-1:],[7])
+        # The VM ran on one-shot timers only; none is left running after the end.
+        self.assertTrue(calls['timers'] and all(not periodic for _,_,periodic in calls['timers']))
         event(0xfa17)  # right soft key on the list: back to SD Apps
         event(0xf022)
         self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))

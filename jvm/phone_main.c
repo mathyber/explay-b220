@@ -15,7 +15,12 @@ program ends, the list comes back. */
 typedef uint32_t u32;
 typedef uint16_t u16;
 
-#define SLICE 20000          /* bytecodes per timer tick */
+#define SLICE 2000           /* bytecodes between clock checks */
+#define RUN_MS 30            /* VM time per tick. The firmware timer fires 2-6 ms late,
+                                sometimes 20 ms: longer runs waste less. Firmware tasks
+                                with higher priority preempt the VM anyway; the MMI
+                                handles keys and repaints between runs. */
+#define MAX_ROUNDS 150       /* SLICE rounds per tick even if the clock stands still */
 #define TICK_MS 20
 #define META_BASE (176*1024) /* MIDP library classes, threads, collector tables */
 #define HEAP_MIN (128*1024)
@@ -372,6 +377,21 @@ static int64_t host_now(void *context) {
    sends the screen buffer to the LCD later, so drawing straight into it showed
    frames still being painted (Age of Empires III redraws its menu all the time). */
 static u16 *back;
+
+/* A frame row: 32-bit words, 8 pixels per step, where both rows are equally aligned
+   (always for the back buffer and the screen); per pixel only at the edges. */
+static void copy_pixels(u16 *to, const u16 *from, u32 n) {
+    if (((uintptr_t)to ^ (uintptr_t)from) & 2) { while (n--) *to++ = *from++; return; }
+    if ((uintptr_t)to & 2 && n) { *to++ = *from++; n--; }
+    u32 *t = (u32 *)to;
+    const u32 *f = (const u32 *)from;
+    for (; n >= 8; n -= 8, t += 4, f += 4) {
+        u32 a = f[0], b = f[1], c = f[2], d = f[3];
+        t[0] = a; t[1] = b; t[2] = c; t[3] = d;
+    }
+    to = (u16 *)t; from = (const u16 *)f;
+    while (n--) *to++ = *from++;
+}
 static uint16_t *host_screen(void *context) { (void)context; return back ? back : api->screen(); }
 static void host_flush(void *context, int x, int y, int w, int h) {
     (void)context;
@@ -382,11 +402,7 @@ static void host_flush(void *context, int x, int y, int w, int h) {
         if (y+h > JVM_SCREEN_HEIGHT) h = JVM_SCREEN_HEIGHT-y;
         if (w <= 0 || h <= 0) return;
         u16 *screen = api->screen();
-        for (int row = y; row < y+h; row++) {
-            const u16 *from = back+row*JVM_SCREEN_WIDTH+x;
-            u16 *to = screen+row*JVM_SCREEN_WIDTH+x;
-            for (int i = 0; i < w; i++) to[i] = from[i];
-        }
+        for (int row = y; row < y+h; row++) copy_pixels(screen+row*JVM_SCREEN_WIDTH+x, back+row*JVM_SCREEN_WIDTH+x, (u32)w);
     }
     api->flush((u32)x, (u32)y, (u32)w, (u32)h);
 }
@@ -537,7 +553,7 @@ static void start(const u16 *path) {
     vm = block ? jvm_create(&host, block, bytes, meta) : 0;
     if (!vm) { say("VM creation failed\n"); finished = 1; return; }
     if (!jvm_start_main(vm, name)) { say("VM: "); say(jvm_error(vm)); put('\n'); finished = 1; return; }
-    api->timer(TICK_MS, 1);
+    api->timer(1, 0);  /* first tick; every tick arms the next one */
 }
 
 static void launch(u32 index) {
@@ -585,15 +601,36 @@ static void choose(u32 message) {
     draw_list();
 }
 
+/* A one-shot timer per tick instead of a periodic one: with work left the VM runs
+   again almost at once (the MMI handles queued keys and repaints in between), and
+   the periodic 20 ms timer lost ticks while the VM ran (measured 42 a second).
+   With every thread asleep it waits for the next wake-up, at most TICK_MS. */
+static void next_tick(int status) {
+    u32 delay = TICK_MS;
+    if (status == JVM_RUNNING) delay = 1;
+    else {
+        u32 wake = jvm_next_wake(vm), now = api->ms();
+        if (wake != 0xffffffffu) delay = (int32_t)(wake-now) <= 1 ? 1 : wake-now < TICK_MS ? wake-now : TICK_MS;
+    }
+    api->timer(delay, 0);
+}
+
 static void tick(void) {
     if (!vm || finished) return;
     if (exit_deadline && (int32_t)(api->ms()-exit_deadline) >= 0) { done(); return; }
-    int status = jvm_run(vm, SLICE);
+    /* Run by the clock, not a fixed bytecode count: a fixed count capped the VM
+       below what the CPU can do (the interpreter got faster, the cap stayed). */
+    u32 start = api->ms();
+    int status;
+    u32 rounds = 0;
+    do status = jvm_run(vm, SLICE);
+    while (status == JVM_RUNNING && api->ms()-start < RUN_MS && ++rounds < MAX_ROUNDS);
     /* An uncaught exception or VM error brings the console back over the MIDlet. */
     if (midp && (status == JVM_ERROR || jvm_uncaught(vm))) { midp = 0; dirty = 1; }
     if (status == JVM_DONE && midp) done();
     else if (status == JVM_DONE) { say("[finished]\n"); finished = 1; api->timer(0, 0); }
     else if (status == JVM_ERROR) { say("VM: "); say(jvm_error(vm)); put('\n'); finished = 1; api->timer(0, 0); }
+    else if (vm && !finished) next_tick(status);
 }
 
 __attribute__((used, section(".entry")))

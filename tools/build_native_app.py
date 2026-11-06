@@ -132,17 +132,19 @@ def with_extras(program, title=None, icon=None):
     return bytes(result)
 
 
-def compile_native(source, sources=(), includes=(), icon=None, title=None, libraries=(), library_flags=()):
+def compile_native(source, sources=(), includes=(), icon=None, title=None, libraries=(), library_flags=(), arm_sources=()):
     """GO1N program. Defaults: the title from a 'go1-title:' line in the source,
     the icon from a 16x16 PNG with the source's name; both are optional."""
     png = Path(source).with_suffix('.png')
     icon = icon or (png if png.exists() else None)
     title = title or source_title(source)
-    return with_extras(_compile(source, sources, includes, libraries, library_flags), title, icon)
+    return with_extras(_compile(source, sources, includes, libraries, library_flags, arm_sources), title, icon)
 
 
-def _compile(source, sources=(), includes=(), libraries=(), library_flags=()):
-    """libraries: third-party C files, compiled without warnings and cached by content and flags."""
+def _compile(source, sources=(), includes=(), libraries=(), library_flags=(), arm_sources=()):
+    """libraries: third-party C files, compiled without warnings and cached by content and flags.
+    arm_sources: own C files compiled in ARM state (all warnings are errors), for hot code:
+    Thumb on ARMv4T has 8 low registers and spills an interpreter's state to the stack."""
     if not EXECUTABLE.exists():
         raise ValueError('Run python -m tools.setup_arm_toolchain first')
     environment = os.environ.copy()
@@ -179,6 +181,10 @@ def _compile(source, sources=(), includes=(), libraries=(), library_flags=()):
         for index, item in enumerate((source, *sources)):
             objects.append(str(Path(folder)/f'{index}.o'))
             execute([str(EXECUTABLE), *common, '-Wall', '-Wextra', '-Werror', str(item), '-o', objects[-1]])
+        arm = ['armeb-freestanding-eabi' if f == 'thumbeb-freestanding-eabi' else f for f in common if f != '-mthumb']
+        for index, item in enumerate(arm_sources):
+            objects.append(str(Path(folder)/f'arm{index}.o'))
+            execute([str(EXECUTABLE), *arm, '-Wall', '-Wextra', '-Werror', str(item), '-o', objects[-1]])
         with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
             objects += list(pool.map(library_object, libraries))
         script = (ROOT/LINKER).read_text(encoding='utf-8')

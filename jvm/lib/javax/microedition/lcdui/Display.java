@@ -21,7 +21,7 @@ public class Display {
     private Displayable current;
     private final Vector serial = new Vector();
     private Thread eventThread;
-    private boolean repaintPending, wakePosted;
+    private boolean repaintPending, wakePosted, painting;
     private int x0, y0, x1, y1;
 
     private Display() {}
@@ -91,11 +91,16 @@ public class Display {
             paintPending();
             return;
         }
-        while (repaintPending && !Launcher.isExiting()) {
-            try {
-                Thread.sleep(5);
-            } catch (InterruptedException e) {
-                return;
+        /* MIDP: returns when the pending repaint has been painted, not when it
+           starts. Waiting on the display instead of polling with sleep lets the
+           caller go on as soon as the frame is out (polling left the VM idle). */
+        synchronized (this) {
+            while ((repaintPending || painting) && !Launcher.isExiting()) {
+                try {
+                    wait(50);
+                } catch (InterruptedException e) {
+                    return;
+                }
             }
         }
     }
@@ -105,19 +110,27 @@ public class Display {
         synchronized (this) {
             if (!repaintPending) return;
             repaintPending = false;
+            painting = true;
             px = Math.max(0, x0); py = Math.max(0, y0);
             pw = Math.min(WIDTH, x1) - px; ph = Math.min(HEIGHT, y1) - py;
         }
-        Displayable d = current;
-        if (d == null || pw <= 0 || ph <= 0) return;
-        Graphics g = new Graphics(null, WIDTH, HEIGHT);
-        g.setClip(px, py, pw, ph);
         try {
-            d.go1Paint(g);
-        } catch (RuntimeException e) {
-            e.printStackTrace();
+            Displayable d = current;
+            if (d == null || pw <= 0 || ph <= 0) return;
+            Graphics g = new Graphics(null, WIDTH, HEIGHT);
+            g.setClip(px, py, pw, ph);
+            try {
+                d.go1Paint(g);
+            } catch (RuntimeException e) {
+                e.printStackTrace();
+            }
+            Draw.flush(px, py, pw, ph);
+        } finally {
+            synchronized (this) {
+                painting = false;
+                notifyAll();
+            }
         }
-        Draw.flush(px, py, pw, ph);
     }
 
     private void runSerial() {
