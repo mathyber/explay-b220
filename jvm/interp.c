@@ -81,15 +81,22 @@ Thread *new_thread(Jvm *vm, Object *object) {
     return t;
 }
 
+/* The search stops once every entry in use was seen (synchronized methods on
+   streams enter and leave a monitor per byte; the whole table was scanned each time). */
 Monitor *monitor_for(Jvm *vm, Object *o, int create) {
     Monitor *empty = 0;
+    u32 seen = 0;
     for (u32 i = 0; i < MAX_MONITORS; i++) {
-        if (vm->monitors[i].object == o) return &vm->monitors[i];
-        if (!vm->monitors[i].object && !empty) empty = &vm->monitors[i];
+        Object *x = vm->monitors[i].object;
+        if (x == o && o) return &vm->monitors[i];
+        if (x) seen++;
+        else if (!empty) empty = &vm->monitors[i];
+        if (seen == vm->monitors_used && (empty || !create)) break;
     }
-    if (!create) return 0;
+    if (!create || !o) return 0;
     if (!empty) { vm_fail(vm, "too many monitors", 0); return 0; }
     empty->object = o; empty->owner = 0; empty->count = 0;
+    vm->monitors_used++;
     return empty;
 }
 
@@ -102,6 +109,7 @@ static void release_monitor(Jvm *vm, Monitor *m) {
     for (Thread *k = vm->threads; k; k = k->next)
         if (k->waiting_on == m->object && (k->state == THREAD_BLOCKED || k->state == THREAD_WAITING)) return;
     m->object = 0;
+    vm->monitors_used--;
 }
 
 int monitor_enter(Thread *t, Object *o) {
@@ -354,6 +362,9 @@ enum {
     INVOKEVIRTUAL_Q, INVOKESTATIC_Q, INVOKESPECIAL_Q, INVOKEVIRTUAL_SLOW
 };
 #define PLAIN(method) (!((method)->access & (ACC_NATIVE|ACC_SYNCHRONIZED|ACC_ABSTRACT)))
+/* Quick calls also take bound natives that are not synchronized. */
+#define QUICK_OK(method) (!((method)->access & (ACC_SYNCHRONIZED|ACC_ABSTRACT)) && \
+                          (!((method)->access & ACC_NATIVE) || (method)->native))
 
 u32 execute(Jvm *vm, Thread *t, u32 budget) {
     const u32 initial = budget;
@@ -627,7 +638,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
                 int ready = ensure_initialized(t, target->owner, sp);
                 if (ready < 0) goto exception_exact_saved;
                 if (!ready) { f->pc = start; RELOAD(); break; }
-                if (target->owner->state == CLASS_INITIALIZED && PLAIN(target)) *(u8 *)start = INVOKESTATIC_Q;
+                if (target->owner->state == CLASS_INITIALIZED && QUICK_OK(target)) *(u8 *)start = INVOKESTATIC_Q;
             } else {
                 Object *receiver = REF(args[0]);
                 NULL_CHECK(receiver);
@@ -740,8 +751,8 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
                 NULL_CHECK(receiver);
                 if (op == INVOKEVIRTUAL_Q) {
                     target = receiver->cls->vtable[target->vtable_index];
-                    if (!target || !PLAIN(target)) {
-                        /* A native, synchronized or abstract override: the general path, for good. */
+                    if (!target || !QUICK_OK(target)) {
+                        /* A synchronized, abstract or unbound override: the general path, for good. */
                         *(u8 *)start = INVOKEVIRTUAL_SLOW;
                         pc = start;
                         break;
@@ -749,6 +760,21 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
                 }
             }
             pc += 2;
+            if (target->access & ACC_NATIVE) {
+                /* As on the general path. */
+                u32 result[2] = {0, 0};
+                f->pc = start; f->sp = sp;
+                int status = target->native(t, args, result);
+                CHECK_VM();
+                if (t->exception) goto exception_exact;
+                if (status == NATIVE_PUSHED) { f->pc = pc; RELOAD(); break; }
+                if (status == NATIVE_RETRY) { RELOAD(); break; }
+                sp = args;
+                for (u32 i = 0; i < target->return_slots; i++) PUSH(result[i]);
+                f->pc = pc; f->sp = sp;
+                if (t->state != THREAD_RUNNABLE) return initial-budget;
+                break;
+            }
             f->pc = pc; f->sp = args;
             if (!push_frame(t, target, args)) goto exception_caller;
             RELOAD();

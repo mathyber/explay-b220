@@ -438,6 +438,27 @@ static void pack_alpha(Jvm *vm, Object *image) {
     FIELD(image, vm->image_alpha_bits) = 1;
 }
 
+/* Draw.fromRGB(int[] rgb, short[] pixels, byte[] alpha, n) */
+static int draw_from_rgb(Thread *t, u32 *args, u32 *result) {
+    (void)result;
+    Array *rgb = (Array *)ARG_REF(0), *pixels = (Array *)ARG_REF(1), *alpha = (Array *)ARG_REF(2);
+    i32 n = I(3);
+    if (!rgb || !pixels) { throw_new(t, "java/lang/NullPointerException", 0); return 1; }
+    if (n < 0 || (u32)n > rgb->length || (u32)n > pixels->length || (alpha && (u32)n > alpha->length)) {
+        throw_new(t, "java/lang/ArrayIndexOutOfBoundsException", 0);
+        return 1;
+    }
+    const u32 *in = (const u32 *)ARRAY_DATA(rgb);
+    u16 *out = (u16 *)ARRAY_DATA(pixels);
+    u8 *a = alpha ? ARRAY_DATA(alpha) : 0;
+    for (i32 i = 0; i < n; i++) {
+        u32 c = in[i];
+        out[i] = (u16)(((c >> 8) & 0xf800) | ((c >> 5) & 0x07e0) | ((c >> 3) & 0x001f));
+        if (a) a[i] = (u8)(c >> 24);
+    }
+    return 0;
+}
+
 /* Draw.packAlpha(Image) */
 static int draw_pack_alpha(Thread *t, u32 *args, u32 *result) {
     (void)result;
@@ -687,6 +708,7 @@ static const Entry entries[] = {
     {"go1/Draw", "drawText", "(Ljava/lang/Object;Ljava/lang/String;IIIII[BZIIII)I", draw_text},
     {"go1/Draw", "flush", "(IIII)V", draw_flush},
     {"go1/Draw", "packAlpha", "(Ljava/lang/Object;)V", draw_pack_alpha},
+    {"go1/Draw", "fromRGB", "([I[S[BI)V", draw_from_rgb},
     {"go1/Draw", "decodePng", "([BIILjava/lang/Object;)Z", draw_decode_png},
 };
 

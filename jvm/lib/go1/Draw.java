@@ -21,6 +21,9 @@ public final class Draw {
                                       byte[] font, boolean bold, int cx, int cy, int cw, int ch);
     public static native void packAlpha(Object image);
 
+    /* ARGB to RGB565 (and alpha bytes when alpha is not null), n pixels. */
+    public static native void fromRGB(int[] rgb, short[] pixels, byte[] alpha, int n);
+
     public static native void flush(int x, int y, int w, int h);
     public static native boolean decodePng(byte[] data, int offset, int length, Object image);
 }

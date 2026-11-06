@@ -200,6 +200,11 @@ static int system_time(Thread *t, u32 *args, u32 *result) {
     return 0;
 }
 
+/* Math.min/max/abs(int): called all the time by games (clipping, scrolling). */
+static int math_min(Thread *t, u32 *args, u32 *result) { (void)t; result[0] = (i32)args[0] <= (i32)args[1] ? args[0] : args[1]; return 0; }
+static int math_max(Thread *t, u32 *args, u32 *result) { (void)t; result[0] = (i32)args[0] >= (i32)args[1] ? args[0] : args[1]; return 0; }
+static int math_abs(Thread *t, u32 *args, u32 *result) { (void)t; result[0] = (i32)args[0] < 0 ? 0u-args[0] : args[0]; return 0; }
+
 static int system_identity(Thread *t, u32 *args, u32 *result) {
     (void)t;
     jvm_fix_object((Object *)(uintptr_t)args[0]);
@@ -557,6 +562,9 @@ typedef struct NativeEntry { const char *cls, *name, *desc; Native fn; } NativeE
 
 static const NativeEntry natives[] = {
     {"java/lang/Object", "hashCode", "()I", object_hash},
+    {"java/lang/Math", "min", "(II)I", math_min},
+    {"java/lang/Math", "max", "(II)I", math_max},
+    {"java/lang/Math", "abs", "(I)I", math_abs},
     {"java/lang/Object", "clone", "()Ljava/lang/Object;", object_clone},
     {"java/lang/Object", "getClass", "()Ljava/lang/Class;", object_class},
     {"java/lang/System", "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V", system_arraycopy},

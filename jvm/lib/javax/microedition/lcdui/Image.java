@@ -22,7 +22,10 @@ public class Image {
         img.width = w;
         img.height = h;
         img.pixels = new short[w * h];
-        for (int i = 0; i < img.pixels.length; i++) img.pixels[i] = (short) 0xffff;
+        /* White: one pixel, then doubling copies. */
+        short[] p = img.pixels;
+        p[0] = (short) 0xffff;
+        for (int n = 1; n < p.length; n += n) System.arraycopy(p, 0, p, n, Math.min(n, p.length - n));
         img.mutable = true;
         return img;
     }
@@ -86,11 +89,7 @@ public class Image {
         img.height = h;
         img.pixels = new short[w * h];
         if (processAlpha) img.alpha = new byte[w * h];
-        for (int i = 0; i < w * h; i++) {
-            int c = rgb[i];
-            img.pixels[i] = (short) (((c >> 8) & 0xf800) | ((c >> 5) & 0x07e0) | ((c >> 3) & 0x001f));
-            if (processAlpha) img.alpha[i] = (byte) (c >>> 24);
-        }
+        Draw.fromRGB(rgb, img.pixels, img.alpha, w * h);
         Draw.packAlpha(img);
         return img;
     }

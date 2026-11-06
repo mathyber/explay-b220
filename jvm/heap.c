@@ -629,7 +629,7 @@ void collect(Jvm *vm) {
     /* Sweep, merging neighbouring free blocks. Monitors of dead objects go too. */
     for (u32 i = 0; i < MAX_MONITORS; i++) {
         Object *o = vm->monitors[i].object;
-        if (o && !vm->monitors[i].owner) vm->monitors[i].object = 0;
+        if (o && !vm->monitors[i].owner) { vm->monitors[i].object = 0; vm->monitors_used--; }
     }
     vm->free_list = 0;
     vm->used = 0;

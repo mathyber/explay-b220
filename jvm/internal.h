@@ -169,6 +169,7 @@ struct Jvm {
     u32 meta_chunk_count;
     u8 *chunk_top, *chunk_end;
     Monitor monitors[MAX_MONITORS];
+    u32 monitors_used;  /* entries with an object */
     Object *temp_roots[MAX_TEMP_ROOTS];
     u32 temp_count;
     Object **interned;

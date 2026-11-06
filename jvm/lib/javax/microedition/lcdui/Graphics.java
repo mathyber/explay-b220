@@ -64,22 +64,29 @@ public class Graphics {
     public int getClipWidth() { return cw; }
     public int getClipHeight() { return ch; }
 
+    /* Comparisons inline: games set the clip many times per frame. */
     public void setClip(int x, int y, int w, int h) {
-        int x0 = Math.max(0, x + tx), y0 = Math.max(0, y + ty);
-        int x1 = Math.min(width, x + tx + w), y1 = Math.min(height, y + ty + h);
+        int x0 = x + tx, y0 = y + ty, x1 = x0 + w, y1 = y0 + h;
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > width) x1 = width;
+        if (y1 > height) y1 = height;
         cx = x0;
         cy = y0;
-        cw = Math.max(0, x1 - x0);
-        ch = Math.max(0, y1 - y0);
+        cw = x1 > x0 ? x1 - x0 : 0;
+        ch = y1 > y0 ? y1 - y0 : 0;
     }
 
     public void clipRect(int x, int y, int w, int h) {
-        int x0 = Math.max(cx, x + tx), y0 = Math.max(cy, y + ty);
-        int x1 = Math.min(cx + cw, x + tx + w), y1 = Math.min(cy + ch, y + ty + h);
+        int x0 = x + tx, y0 = y + ty, x1 = x0 + w, y1 = y0 + h;
+        if (x0 < cx) x0 = cx;
+        if (y0 < cy) y0 = cy;
+        if (x1 > cx + cw) x1 = cx + cw;
+        if (y1 > cy + ch) y1 = cy + ch;
         cx = x0;
         cy = y0;
-        cw = Math.max(0, x1 - x0);
-        ch = Math.max(0, y1 - y0);
+        cw = x1 > x0 ? x1 - x0 : 0;
+        ch = y1 > y0 ? y1 - y0 : 0;
     }
 
     public void drawLine(int x1, int y1, int x2, int y2) {
