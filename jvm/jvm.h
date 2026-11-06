@@ -37,6 +37,9 @@ typedef struct JvmHost {
        1970-01-01 in local time (the default TimeZone is GMT, so local time shows
        as it is, as on phones of the time). 0: milliseconds from ms(). */
     int64_t (*now)(void *context);
+    /* Optional memory outside the VM block for class metadata (kept until the VM
+       is gone; the host frees it). 0 when there is none. */
+    void *(*alloc_extra)(void *context, uint32_t bytes);
 } JvmHost;
 
 /* Files take UTF-8 paths such as "E:\\JAVA\\RMS\\GAME\\scores.rms". Nothing

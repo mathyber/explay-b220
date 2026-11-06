@@ -63,6 +63,16 @@ static void host_write(void *context, int stream, const char *bytes, uint32_t le
 
 static uint32_t host_ms(void *context) { (void)context; return (uint32_t)GetTickCount(); }
 
+/* GO1JVM_EXTRA=KB: metadata memory outside the VM block, like the phone's Static Byte Heap. */
+static uint32_t extra_left = 0xffffffffu;
+static void *host_alloc_extra(void *context, uint32_t bytes) {
+    (void)context;
+    if (extra_left == 0xffffffffu) extra_left = (uint32_t)atoi(getenv("GO1JVM_EXTRA"))*1024;
+    if (bytes > extra_left) return 0;
+    extra_left -= bytes;
+    return calloc(1, bytes);
+}
+
 /* Local time as milliseconds since 1970, like the phone (see JvmHost.now). */
 static int64_t host_now(void *context) {
     (void)context;
@@ -284,7 +294,8 @@ int main(int argc, char **argv) {
             }
         } else main_class = argv[i];
     }
-    JvmHost host = {host_read, host_release, host_write, host_ms, &h, host_screen, host_flush, host_stream, &card_io, host_now};
+    JvmHost host = {host_read, host_release, host_write, host_ms, &h, host_screen, host_flush, host_stream, &card_io, host_now,
+                    getenv("GO1JVM_EXTRA") ? host_alloc_extra : 0};
     char manifest_main[128];
     if (!main_class && jvm_main_class(&host, manifest_main, sizeof(manifest_main))) main_class = manifest_main;
     if (!main_class) { fprintf(stderr, "usage: go1jvm [-heap KB] [-meta KB] [-cp dirs] [-jar app.jar] [-run ms] [-keys ms:code,...] [-shot file.ppm] [Main]\n"); return 64; }

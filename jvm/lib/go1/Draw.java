@@ -19,6 +19,8 @@ public final class Draw {
     public static native int textWidth(String s, int offset, int length, byte[] font);
     public static native int drawText(Object target, String s, int offset, int length, int x, int y, int rgb,
                                       byte[] font, boolean bold, int cx, int cy, int cw, int ch);
+    public static native void packAlpha(Object image);
+
     public static native void flush(int x, int y, int w, int h);
     public static native boolean decodePng(byte[] data, int offset, int length, Object image);
 }

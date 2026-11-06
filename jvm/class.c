@@ -33,24 +33,43 @@ void vm_fail(Jvm *vm, const char *message, Utf8 detail) {
 
 /* Zeroed metadata, taken downward from the top; align 8 for structures, 1 for
    strings and bytecode. Past the heap's end it takes the heap's free tail. */
+#define EXTRA_CHUNK (16*1024)
+
+/* Room in the current chunk (outside the block, or inside the heap). */
+static u8 *chunk_room(Jvm *vm, u32 bytes, u32 align) {
+    if (!vm->chunk_top) return 0;
+    u8 *c = (u8 *)((uintptr_t)(vm->chunk_top+align-1) & ~(uintptr_t)(align-1));
+    return c <= vm->chunk_end && (u32)(vm->chunk_end-c) >= bytes ? c : 0;
+}
+
 static void *meta_take(Jvm *vm, u32 bytes, u32 align) {
+    /* In order: down from the top while that stays above the heap; the current
+       chunk; a new chunk of host memory outside the block (the phone: the
+       Static Byte Heap); the heap's free tail; a chunk inside the heap (the tail
+       is often taken: the class file being loaded sits there, pinned). */
     u8 *p = bytes <= (u32)(vm->meta_top-vm->heap) ?
             (u8 *)((uintptr_t)(vm->meta_top-bytes) & ~(uintptr_t)(align-1)) : 0;
-    /* Down from the top while it does not reach the heap, or into the heap's free
-       tail. Otherwise metadata comes from a chunk inside the heap: the tail is
-       often taken (the class file being loaded sits there, pinned), while a
-       large hole is free elsewhere. */
-    if (p && (p >= vm->heap_end || give_heap_tail(vm, (u32)(vm->heap_end-p)))) {
-        vm->meta_top = p;
-        jvm_memset(p, 0, bytes);
-        return p;
-    }
-    u8 *c = (u8 *)((uintptr_t)(vm->chunk_top+align-1) & ~(uintptr_t)(align-1));
-    if (!vm->chunk_top || c > vm->chunk_end || (u32)(vm->chunk_end-c) < bytes) {
-        c = meta_chunk(vm, bytes+align);
-        if (!c) { vm_fail(vm, "out of metadata memory", 0); return 0; }
+    u8 *c = 0;
+    if (p && p >= vm->heap_end) goto top;
+    if ((c = chunk_room(vm, bytes, align))) goto chunk;
+    u32 size = bytes+align > EXTRA_CHUNK ? bytes+align : EXTRA_CHUNK;
+    if (vm->host.alloc_extra && (c = vm->host.alloc_extra(vm->host.context, size))) {
+        vm->chunk_end = c+size;
         c = (u8 *)((uintptr_t)(c+align-1) & ~(uintptr_t)(align-1));
+        goto chunk;
     }
+    if (p && give_heap_tail(vm, (u32)(vm->heap_end-p))) goto top;
+    if ((c = meta_chunk(vm, bytes+align))) {
+        c = (u8 *)((uintptr_t)(c+align-1) & ~(uintptr_t)(align-1));
+        goto chunk;
+    }
+    vm_fail(vm, "out of metadata memory", 0);
+    return 0;
+top:
+    vm->meta_top = p;
+    jvm_memset(p, 0, bytes);
+    return p;
+chunk:
     vm->chunk_top = c+bytes;
     jvm_memset(c, 0, bytes);
     return c;

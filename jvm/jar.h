@@ -70,6 +70,8 @@ int jar_inflate(const uint8_t *in, uint32_t in_length, uint8_t *out, uint32_t ou
 int jar_stream_open(Jar *jar, const char *name, JarStream *stream, uint32_t *size);
 /* Next bytes of a stream: count, 0 at the end, -1 on damaged data. */
 int jar_stream_read(JarStream *stream, uint8_t *out, uint32_t length);
+/* A stream over deflate data in memory (a PNG's IDAT) producing size bytes. */
+void jar_stream_memory(JarStream *stream, const uint8_t *data, uint32_t length, uint32_t size);
 /* Uncompressed size of all .class entries. */
 uint32_t jar_class_bytes(Jar *jar);
 

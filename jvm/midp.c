@@ -57,7 +57,13 @@ static int launcher_halt(Thread *t, u32 *args, u32 *result) {
 
 /* ---------- surfaces ---------- */
 
-typedef struct Surface { u16 *pixels; u8 *alpha; i32 width, height; } Surface;
+/* alpha: a byte per pixel, or with bits set a bit per pixel (0 or 255; only
+   immutable images, which are never drawn into). */
+typedef struct Surface { u16 *pixels; u8 *alpha; i32 width, height; int bits; } Surface;
+
+static inline u32 alpha_at(const Surface *s, u32 i) {
+    return s->bits ? (u32)((s->alpha[i >> 3] >> (i & 7)) & 1)*255 : s->alpha[i];
+}
 typedef struct Clip { i32 x0, y0, x1, y1; } Clip;  /* x1, y1 exclusive */
 
 static int image_fields(Jvm *vm) {
@@ -66,8 +72,9 @@ static int image_fields(Jvm *vm) {
     if (!c) return 0;
     Field *p = find_field_c(c, "pixels", "[S"), *a = find_field_c(c, "alpha", "[B");
     Field *w = find_field_c(c, "width", "I"), *h = find_field_c(c, "height", "I");
-    if (!p || !a || !w || !h) { vm_fail(vm, "Image fields missing", 0); return 0; }
-    vm->image_pixels = p->offset; vm->image_alpha = a->offset;
+    Field *bits = find_field_c(c, "alphaBits", "Z");
+    if (!p || !a || !w || !h || !bits) { vm_fail(vm, "Image fields missing", 0); return 0; }
+    vm->image_pixels = p->offset; vm->image_alpha = a->offset; vm->image_alpha_bits = bits->offset;
     vm->image_width = w->offset; vm->image_height = h->offset;
     vm->image_class = c;
     return 1;
@@ -81,6 +88,7 @@ static int surface(Thread *t, Object *target, Surface *s) {
         if (!vm->host.screen) { throw_new(t, "java/lang/IllegalStateException", "no display"); return 0; }
         s->pixels = vm->host.screen(vm->host.context);
         s->alpha = 0;
+        s->bits = 0;
         s->width = JVM_SCREEN_WIDTH;
         s->height = JVM_SCREEN_HEIGHT;
         return s->pixels != 0;
@@ -92,6 +100,11 @@ static int surface(Thread *t, Object *target, Surface *s) {
     if (!p || p->length < (u32)(s->width*s->height)) { throw_new(t, "java/lang/IllegalStateException", "bad image"); return 0; }
     s->pixels = (u16 *)ARRAY_DATA(p);
     s->alpha = a ? ARRAY_DATA(a) : 0;
+    s->bits = a && FIELD(target, vm->image_alpha_bits);
+    if (s->alpha && a->length < (s->bits ? (u32)(s->width*s->height+7)/8 : (u32)(s->width*s->height))) {
+        throw_new(t, "java/lang/IllegalStateException", "bad image");
+        return 0;
+    }
     return 1;
 }
 
@@ -122,7 +135,7 @@ static u16 blend(u16 under, u16 over, u32 alpha) {
 static inline void plot(Surface *s, const Clip *c, i32 x, i32 y, u16 color) {
     if (x < c->x0 || y < c->y0 || x >= c->x1 || y >= c->y1) return;
     s->pixels[y*s->width+x] = color;
-    if (s->alpha) s->alpha[y*s->width+x] = 255;
+    if (s->alpha && !s->bits) s->alpha[y*s->width+x] = 255;
 }
 
 static void span(Surface *s, const Clip *c, i32 y, i32 x0, i32 x1, u16 color) {
@@ -131,7 +144,7 @@ static void span(Surface *s, const Clip *c, i32 y, i32 x0, i32 x1, u16 color) {
     if (x1 > c->x1) x1 = c->x1;
     for (i32 x = x0; x < x1; x++) {
         s->pixels[y*s->width+x] = color;
-        if (s->alpha) s->alpha[y*s->width+x] = 255;
+        if (s->alpha && !s->bits) s->alpha[y*s->width+x] = 255;
     }
 }
 
@@ -234,7 +247,7 @@ static int draw_region(Thread *t, u32 *args, u32 *result) {
     i32 row = (sy0+py)*src.width+sx0+px, n = dx1-dx0;
     for (i32 dy = dy0; dy < dy1; dy++, row += row_step) {
         u16 *to = &d.pixels[(y+dy)*d.width+x+dx0];
-        u8 *to_alpha = d.alpha ? &d.alpha[(y+dy)*d.width+x+dx0] : 0;
+        u8 *to_alpha = d.alpha && !d.bits ? &d.alpha[(y+dy)*d.width+x+dx0] : 0;
         const u16 *from = src.pixels;
         i32 at = row;
         if (!src.alpha) {
@@ -243,7 +256,7 @@ static int draw_region(Thread *t, u32 *args, u32 *result) {
             continue;
         }
         for (i32 i = 0; i < n; i++, at += step) {
-            u32 a = src.alpha[at];
+            u32 a = alpha_at(&src, (u32)at);
             if (!a) continue;
             to[i] = a >= 255 ? from[at] : blend(to[i], from[at], a);
             if (to_alpha && a > to_alpha[i]) to_alpha[i] = (u8)a;
@@ -280,7 +293,7 @@ static int draw_rgb(Thread *t, u32 *args, u32 *result) {
             if (!a) continue;
             u16 *p = &s.pixels[ty*s.width+tx];
             *p = blend(*p, rgb565(argb), a);
-            if (s.alpha && a > s.alpha[ty*s.width+tx]) s.alpha[ty*s.width+tx] = (u8)a;
+            if (s.alpha && !s.bits && a > s.alpha[ty*s.width+tx]) s.alpha[ty*s.width+tx] = (u8)a;
         }
     }
     return 0;
@@ -306,7 +319,7 @@ static int draw_get_rgb(Thread *t, u32 *args, u32 *result) {
     for (i32 dy = 0; dy < h; dy++)
         for (i32 dx = 0; dx < w; dx++) {
             u32 at = (u32)((y+dy)*s.width+x+dx);
-            u32 a = s.alpha ? s.alpha[at] : 255;
+            u32 a = s.alpha ? alpha_at(&s, at) : 255;
             data[offset+dy*scan+dx] = a << 24 | rgb888(s.pixels[at]);
         }
     return 0;
@@ -407,6 +420,34 @@ static int draw_flush(Thread *t, u32 *args, u32 *result) {
     return 0;
 }
 
+/* A byte alpha of only 0 and 255 becomes a bit per pixel (an eighth of the memory;
+   drawing reads the same values). For immutable images only. */
+static void pack_alpha(Jvm *vm, Object *image) {
+    Array *a = (Array *)(uintptr_t)FIELD(image, vm->image_alpha);
+    if (!a || FIELD(image, vm->image_alpha_bits)) return;
+    u32 n = a->length;
+    const u8 *v = ARRAY_DATA(a);
+    for (u32 i = 0; i < n; i++) if (v[i] && v[i] != 255) return;
+    Array *bits = new_array(vm, primitive_array(vm, 'B'), (n+7)/8);
+    if (!bits) return;  /* no memory: keep the byte alpha */
+    a = (Array *)(uintptr_t)FIELD(image, vm->image_alpha);  /* the image is a root; re-read after allocating */
+    v = ARRAY_DATA(a);
+    u8 *b = ARRAY_DATA(bits);
+    for (u32 i = 0; i < n; i++) if (v[i]) b[i >> 3] |= (u8)(1u << (i & 7));
+    FIELD(image, vm->image_alpha) = (u32)(uintptr_t)bits;
+    FIELD(image, vm->image_alpha_bits) = 1;
+}
+
+/* Draw.packAlpha(Image) */
+static int draw_pack_alpha(Thread *t, u32 *args, u32 *result) {
+    (void)result;
+    Jvm *vm = thread_vm(t);
+    Object *image = ARG_REF(0);
+    if (!image || !image_fields(vm)) return image ? 1 : 0;
+    pack_alpha(vm, image);
+    return 0;
+}
+
 /* ---------- PNG ---------- */
 
 typedef struct Png {
@@ -449,11 +490,8 @@ static u8 paeth(u8 a, u8 b, u8 c) {
 
 /* IDAT payload -> packed, inflate -> raw (height*(row_bytes+1)), unfilter, then
    RGB565 pixels and, when out_alpha is set, 8-bit alpha. Returns 1 on success. */
-static int png_decode_core(const u8 *p, u32 size, const Png *ppng, u8 *packed, u8 *raw, u16 *out, u8 *out_alpha) {
-    Png png = *ppng;
-    u32 channels = png_channels(png.color), bits = channels*png.depth;
-    u32 row_bytes = (png.width*bits+7)/8, bpp = bits >= 8 ? bits/8 : 1;
-    u32 raw_size = png.height*(row_bytes+1);
+/* The IDAT chunks, concatenated into packed; returns their length. */
+static u32 png_idat(const u8 *p, u32 size, u8 *packed) {
     u32 n = 0;
     for (u32 at = 8; at+12 <= size;) {
         u32 length = rd32(p+at);
@@ -461,63 +499,81 @@ static int png_decode_core(const u8 *p, u32 size, const Png *ppng, u8 *packed, u
         if (!jvm_memcmp(p+at+4, "IEND", 4)) break;
         at += 12+length;
     }
-    /* zlib: 2-byte header, deflate data, Adler-32 (not checked). */
-    if (!(n > 6 && jar_inflate(packed+2, n-6, raw, raw_size))) return 0;
-    u8 *d = raw;
-    for (u32 y = 0; y < png.height; y++) {
-        u8 *row = d+y*(row_bytes+1)+1, *above = y ? row-(row_bytes+1) : 0, filter = row[-1];
-        for (u32 i = 0; i < row_bytes; i++) {
-            u8 a = i >= bpp ? row[i-bpp] : 0, b = above ? above[i] : 0, c = above && i >= bpp ? above[i-bpp] : 0;
-            switch (filter) {
-            case 1: row[i] = (u8)(row[i]+a); break;
-            case 2: row[i] = (u8)(row[i]+b); break;
-            case 3: row[i] = (u8)(row[i]+((u32)a+b)/2); break;
-            case 4: row[i] = (u8)(row[i]+paeth(a, b, c)); break;
-            default: break;
-            }
+    return n;
+}
+
+/* Undo the filter of one row (row[-1] is the filter byte; above is 0 for the first row). */
+static void png_unfilter(u8 *row, const u8 *above, u32 row_bytes, u32 bpp) {
+    u8 filter = row[-1];
+    for (u32 i = 0; i < row_bytes; i++) {
+        u8 a = i >= bpp ? row[i-bpp] : 0, b = above ? above[i] : 0, c = above && i >= bpp ? above[i-bpp] : 0;
+        switch (filter) {
+        case 1: row[i] = (u8)(row[i]+a); break;
+        case 2: row[i] = (u8)(row[i]+b); break;
+        case 3: row[i] = (u8)(row[i]+((u32)a+b)/2); break;
+        case 4: row[i] = (u8)(row[i]+paeth(a, b, c)); break;
+        default: break;
         }
     }
-    u32 step = png.depth == 16 ? 2 : 1;
-    for (u32 y = 0; y < png.height; y++) {
-        const u8 *row = d+y*(row_bytes+1)+1;
-        for (u32 x = 0; x < png.width; x++) {
-            u32 r, g, b, a = 255;
-            if (png.depth < 8) {
-                u32 bitpos = x*png.depth, shift = 8-png.depth-bitpos%8;
-                u32 v = (row[bitpos/8] >> shift) & ((1u << png.depth)-1);
-                if (png.color == 3) {
-                    if (v >= png.palette_entries) v = 0;
-                    r = png.palette[v*3]; g = png.palette[v*3+1]; b = png.palette[v*3+2];
-                    if (png.trns && v < png.trns_length) a = png.trns[v];
-                } else {
-                    r = g = b = v*255/((1u << png.depth)-1);
-                    if (png.trns && png.trns_length >= 2 && v == rd16(png.trns)) a = 0;
-                }
+}
+
+/* One unfiltered row to RGB565 pixels and, when out_alpha is set, 8-bit alpha. */
+static void png_row(const Png *ppng, const u8 *row, u32 y, u16 *out, u8 *alpha_row) {
+    const Png png = *ppng;
+    u32 channels = png_channels(png.color), step = png.depth == 16 ? 2 : 1;
+    for (u32 x = 0; x < png.width; x++) {
+        u32 r, g, b, a = 255;
+        if (png.depth < 8) {
+            u32 bitpos = x*png.depth, shift = 8-png.depth-bitpos%8;
+            u32 v = (row[bitpos/8] >> shift) & ((1u << png.depth)-1);
+            if (png.color == 3) {
+                if (v >= png.palette_entries) v = 0;
+                r = png.palette[v*3]; g = png.palette[v*3+1]; b = png.palette[v*3+2];
+                if (png.trns && v < png.trns_length) a = png.trns[v];
             } else {
-                const u8 *px = row+x*channels*step;
-                switch (png.color) {
-                case 3:
-                    r = px[0] < png.palette_entries ? png.palette[px[0]*3] : 0;
-                    g = px[0] < png.palette_entries ? png.palette[px[0]*3+1] : 0;
-                    b = px[0] < png.palette_entries ? png.palette[px[0]*3+2] : 0;
-                    if (png.trns && px[0] < png.trns_length) a = png.trns[px[0]];
-                    break;
-                case 0:
-                    r = g = b = px[0];
-                    if (png.trns && png.trns_length >= 2 && px[0] == rd16(png.trns) >> (step == 2 ? 8 : 0)) a = 0;
-                    break;
-                case 4: r = g = b = px[0]; a = px[step]; break;
-                case 2:
-                    r = px[0]; g = px[step]; b = px[2*step];
-                    if (png.trns && png.trns_length >= 6 && r == (rd16(png.trns) >> (step == 2 ? 8 : 0)) &&
-                        g == (rd16(png.trns+2) >> (step == 2 ? 8 : 0)) && b == (rd16(png.trns+4) >> (step == 2 ? 8 : 0))) a = 0;
-                    break;
-                default: r = px[0]; g = px[step]; b = px[2*step]; a = px[3*step]; break;
-                }
+                r = g = b = v*255/((1u << png.depth)-1);
+                if (png.trns && png.trns_length >= 2 && v == rd16(png.trns)) a = 0;
             }
-            out[y*png.width+x] = rgb565(r << 16 | g << 8 | b);
-            if (out_alpha) out_alpha[y*png.width+x] = (u8)a;
+        } else {
+            const u8 *px = row+x*channels*step;
+            switch (png.color) {
+            case 3:
+                r = px[0] < png.palette_entries ? png.palette[px[0]*3] : 0;
+                g = px[0] < png.palette_entries ? png.palette[px[0]*3+1] : 0;
+                b = px[0] < png.palette_entries ? png.palette[px[0]*3+2] : 0;
+                if (png.trns && px[0] < png.trns_length) a = png.trns[px[0]];
+                break;
+            case 0:
+                r = g = b = px[0];
+                if (png.trns && png.trns_length >= 2 && px[0] == rd16(png.trns) >> (step == 2 ? 8 : 0)) a = 0;
+                break;
+            case 4: r = g = b = px[0]; a = px[step]; break;
+            case 2:
+                r = px[0]; g = px[step]; b = px[2*step];
+                if (png.trns && png.trns_length >= 6 && r == (rd16(png.trns) >> (step == 2 ? 8 : 0)) &&
+                    g == (rd16(png.trns+2) >> (step == 2 ? 8 : 0)) && b == (rd16(png.trns+4) >> (step == 2 ? 8 : 0))) a = 0;
+                break;
+            default: r = px[0]; g = px[step]; b = px[2*step]; a = px[3*step]; break;
+            }
         }
+        out[y*png.width+x] = rgb565(r << 16 | g << 8 | b);
+        if (alpha_row) alpha_row[x] = (u8)a;
+    }
+}
+
+static u32 png_row_bytes(const Png *png) { return (png->width*png_channels(png->color)*png->depth+7)/8; }
+static u32 png_bpp(const Png *png) { u32 bits = png_channels(png->color)*png->depth; return bits >= 8 ? bits/8 : 1; }
+
+/* Whole image at once: raw holds every row (small images: list icons). */
+static int png_decode_core(const u8 *p, u32 size, const Png *png, u8 *packed, u8 *raw, u16 *out, u8 *out_alpha) {
+    u32 row_bytes = png_row_bytes(png), bpp = png_bpp(png);
+    u32 n = png_idat(p, size, packed);
+    /* zlib: 2-byte header, deflate data, Adler-32 (not checked). */
+    if (!(n > 6 && jar_inflate(packed+2, n-6, raw, png->height*(row_bytes+1)))) return 0;
+    for (u32 y = 0; y < png->height; y++) {
+        u8 *row = raw+y*(row_bytes+1)+1;
+        png_unfilter(row, y ? row-(row_bytes+1) : 0, row_bytes, bpp);
+        png_row(png, row, y, out, out_alpha ? out_alpha+y*png->width : 0);
     }
     return 1;
 }
@@ -549,27 +605,64 @@ static int draw_decode_png(Thread *t, u32 *args, u32 *result) {
     Png png;
     result[0] = 0;
     if (!png_parse(ARRAY_DATA(source)+I(1), (u32)I(2), &png)) return 0;
-    u32 bits = png_channels(png.color)*png.depth;
-    u32 raw_size = png.height*((png.width*bits+7)/8+1);
     int has_alpha = png.color == 4 || png.color == 6 || png.trns;
     Class *bytes = primitive_array(vm, 'B'), *shorts = primitive_array(vm, 'S');
-    Array *packed = new_array(vm, bytes, png.idat);
-    if (!packed) { throw_new(t, "java/lang/OutOfMemoryError", 0); return 1; }
-    push_root(vm, (Object *)packed);
-    Array *raw = new_array(vm, bytes, raw_size);
-    if (raw) push_root(vm, (Object *)raw);
-    Array *pixels = raw ? new_array(vm, shorts, png.width*png.height) : 0;
+    u32 n = png.width*png.height, row_bytes = png_row_bytes(&png), bpp = png_bpp(&png);
+    /* The result first (it stays), then the scratch: compressed data, the
+       inflater state, two rows and a row of alpha. Alpha starts as a bit per
+       pixel; the first value other than 0 and 255 switches to a byte per pixel
+       (the rows so far are carried over), so an image with a large alpha of
+       only 0 and 255 never needs the bytes (Age of Empires III: 101088 pixels). */
+    Array *pixels = new_array(vm, shorts, n);
     if (pixels) push_root(vm, (Object *)pixels);
-    Array *alpha = pixels && has_alpha ? new_array(vm, bytes, png.width*png.height) : 0;
-    u32 roots = 1+(raw != 0)+(pixels != 0);
-    if (!raw || !pixels || (has_alpha && !alpha)) { pop_roots(vm, roots); throw_new(t, "java/lang/OutOfMemoryError", 0); return 1; }
-    /* The source array is an argument: on the Java stack, so compaction leaves it in place. */
-    int ok = png_decode_core(ARRAY_DATA(source)+I(1), (u32)I(2), &png, ARRAY_DATA(packed), ARRAY_DATA(raw),
-                             (u16 *)ARRAY_DATA(pixels), alpha ? ARRAY_DATA(alpha) : 0);
+    Array *bits = pixels && has_alpha ? new_array(vm, bytes, (n+7)/8) : 0;
+    if (bits) push_root(vm, (Object *)bits);
+    Array *packed = pixels && (bits || !has_alpha) ? new_array(vm, bytes, png.idat) : 0;
+    if (packed) push_root(vm, (Object *)packed);
+    Array *state = packed ? new_array(vm, bytes, sizeof(JarStream)+2*(row_bytes+1)+png.width+8) : 0;
+    if (state) push_root(vm, (Object *)state);
+    u32 roots = (pixels != 0)+(bits != 0)+(packed != 0)+(state != 0);
+    if (!state) { pop_roots(vm, roots); throw_new(t, "java/lang/OutOfMemoryError", 0); return 1; }
+    /* Arguments and temporary roots stay in place during compaction. */
+    const u8 *data = ARRAY_DATA(source)+I(1);
+    u8 *work = (u8 *)(((uintptr_t)ARRAY_DATA(state)+7) & ~(uintptr_t)7);
+    JarStream *stream = (JarStream *)work;
+    u8 *rows = work+sizeof(JarStream), *alpha_row = rows+2*(row_bytes+1);
+    u16 *out = (u16 *)ARRAY_DATA(pixels);
+    u8 *mask = bits ? ARRAY_DATA(bits) : 0, *alpha = 0;
+    Array *alpha_bytes = 0;
+    u32 idat = png_idat(data, (u32)I(2), ARRAY_DATA(packed));
+    int ok = idat > 6;
+    if (ok) jar_stream_memory(stream, ARRAY_DATA(packed)+2, idat-6, png.height*(row_bytes+1));
+    u8 *row = rows+1, *above = 0;
+    for (u32 y = 0; ok && y < png.height; y++) {
+        if (jar_stream_read(stream, row-1, row_bytes+1) != (int)(row_bytes+1)) { ok = 0; break; }
+        png_unfilter(row, above, row_bytes, bpp);
+        png_row(&png, row, y, out, has_alpha ? alpha_row : 0);
+        if (has_alpha && !alpha) {
+            u32 x = 0;
+            while (x < png.width && (!alpha_row[x] || alpha_row[x] == 255)) x++;
+            if (x < png.width) {
+                alpha_bytes = new_array(vm, bytes, n);
+                if (!alpha_bytes) { pop_roots(vm, roots); throw_new(t, "java/lang/OutOfMemoryError", 0); return 1; }
+                push_root(vm, (Object *)alpha_bytes);
+                roots++;
+                alpha = ARRAY_DATA(alpha_bytes);
+                for (u32 i = 0; i < y*png.width; i++) alpha[i] = (mask[i >> 3] >> (i & 7)) & 1 ? 255 : 0;
+            }
+        }
+        if (alpha) jvm_memcpy(alpha+y*png.width, alpha_row, png.width);
+        else if (has_alpha)
+            for (u32 x = 0, i = y*png.width; x < png.width; x++, i++)
+                if (alpha_row[x]) mask[i >> 3] |= (u8)(1u << (i & 7));
+        above = row;
+        row = row == rows+1 ? rows+row_bytes+2 : rows+1;
+    }
     pop_roots(vm, roots);
     if (!ok) return 0;
     FIELD(image, vm->image_pixels) = (u32)(uintptr_t)pixels;
-    FIELD(image, vm->image_alpha) = (u32)(uintptr_t)alpha;
+    FIELD(image, vm->image_alpha) = (u32)(uintptr_t)(alpha_bytes ? alpha_bytes : bits);
+    FIELD(image, vm->image_alpha_bits) = bits && !alpha_bytes;
     FIELD(image, vm->image_width) = png.width;
     FIELD(image, vm->image_height) = png.height;
     result[0] = 1;
@@ -593,6 +686,7 @@ static const Entry entries[] = {
     {"go1/Draw", "textWidth", "(Ljava/lang/String;II[B)I", draw_text_width},
     {"go1/Draw", "drawText", "(Ljava/lang/Object;Ljava/lang/String;IIIII[BZIIII)I", draw_text},
     {"go1/Draw", "flush", "(IIII)V", draw_flush},
+    {"go1/Draw", "packAlpha", "(Ljava/lang/Object;)V", draw_pack_alpha},
     {"go1/Draw", "decodePng", "([BIILjava/lang/Object;)Z", draw_decode_png},
 };
 

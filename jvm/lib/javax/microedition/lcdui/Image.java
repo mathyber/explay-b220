@@ -4,10 +4,12 @@ import go1.Draw;
 import java.io.IOException;
 import java.io.InputStream;
 
-/* RGB565 pixels with optional 8-bit alpha (fields used by go1.Draw). */
+/* RGB565 pixels with optional alpha (fields used by go1.Draw): a byte per pixel,
+   or, in immutable images whose alpha is only 0 and 255, a bit per pixel. */
 public class Image {
     short[] pixels;
     byte[] alpha;
+    boolean alphaBits;
     int width;
     int height;
     private boolean mutable;
@@ -44,6 +46,7 @@ public class Image {
         img.pixels = new short[img.width * img.height];
         if (source.alpha != null) img.alpha = new byte[img.pixels.length];
         Draw.drawRegion(img, source, x, y, w, h, transform, 0, 0, 0, 0, img.width, img.height);
+        Draw.packAlpha(img);
         return img;
     }
 
@@ -88,6 +91,7 @@ public class Image {
             img.pixels[i] = (short) (((c >> 8) & 0xf800) | ((c >> 5) & 0x07e0) | ((c >> 3) & 0x001f));
             if (processAlpha) img.alpha[i] = (byte) (c >>> 24);
         }
+        Draw.packAlpha(img);
         return img;
     }
 

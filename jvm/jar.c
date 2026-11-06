@@ -363,6 +363,18 @@ int jar_stream_open(Jar *jar, const char *name, JarStream *s, uint32_t *size) {
     return 1;
 }
 
+void jar_stream_memory(JarStream *s, const uint8_t *data, uint32_t length, uint32_t size) {
+    Bits b = {data, data+length, 0, 0, 0, 0, 0, 0, 0, 0, 0, s->chunk, sizeof(s->chunk)};
+    s->bits = b;
+    s->io = 0;
+    s->data = 0;
+    s->size = size;
+    s->produced = s->stored = s->copy_length = s->copy_distance = 0;
+    s->method = 8;
+    s->state = STREAM_HEADER;
+    s->last = s->error = 0;
+}
+
 uint32_t jar_class_bytes(Jar *jar) {
     u32 total = 0;
     const u8 *p = jar->directory, *end = p+jar->directory_size;

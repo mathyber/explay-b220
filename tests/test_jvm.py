@@ -131,6 +131,93 @@ class JvmTests(unittest.TestCase):
             if checksum >= 1 << 31: checksum -= 1 << 32
             self.assertEqual(lines[i], f'{i} {len(data)} {checksum}')
 
+    def test_binary_alpha_draws_like_byte_alpha(self):
+        import hashlib
+        out = Path(self.folder.name)/'alphatest'
+        javac([ROOT/'jvm/iotests/AlphaTest.java'], out)
+        run = subprocess.run([str(HOST), '-cp', f'{LIBRARY};{out}', 'AlphaTest'],
+                             capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(run.stdout.splitlines()), 208)
+        # Checksums of the byte-alpha implementation (before images with only 0/255 got a bit per pixel).
+        self.assertEqual(hashlib.sha256(run.stdout.encode()).hexdigest(),
+                         '44918ea2f908fa1a2f4744e1263a1fb00cc362c13e4fe4ab02308f44e4a5aef3')
+
+    def test_png_decoding_of_every_type(self):
+        """Palette 1-8 bit, grey 1-16 bit, grey+alpha, RGB, RGBA (8 and 16 bit), tRNS, filters, split IDAT."""
+        import hashlib, random, struct, zipfile, zlib
+        out = Path(self.folder.name)/'pngtest'
+        javac([ROOT/'jvm/iotests/PngTest.java'], out)
+        rnd = random.Random(3)
+        def chunk(t, data): return struct.pack('>I', len(data))+t+data+struct.pack('>I', zlib.crc32(t+data) & 0xffffffff)
+        def raw_png(w, h, depth, color, rows, plte=None, trns=None, level=6):
+            png = bytes([0x89])+b'PNG'+bytes([13, 10, 26, 10])+chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, depth, color, 0, 0, 0))
+            if plte: png += chunk(b'PLTE', plte)
+            if trns is not None: png += chunk(b'tRNS', trns)
+            z = zlib.compress(b''.join(bytes([rnd.randrange(5)])+r for r in rows), level)
+            step = max(1, len(z)//3+1)
+            for k in range(0, len(z), step): png += chunk(b'IDAT', z[k:k+step])
+            return png+chunk(b'IEND', b'')
+        chans = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+        pngs = []
+        for color, depths in ((0, (1, 2, 4, 8, 16)), (2, (8, 16)), (3, (1, 2, 4, 8)), (4, (8, 16)), (6, (8, 16))):
+            for depth in depths:
+                for w, h in ((1, 1), (7, 5), (33, 17), (120, 90)):
+                    rb = (w*chans[color]*depth+7)//8
+                    rows = [bytes(rnd.randrange(256) for _ in range(rb)) for _ in range(h)]
+                    if color == 3 and depth < 8: rows = [bytes(rnd.randrange(256) for _ in range(rb)) for _ in range(h)]
+                    plte = bytes(rnd.randrange(256) for _ in range(3*(1 << min(depth, 8)))) if color == 3 else None
+                    trns = None
+                    if color == 3 and rnd.random() < 0.6: trns = bytes(rnd.choice([0, 255, 128]) for _ in range(rnd.randrange(1, 1 << min(depth, 8))))
+                    if color == 0 and rnd.random() < 0.5: trns = struct.pack('>H', rnd.randrange(1 << depth))
+                    if color == 2 and rnd.random() < 0.5: trns = struct.pack('>HHH', *[rnd.randrange(1 << depth) for _ in range(3)])
+                    pngs.append(raw_png(w, h, depth, color, rows, plte, trns, level=rnd.choice([0, 1, 6, 9])))
+        jar = Path(self.folder.name)/'png.jar'
+        with zipfile.ZipFile(jar, 'w') as z:
+            z.writestr('META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\nMain-Class: PngTest\n')
+            z.write(out/'PngTest.class', 'PngTest.class')
+            for i, png in enumerate(pngs): z.writestr(f'p{i}.png', png)
+        run = subprocess.run([str(HOST), '-heap', '3000', '-cp', str(LIBRARY), '-jar', str(jar)],
+                             capture_output=True, text=True, encoding='utf-8', timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(run.stdout.splitlines()), 60)
+        # Checksums of the whole-image decoder (before PNGs were decoded row by row).
+        self.assertEqual(hashlib.sha256(run.stdout.encode()).hexdigest(), '2b67ddb85087b293df18696d995274d3ce31ef37bbd5dd80c7ea592b11fb6a80')
+
+    def test_png_alpha_switches_from_bits_to_bytes_mid_image(self):
+        """RGBA and grey+alpha whose first rows have only 0 and 255, then partial alpha."""
+        import hashlib, random, struct, zipfile, zlib
+        out = Path(self.folder.name)/'pngswitch'
+        javac([ROOT/'jvm/iotests/PngTest.java'], out)
+        rnd = random.Random(9)
+        def chunk(t, data): return struct.pack('>I', len(data))+t+data+struct.pack('>I', zlib.crc32(t+data) & 0xffffffff)
+        def png(w, h, color, rows):
+            head = bytes([0x89])+b'PNG\r\n\x1a\n'+chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, color, 0, 0, 0))
+            return head+chunk(b'IDAT', zlib.compress(b''.join(b'\x00'+r for r in rows), 6))+chunk(b'IEND', b'')
+        pngs = []
+        for w, h, switch, color in ((13, 9, 4, 6), (64, 40, 39, 6), (31, 20, 0, 6), (50, 30, None, 6), (17, 11, 5, 4), (40, 25, None, 4), (8, 8, 7, 6)):
+            channels = 4 if color == 6 else 2
+            rows = []
+            for y in range(h):
+                row = bytearray()
+                for x in range(w):
+                    a = rnd.choice([0, 255]) if switch is None or y < switch else rnd.choice([0, 255, 77, 200])
+                    if switch is not None and y == switch and x == w//2: a = 128
+                    row += bytes(rnd.randrange(256) for _ in range(channels-1))+bytes([a])
+                rows.append(bytes(row))
+            pngs.append(png(w, h, color, rows))
+        jar = Path(self.folder.name)/'pngswitch.jar'
+        with zipfile.ZipFile(jar, 'w') as z:
+            z.writestr('META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\nMain-Class: PngTest\n')
+            z.write(out/'PngTest.class', 'PngTest.class')
+            for i, data in enumerate(pngs): z.writestr(f'p{i}.png', data)
+        run = subprocess.run([str(HOST), '-heap', '3000', '-cp', str(LIBRARY), '-jar', str(jar)],
+                             capture_output=True, text=True, encoding='utf-8', timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        # Checksums of the byte-alpha decoder.
+        self.assertEqual(hashlib.sha256(run.stdout.encode()).hexdigest(),
+                         'c40b38fdca8dc6cf74b2b67dcead09ed3a6fc141de7e338085fbbb1fe1ae4693')
+
     def make_jar(self, classes, path):
         """Classes deflated, small resources stored and deflated, a large one deflated (dynamic codes)."""
         import random, struct, zipfile

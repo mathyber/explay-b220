@@ -175,38 +175,20 @@ static void pin_roots(Jvm *vm) {
     pin_c_stack(vm);
 }
 
-/* Forwarding: table[k] is the new address of the first object that starts in
-   chunk k; the others follow by walking the chunk (pinned objects stay). */
-typedef struct Forward { u32 *table; u32 shift; } Forward;
-
-static Object *next_object(Jvm *vm, Object *o) {
-    for (u8 *p = (u8 *)o+SIZE(o)*GRANULE; p < vm->heap_end; p += SIZE((Object *)p)*GRANULE)
-        if (((Object *)p)->cls) return (Object *)p;
-    return 0;
-}
-
-static Object *first_in_chunk(Jvm *vm, const Forward *fw, u32 k) {
-    u32 first = (k << fw->shift)/GRANULE, end = ((k+1) << fw->shift)/GRANULE;
-    u32 limit = (u32)(vm->heap_end-vm->heap)/GRANULE;
-    if (end > limit) end = limit;
-    for (u32 i = first; i < end; i++)
-        if ((vm->starts[i/32] >> (i%32)) & 1) return (Object *)(vm->heap+i*GRANULE);
-    return 0;
-}
+/* Forwarding: runs of objects that were next to each other and move by the same
+   distance, as pairs {first object, distance} in address order (pinned objects
+   are in none). The runs fill vm->forward_table. */
+typedef struct Forward { u32 *runs; u32 count, capacity; } Forward;
 
 static u32 forward(Jvm *vm, const Forward *fw, u32 value) {
     if (!value || !is_object(vm, value)) return value;
-    Object *target = (Object *)(uintptr_t)value;
-    if (PINNED(target)) return value;
-    u32 k = (u32)((u8 *)target-vm->heap) >> fw->shift;
-    Object *o = first_in_chunk(vm, fw, k);
-    u32 to = fw->table[k];
-    while (o && o != target) {
-        to = (PINNED(o) ? (u32)(uintptr_t)o : to)+SIZE(o)*GRANULE;
-        o = next_object(vm, o);
-        if (o && PINNED(o)) to = (u32)(uintptr_t)o;
+    if (PINNED((Object *)(uintptr_t)value)) return value;
+    u32 low = 0, high = fw->count;  /* the last run starting at or below value */
+    while (high-low > 1) {
+        u32 mid = (low+high)/2;
+        if (fw->runs[mid*2] <= value) low = mid; else high = mid;
     }
-    return to;
+    return value-fw->runs[low*2+1];
 }
 
 static void update_object(Jvm *vm, const Forward *fw, Object *o) {
@@ -224,25 +206,60 @@ static void update_object(Jvm *vm, const Forward *fw, Object *o) {
         if ((c->ref_map[i/32] >> (i%32)) & 1) w[i] = forward(vm, fw, w[i]);
 }
 
-/* Returns 1 if objects moved (the free list is rebuilt), 0 if it could not run. */
-static int compact(Jvm *vm) {
-    if (!vm->stack_base) return 0;
-    u32 heap_bytes = (u32)(vm->heap_end-vm->heap);
-    Forward fw = {vm->forward_table, vm->forward_shift};
-    u32 chunks = (heap_bytes >> fw.shift)+1;
-    for (u32 k = 0; k < chunks; k++) fw.table[k] = 0;
-    pin_roots(vm);
-    /* New addresses of the first object in each chunk. */
-    u32 to = (u32)(uintptr_t)vm->heap;
+/* Holes left below pinned objects, which objects from higher up may fill. */
+#define MAX_HOLES 128
+typedef struct Hole { u8 *start; u32 size; } Hole;
+static Hole holes[MAX_HOLES];
+
+/* Plans every move (dest_of), or returns 0 if the runs do not fit the table. */
+static int plan(Jvm *vm, Forward *fw) {
+    u32 hole_count = 0;
+    u8 *place = vm->heap, *last_end = 0;
+    u32 last_distance = 0xffffffffu;
+    fw->count = 0;
     for (u8 *p = vm->heap; p < vm->heap_end; p += SIZE((Object *)p)*GRANULE) {
         Object *o = (Object *)p;
         if (!o->cls) continue;
-        u32 at = PINNED(o) ? (u32)(uintptr_t)p : to;
-        u32 k = (u32)(p-vm->heap) >> fw.shift;
-        if (!fw.table[k]) fw.table[k] = at;  /* address order: the chunk's first object */
-        to = at+SIZE(o)*GRANULE;
+        u32 size = SIZE(o)*GRANULE;
+        if (PINNED(o)) {
+            if (place < p && (u32)(p-place) >= MIN_GRANULES*GRANULE && hole_count < MAX_HOLES)
+                holes[hole_count++] = (Hole){place, (u32)(p-place)};
+            if (place < p+size) place = p+size;
+            last_end = 0;
+            continue;
+        }
+        u8 *dest = 0;
+        for (u32 h = 0; h < hole_count; h++)
+            if (holes[h].size >= size && (holes[h].size-size == 0 || holes[h].size-size >= MIN_GRANULES*GRANULE)) {
+                dest = holes[h].start;
+                holes[h].start += size;
+                holes[h].size -= size;
+                break;
+            }
+        if (!dest) { dest = place; place += size; }
+        u32 distance = (u32)(p-dest);
+        if (p != last_end || distance != last_distance) {
+            if (fw->count == fw->capacity) return 0;
+            fw->runs[fw->count*2] = (u32)(uintptr_t)p;
+            fw->runs[fw->count*2+1] = distance;
+            fw->count++;
+        }
+        last_end = p+size;
+        last_distance = distance;
     }
-    /* References. */
+    return 1;
+}
+
+/* Returns 1 if objects moved (the free list is rebuilt), 0 if it could not run. */
+static int compact(Jvm *vm) {
+    if (!vm->stack_base) return 0;
+    Forward fw = {vm->forward_table, 0, vm->forward_words/2};
+    pin_roots(vm);
+    if (!plan(vm, &fw)) {
+        for (u8 *p = vm->heap; p < vm->heap_end; p += SIZE((Object *)p)*GRANULE) ((Object *)p)->info &= ~MARK;
+        return 0;
+    }
+    /* References, while every object is still where it was. */
     for (u8 *p = vm->heap; p < vm->heap_end; p += SIZE((Object *)p)*GRANULE)
         if (((Object *)p)->cls) update_object(vm, &fw, (Object *)p);
     for (Class *c = vm->classes; c; c = c->next) {
@@ -255,43 +272,46 @@ static int compact(Jvm *vm) {
     }
     for (u32 i = 0; i < vm->interned_count; i++)
         vm->interned[i] = (Object *)(uintptr_t)forward(vm, &fw, (u32)(uintptr_t)vm->interned[i]);
-    /* Move, rebuild the start bitmap and the free list (holes below pinned objects, then the end). */
+    /* Move in address order: every destination is below its object and below
+       objects not moved yet, so nothing still to move is overwritten. */
+    u32 heap_bytes = (u32)(vm->heap_end-vm->heap);
     jvm_memset(vm->starts, 0, ((heap_bytes/GRANULE)+31)/32*4);
-    Object *free_head = 0, **tail = &free_head;
-    u8 *place = vm->heap;
     vm->pinned_objects = vm->pinned_bytes = 0;
+    u32 run = 0;
     for (u8 *p = vm->heap; p < vm->heap_end;) {
         Object *o = (Object *)p;
-        u32 size = SIZE(o);
-        u8 *next = p+size*GRANULE;
+        u32 size = SIZE(o)*GRANULE;
+        u8 *next = p+size;
         if (o->cls) {
             if (PINNED(o)) {
-                vm->pinned_objects++;
-                vm->pinned_bytes += size*GRANULE;
-                if (place < p) {
-                    Object *hole = (Object *)place;
-                    u32 g = (u32)(p-place)/GRANULE;
-                    hole->cls = 0;
-                    hole->info = g << 2;
-                    if (g >= MIN_GRANULES) { *tail = hole; tail = &NEXT_FREE(hole); }  /* 1 granule: a filler */
-                }
                 o->info &= ~MARK;
                 set_start(vm, o);
-                place = next;
+                vm->pinned_objects++;
+                vm->pinned_bytes += size;
             } else {
-                if (place != p) for (u32 i = 0; i < size*GRANULE/4; i++) ((u32 *)place)[i] = ((u32 *)p)[i];
-                set_start(vm, (Object *)place);
-                place += size*GRANULE;
+                while (run+1 < fw.count && fw.runs[(run+1)*2] <= (u32)(uintptr_t)p) run++;
+                u8 *dest = p-fw.runs[run*2+1];
+                if (dest != p) for (u32 i = 0; i < size/4; i++) ((u32 *)dest)[i] = ((u32 *)p)[i];
+                set_start(vm, (Object *)dest);
             }
         }
         p = next;
     }
-    if (place < vm->heap_end) {
-        Object *hole = (Object *)place;
-        u32 g = (u32)(vm->heap_end-place)/GRANULE;
+    /* Free blocks: the spans between objects, in address order. */
+    Object *free_head = 0, **tail = &free_head;
+    u8 *at = vm->heap;
+    while (at < vm->heap_end) {
+        u32 i = granule_index(vm, at);
+        if ((vm->starts[i/32] >> (i%32)) & 1) { at += SIZE((Object *)at)*GRANULE; continue; }
+        u8 *end = at;
+        u32 limit = heap_bytes/GRANULE;
+        for (u32 k = i; k < limit && !((vm->starts[k/32] >> (k%32)) & 1); k++) end += GRANULE;
+        Object *hole = (Object *)at;
+        u32 g = (u32)(end-at)/GRANULE;
         hole->cls = 0;
         hole->info = g << 2;
-        if (g >= MIN_GRANULES) { *tail = hole; tail = &NEXT_FREE(hole); }
+        if (g >= MIN_GRANULES) { *tail = hole; tail = &NEXT_FREE(hole); }  /* 1 granule: a filler */
+        at = end;
     }
     *tail = 0;
     vm->free_list = free_head;

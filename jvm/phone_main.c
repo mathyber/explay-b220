@@ -471,8 +471,24 @@ static void key(u32 message) {
     jvm_post_event(vm, type, code);
 }
 
+/* Class metadata outside the VM block: the Static Byte Heap, then App Heap blocks
+   the VM block did not take (it takes the largest one only; others are free too,
+   and the list's memory comes back after the launch), always leaving RESERVE. */
+#define EXTRAS 24
+static void *extras[EXTRAS];
+static void *host_alloc_extra(void *context, uint32_t bytes) {
+    (void)context;
+    u32 i = 0;
+    while (i < EXTRAS && extras[i]) i++;
+    if (i == EXTRAS) return 0;
+    if (api->size >= __builtin_offsetof(Go1Api, alloc_static)+sizeof(void *)) extras[i] = api->alloc_static(bytes);
+    if (!extras[i] && api->heap_free() >= bytes+RESERVE) extras[i] = api->alloc(bytes);
+    return extras[i];
+}
+
 static void shutdown(void) {
     api->timer(0, 0);
+    for (u32 i = 0; i < EXTRAS; i++) if (extras[i]) { api->free(extras[i]); extras[i] = 0; }
     if (library_file) { jar_close(&library); api->close(library_file); library_file = 0; }
     if (application_file) { jar_close(&application); api->close(application_file); application_file = 0; }
     if (block) { api->free(block); block = 0; }
@@ -556,7 +572,8 @@ static const JvmIo phone_io = {io_open, io_read, io_write, io_seek, io_size, io_
 
 static void start(const u16 *path) {
     free_infos();
-    static JvmHost host = {host_read, host_release, host_write, host_ms, 0, host_screen, host_flush, host_stream, 0, 0};
+    static JvmHost host = {host_read, host_release, host_write, host_ms, 0, host_screen, host_flush, host_stream, 0, 0,
+                           host_alloc_extra};
     /* Older loaders lack file writing and the network: go1.Files/Net then throw IOException. */
     /* Files, network and clock: loaders from 2026-11-06 (up to rename). */
     int full = api->size >= __builtin_offsetof(Go1Api, alloc_static);

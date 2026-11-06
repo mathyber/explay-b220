@@ -160,8 +160,8 @@ struct Jvm {
     u32 turn;  /* bytecodes left in the current thread's turn (0: pick the next thread) */
     u8 halted; /* go1.Launcher.halt(): the MIDlet is finished, other threads or not */
     void *stack_base;  /* C stack at the outermost VM entry: compaction scans it */
-    u32 *forward_table;  /* compaction: a word per 1 << forward_shift bytes of the largest heap */
-    u32 forward_shift;
+    u32 *forward_table;  /* compaction: runs of moved objects (a word per 512 bytes of the largest heap) */
+    u32 forward_words;
     u32 compactions, pinned_objects, pinned_bytes;  /* pinned: at the last compaction */
     /* Metadata chunks inside the heap (fixed, always live) when the heap's tail is taken. */
 #define MAX_META_CHUNKS 64
@@ -180,7 +180,7 @@ struct Jvm {
     u32 event_head, event_tail;
     Thread *event_waiter;
     Class *image_class;
-    u32 image_pixels, image_alpha, image_width, image_height;
+    u32 image_pixels, image_alpha, image_width, image_height, image_alpha_bits;
     /* Frequently used classes and fields. */
     Class *object_class, *string_class, *class_class, *thread_class, *char_array;
     Class *primitive_arrays[12];

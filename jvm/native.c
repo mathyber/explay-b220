@@ -635,8 +635,8 @@ Jvm *jvm_create(const JvmHost *host, void *memory, uint32_t bytes, uint32_t meta
     vm->starts = meta_alloc(vm, (most/GRANULE+31)/32*4);
     /* Compaction's forwarding table, kept for good: compaction is also what
        frees metadata space, when there is no room left to put a table. */
-    vm->forward_shift = 10;
-    vm->forward_table = meta_alloc(vm, ((most >> vm->forward_shift)+1)*4);
+    vm->forward_words = (most >> 9)+2;
+    vm->forward_table = meta_alloc(vm, vm->forward_words*4);
     u32 heap_bytes = (u32)(vm->heap_end-vm->heap);
     vm->marks_capacity = 4096;
     vm->marks_stack = meta_alloc(vm, vm->marks_capacity*4);
