@@ -59,3 +59,6 @@ Desktop.ini
 
 # Game and browser JARs for local tests (copyrighted, not in git).
 /jars/
+
+# Playwright MCP tool logs
+.playwright-mcp/
