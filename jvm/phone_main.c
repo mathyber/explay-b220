@@ -271,7 +271,7 @@ static void free_infos(void) {
 
 static void load_infos(void) {
     free_infos();
-    if (!game_count || api->size < sizeof(Go1Api)) return;
+    if (!game_count || api->size < __builtin_offsetof(Go1Api, alloc_static)) return;
     infos = api->alloc(game_count*sizeof(GameInfo));
     if (!infos) return;
     for (u32 i = 0; i < game_count; i++) read_info(i, &infos[i]);
@@ -360,17 +360,20 @@ static void host_write(void *context, int stream, const char *bytes, uint32_t le
 
 static uint32_t host_ms(void *context) { (void)context; return api->ms(); }
 
-/* The RTC (api->clock) counts local seconds from 1980-01-01; the millisecond
-   counter gives the fraction, so the value moves smoothly. A change of the
-   phone clock by more than a few seconds is followed. */
+/* System.currentTimeMillis: the RTC (api->clock, local seconds from 1980-01-01)
+   read once when the VM starts, then only the millisecond counter. Games step
+   their world by the difference between two calls, so the value must never jump:
+   following the RTC (it once re-synced when the two drifted 2 s apart) moved
+   GAZila's bus by seconds at a time in the emulator, whose RTC follows the PC
+   clock while the counter follows guest time. A clock change shows after a
+   restart of the MIDlet. */
+static uint32_t now_ms0, now_s0;
+static int now_set;
 static int64_t host_now(void *context) {
-    static uint32_t ms0, s0;
-    static int set;
     (void)context;
-    uint32_t ms = api->ms(), s = api->clock();
-    int64_t estimate = (int64_t)s0*1000+(uint32_t)(ms-ms0), rtc = (int64_t)s*1000;
-    if (!set || estimate < rtc-2000 || estimate > rtc+3000) { ms0 = ms; s0 = s; set = 1; estimate = rtc; }
-    return estimate+315532800LL*1000;  /* 1970-01-01 to 1980-01-01 */
+    uint32_t ms = api->ms();
+    if (!now_set) { now_ms0 = ms; now_s0 = api->clock(); now_set = 1; }
+    return ((int64_t)now_s0+315532800)*1000+(uint32_t)(ms-now_ms0);  /* +1970..1980 */
 }
 /* MIDlets draw into a back buffer; a flush copies the finished rectangle to the
    window's screen buffer and then asks the firmware to show it. The firmware
@@ -393,8 +396,11 @@ static void copy_pixels(u16 *to, const u16 *from, u32 n) {
     while (n--) *to++ = *from++;
 }
 static uint16_t *host_screen(void *context) { (void)context; return back ? back : api->screen(); }
+static u32 frames;  /* flushes so far: a MIDlet's frames */
+static void release_held(int all);
 static void host_flush(void *context, int x, int y, int w, int h) {
     (void)context;
+    frames++;
     if (back) {
         if (x < 0) { w += x; x = 0; }
         if (y < 0) { h += y; y = 0; }
@@ -424,6 +430,24 @@ static int midp_key(u32 code) {
     }
 }
 
+/* A release is held back until the MIDlet has drawn two frames since the press
+   (at most HOLD_MAX_MS): games that poll "is the key down" once per frame
+   (Age of Empires III's menus) missed short presses whose press and release
+   both fell between two of their frames. Two, because the first may have begun
+   before the press. */
+#define HOLD_MAX_MS 500
+#define HELD_KEYS 8
+static struct { int code; u32 frames, ms, released; } held[HELD_KEYS];
+
+static void release_held(int all) {
+    for (u32 i = 0; i < HELD_KEYS; i++) {
+        if (!held[i].code || !held[i].released) continue;
+        if (!all && frames-held[i].frames < 2 && api->ms()-held[i].ms < HOLD_MAX_MS) continue;
+        jvm_post_event(vm, JVM_KEY_RELEASED, held[i].code);
+        held[i].code = 0;
+    }
+}
+
 static void key(u32 message) {
     int code = midp_key(GO1_CODE(message)), type = 0;
     switch (GO1_KIND(message)) {
@@ -432,7 +456,19 @@ static void key(u32 message) {
     case GO1_REPEAT: type = JVM_KEY_REPEATED; break;
     default: break;
     }
-    if (code && type) jvm_post_event(vm, type, code);
+    if (!code || !type) return;
+    u32 i = 0;
+    while (i < HELD_KEYS && held[i].code != code) i++;
+    if (type == JVM_KEY_PRESSED) {
+        if (i < HELD_KEYS && held[i].released) { jvm_post_event(vm, JVM_KEY_RELEASED, code); held[i].code = 0; }
+        for (i = 0; i < HELD_KEYS && held[i].code; i++) {}
+        if (i < HELD_KEYS) { held[i].code = code; held[i].frames = frames; held[i].ms = api->ms(); held[i].released = 0; }
+    } else if (type == JVM_KEY_RELEASED && i < HELD_KEYS) {
+        held[i].released = 1;
+        release_held(0);
+        return;  /* delivered by release_held, now or later */
+    }
+    jvm_post_event(vm, type, code);
 }
 
 static void shutdown(void) {
@@ -522,8 +558,10 @@ static void start(const u16 *path) {
     free_infos();
     static JvmHost host = {host_read, host_release, host_write, host_ms, 0, host_screen, host_flush, host_stream, 0, 0};
     /* Older loaders lack file writing and the network: go1.Files/Net then throw IOException. */
-    host.io = api->size >= sizeof(Go1Api) ? &phone_io : 0;
-    host.now = api->size >= sizeof(Go1Api) ? host_now : 0;
+    /* Files, network and clock: loaders from 2026-11-06 (up to rename). */
+    int full = api->size >= __builtin_offsetof(Go1Api, alloc_static);
+    host.io = full ? &phone_io : 0;
+    host.now = full ? host_now : 0;
     u16 library_path[20];
     row = column = 0;
     for (u32 i = 0; i < LINES; i++) console[i][0] = 0;
@@ -541,7 +579,9 @@ static void start(const u16 *path) {
        per class file byte plus the library); the heap gets the rest. */
     u32 meta = META_BASE+jar_class_bytes(&application)/5*7;
     if (midp) {
-        back = api->alloc(JVM_SCREEN_WIDTH*JVM_SCREEN_HEIGHT*2);
+        /* From the Static Byte Heap when the loader has it: the App Heap is the VM's. */
+        back = api->size >= __builtin_offsetof(Go1Api, alloc_static)+sizeof(void *) ? api->alloc_static(JVM_SCREEN_WIDTH*JVM_SCREEN_HEIGHT*2) : 0;
+        if (!back) back = api->alloc(JVM_SCREEN_WIDTH*JVM_SCREEN_HEIGHT*2);
         if (!back) { say("Not enough memory\n"); finished = 1; return; }
         u16 *screen = api->screen();
         for (u32 i = 0; i < JVM_SCREEN_WIDTH*JVM_SCREEN_HEIGHT; i++) back[i] = screen[i];
@@ -550,6 +590,8 @@ static void start(const u16 *path) {
     if (available < meta+RESERVE+HEAP_MIN) { say("Not enough memory\n"); finished = 1; return; }
     u32 bytes = available-RESERVE;
     block = api->alloc(bytes);
+    now_set = 0;  /* currentTimeMillis reads the RTC again for this VM */
+    for (u32 i = 0; i < HELD_KEYS; i++) held[i].code = 0;
     vm = block ? jvm_create(&host, block, bytes, meta) : 0;
     if (!vm) { say("VM creation failed\n"); finished = 1; return; }
     if (!jvm_start_main(vm, name)) { say("VM: "); say(jvm_error(vm)); put('\n'); finished = 1; return; }
@@ -618,6 +660,7 @@ static void next_tick(int status) {
 static void tick(void) {
     if (!vm || finished) return;
     if (exit_deadline && (int32_t)(api->ms()-exit_deadline) >= 0) { done(); return; }
+    release_held(0);
     /* Run by the clock, not a fixed bytecode count: a fixed count capped the VM
        below what the CPU can do (the interpreter got faster, the cap stayed). */
     u32 start = api->ms();

@@ -43,7 +43,8 @@ typedef struct JarBits {
 typedef struct JarHuffman { uint16_t counts[16]; uint16_t symbols[288]; uint16_t fast[1 << JAR_FAST_BITS]; } JarHuffman;
 
 /* An entry decompressed on demand: about 34 KB, most of it the window. It
-   holds pointers into itself, so it must not move while in use. */
+   holds pointers into itself, so it must not move while in use (a byte[] that
+   holds one is fixed: jvm_fix_object). */
 typedef struct JarStream {
     JarBits bits;
     const JarIo *io;

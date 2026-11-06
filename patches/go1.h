@@ -157,6 +157,10 @@ typedef struct Go1Api {
     go1_u32 (*remove)(const unsigned short *path);
     go1_u32 (*make_dir)(const unsigned short *path);
     go1_u32 (*rename)(const unsigned short *from, const unsigned short *to);
+    /* Fields from 2026-11-07. A large buffer from the firmware Static Byte Heap
+       (about 220 KB free, 64 KB of it always left to the firmware), for memory a
+       program keeps while it runs; 0 if it does not fit. Released with free(). */
+    void *(*alloc_static)(go1_u32 size);
 } Go1Api;
 
 #define GO1_NET_OFF 0

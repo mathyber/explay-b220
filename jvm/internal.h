@@ -148,7 +148,7 @@ typedef struct Monitor {
 
 struct Jvm {
     JvmHost host;
-    u8 *meta, *meta_top, *meta_end;
+    u8 *meta, *meta_top, *meta_end;  /* metadata: [meta_top, meta_end), growing down */
     u8 *heap, *heap_end;
     u32 *starts;          /* bit per granule: an object starts here */
     u32 *marks_stack;
@@ -159,6 +159,15 @@ struct Jvm {
     Thread *threads, *current;
     u32 turn;  /* bytecodes left in the current thread's turn (0: pick the next thread) */
     u8 halted; /* go1.Launcher.halt(): the MIDlet is finished, other threads or not */
+    void *stack_base;  /* C stack at the outermost VM entry: compaction scans it */
+    u32 *forward_table;  /* compaction: a word per 1 << forward_shift bytes of the largest heap */
+    u32 forward_shift;
+    u32 compactions, pinned_objects, pinned_bytes;  /* pinned: at the last compaction */
+    /* Metadata chunks inside the heap (fixed, always live) when the heap's tail is taken. */
+#define MAX_META_CHUNKS 64
+    Object *meta_chunks[MAX_META_CHUNKS];
+    u32 meta_chunk_count;
+    u8 *chunk_top, *chunk_end;
     Monitor monitors[MAX_MONITORS];
     Object *temp_roots[MAX_TEMP_ROOTS];
     u32 temp_count;
@@ -196,6 +205,8 @@ Field *resolve_field(Jvm *vm, Class *from, u16 index);
 Method *resolve_method(Jvm *vm, Class *from, u16 index);
 Object *resolve_string(Jvm *vm, Class *from, u16 index);
 void *meta_alloc(Jvm *vm, u32 bytes);
+int give_heap_tail(Jvm *vm, u32 bytes);
+u8 *meta_chunk(Jvm *vm, u32 bytes);  /* a new metadata chunk in the heap; sets chunk_end */
 void *meta_bytes(Jvm *vm, u32 bytes);
 int utf8_equals(Utf8 a, const char *c);
 int utf8_same(Utf8 a, Utf8 b);
@@ -210,6 +221,8 @@ u32 element_size(u8 type);
 void collect(Jvm *vm);
 int is_object(Jvm *vm, u32 value);
 void push_root(Jvm *vm, Object *o);
+void jvm_fix_object(Object *o);  /* never moved by compaction */
+int jvm_compact(Jvm *vm);  /* after collect(): slide live objects together */
 void pop_roots(Jvm *vm, u32 count);
 
 /* interp.c */

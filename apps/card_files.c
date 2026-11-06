@@ -58,7 +58,7 @@ __attribute__((used, section(".entry")))
 u32 go1_main(const Go1Api *program_api, u32 message, u32 parameter) {
     (void)parameter;
     api = program_api;
-    if (api->size < sizeof(Go1Api)) {
+    if (api->size < __builtin_offsetof(Go1Api, alloc_static)) {
         if (message == GO1_OPEN || message == GO1_PAINT) { api->fill(0, 0, 176, 176, 0); api->text(60, "Needs a newer firmware", 0xffff); }
         return 1;
     }

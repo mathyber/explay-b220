@@ -90,7 +90,8 @@ enum {
     JVM_ERROR = 3     /* fatal VM error; see jvm_error */
 };
 
-/* memory: the whole VM block; meta_bytes of it hold class metadata and stacks. */
+/* memory: the whole VM block; meta_bytes of it start as class metadata and stacks
+   (top), the rest as the heap (bottom); the line between them then moves as needed. */
 Jvm *jvm_create(const JvmHost *host, void *memory, uint32_t bytes, uint32_t meta_bytes);
 /* Start a thread running public static void main(String[]) of a class ("pkg/Name"). */
 int jvm_start_main(Jvm *vm, const char *class_name);
@@ -137,5 +138,7 @@ int jvm_png_decode(const uint8_t *data, uint32_t size, uint8_t *packed, uint8_t 
 
 /* Debugging: "Class.method" on top of the running thread (empty if none). */
 void jvm_debug_where(Jvm *vm, char *out, uint32_t capacity);
+uint32_t jvm_compactions(Jvm *vm);
+uint32_t jvm_pinned(Jvm *vm, uint32_t *bytes);  /* objects (and bytes) pinned at the last compaction */
 
 #endif

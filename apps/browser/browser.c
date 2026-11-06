@@ -1060,7 +1060,7 @@ static u32 marks_len;
 static char start_html[MARKS_MAX*2+1024];
 
 /* Older loaders cannot write files: the browser then keeps nothing between runs. */
-static int can_write(void) { return api->size >= sizeof(Go1Api); }
+static int can_write(void) { return api->size >= __builtin_offsetof(Go1Api, alloc_static); }
 
 /* The seed file carries entropy from earlier runs into the pool; it is
    rewritten at once (and after pages) so a value is never reused. */
@@ -1474,7 +1474,7 @@ __attribute__((used, section(".entry")))
 u32 go1_main(const Go1Api *program_api, u32 message, u32 parameter) {
     (void)parameter;
     api = program_api;
-    if (api->size < sizeof(Go1Api)) {
+    if (api->size < __builtin_offsetof(Go1Api, alloc_static)) {
         if (message == GO1_OPEN || message == GO1_PAINT) {
             api->fill(0, 0, 176, 176, 0);
             api->text(60, "Needs a newer firmware", 0xffff);

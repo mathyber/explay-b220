@@ -42,10 +42,16 @@ u32 launch_sd_apps(void) { return FN(0x4d7da3,Create)(0x70d150,0)&255; }
    the firmware allocator assert and reboot instead of returning 0, so every
    allocation first walks the pool for the largest free block (marker 0xFFFFEEEE). */
 #define APP_POOL ((volatile u32 *)0x042c4d50u)
+/* Static Byte Heap (allocator type 0x22222222): 530 KB, about 220 KB free with
+   the SD Apps window open; its control block comes before Dynamic Base and
+   Dynamic App (0x48 each). */
+#define STATIC_POOL ((volatile u32 *)0x042c4cc0u)
+#define STATIC_HEAP 0x22222222u
+#define STATIC_KEEP (64*1024)  /* left to the firmware in that heap */
 #define POOL_MARGIN 128
-static u32 largest_free(void) {
-    if (APP_POOL[0]!=0x42595445u) return 0;
-    u32 start=APP_POOL[6],end=start+APP_POOL[7],block=start,best=0;
+static u32 pool_largest(volatile u32 *pool) {
+    if (pool[0]!=0x42595445u) return 0;
+    u32 start=pool[6],end=start+pool[7],block=start,best=0;
     for (u32 n=0;n<4096 && block>=start && block+8<=end;n++) {
         u32 next=*(volatile u32 *)block,mark=*(volatile u32 *)(block+4);
         if (next<=block || next>end) break;
@@ -54,6 +60,7 @@ static u32 largest_free(void) {
     }
     return best;
 }
+static u32 largest_free(void) { return pool_largest(APP_POOL); }
 static void *heap_alloc(u32 size,const char *tag) {
     if (!size || size>0x01000000u || largest_free()<size+POOL_MARGIN) return 0;
     return FN(0x6a5439,Alloc)(size,APP_HEAP,tag,0);
@@ -294,6 +301,12 @@ static void refresh(void) {
     menu();
 }
 static void *api_alloc(u32 size) { return heap_alloc(size,"GO1N"); }
+/* A large buffer from the Static Byte Heap, keeping STATIC_KEEP for the firmware;
+   0 if it does not fit (checked first: the allocator reboots on failure). */
+static void *api_alloc_static(u32 size) {
+    if (!size || size>0x01000000u || pool_largest(STATIC_POOL)<size+STATIC_KEEP) return 0;
+    return FN(0x6a5439,Alloc)(size,STATIC_HEAP,"GO1S",0);
+}
 static u32 api_heap_free(void) { u32 free=largest_free(); return free>POOL_MARGIN?free-POOL_MARGIN:0; }
 static void api_free(void *block) { if (block) FN(0x6a5469,Free)(block); }
 static u32 api_open(const char *ascii) {
@@ -470,7 +483,8 @@ static const Go1Api api={GO1_API_VERSION,sizeof(Go1Api),api_alloc,api_free,api_o
                          api_find_first,api_find_next,api_find_close,api_text_at,
                          api_net_start,api_net_state,api_dns,api_tcp_open,api_tcp_connect,
                          api_tcp_send,api_tcp_recv,api_tcp_close,api_clock,
-                         api_create,api_open_update,api_open_append,api_write,api_remove,api_make_dir,api_rename};
+                         api_create,api_open_update,api_open_append,api_write,api_remove,api_make_dir,api_rename,
+                         api_alloc_static};
 /* Relocate a GO1N file in place: the image starts after the 32-byte header,
    .bss follows the image and may overwrite the already applied table.
    Takes ownership of the file buffer and frees it on failure. */

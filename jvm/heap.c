@@ -30,18 +30,30 @@ void push_root(Jvm *vm, Object *o) {
 }
 void pop_roots(Jvm *vm, u32 count) { vm->temp_count -= count; }
 
+/* Kept free above a scratch buffer at the heap's end: metadata grows down into
+   the heap's free tail, and a class file being loaded sits in such a buffer. */
+#define TAIL_GUARD_GRANULES (64*1024/GRANULE)
+
 /* The free list is in address order. Objects come from the start of the
    lowest block that fits, so the heap fills densely from the bottom; scratch
    buffers (top) come from the end of the highest one, away from objects that
    stay, and leave one large hole when they go. */
+static int eats_guard(Jvm *vm, Object *f, u32 g) {
+    return (u8 *)f+SIZE(f)*GRANULE == vm->heap_end && SIZE(f) < g+TAIL_GUARD_GRANULES+2*MIN_GRANULES;
+}
+
 static Object *take(Jvm *vm, u32 g, int top) {
     Object *previous = 0, *chosen = 0, *chosen_previous = 0;
-    for (Object *f = vm->free_list; f; previous = f, f = NEXT_FREE(f)) {
-        if (SIZE(f) < g) continue;
-        chosen = f;
-        chosen_previous = previous;
-        if (!top) break;
-    }
+    /* Scratch buffers leave the guard at the heap's end alone while another
+       block fits (they stay until the next collection). */
+    for (int pass = top ? 0 : 1; pass < 2 && !chosen; pass++)
+        for (Object *f = vm->free_list, *before = 0; f; before = f, f = NEXT_FREE(f)) {
+            if (SIZE(f) < g || (!pass && eats_guard(vm, f, g))) continue;
+            chosen = f;
+            chosen_previous = before;
+            if (!top) break;
+        }
+    (void)previous;
     if (!chosen) return 0;
     Object *f = chosen, *o;
     u32 size = SIZE(f);
@@ -49,6 +61,16 @@ static Object *take(Jvm *vm, u32 g, int top) {
         if (chosen_previous) NEXT_FREE(chosen_previous) = NEXT_FREE(f); else vm->free_list = NEXT_FREE(f);
         o = f;
         g = size;
+    } else if (top && (u8 *)f+size*GRANULE == vm->heap_end && size-g >= TAIL_GUARD_GRANULES+2*MIN_GRANULES) {
+        /* Below a guard at the heap's end: [f ... | object | guard] */
+        u32 below = size-g-TAIL_GUARD_GRANULES;
+        Object *guard = (Object *)((u8 *)f+(below+g)*GRANULE);
+        guard->cls = 0;
+        guard->info = TAIL_GUARD_GRANULES << 2;
+        NEXT_FREE(guard) = NEXT_FREE(f);
+        NEXT_FREE(f) = guard;
+        f->info = below << 2;
+        o = (Object *)((u8 *)f+below*GRANULE);
     } else if (top) {
         f->info = (size-g) << 2;
         o = (Object *)((u8 *)f+(size-g)*GRANULE);
@@ -67,11 +89,300 @@ static Object *take(Jvm *vm, u32 g, int top) {
     return o;
 }
 
+/* ---------- compaction ----------
+   When an allocation still fails after a collection (and after borrowing unused
+   metadata space), live objects slide down to close the holes between them: the
+   collector does not move objects otherwise, and free memory broke into pieces
+   too small for the next large array (Age of Empires III: 317 KB free in 399
+   blocks, the largest 52 KB).
+
+   Objects that something outside the precise object graph points to stay where
+   they are (pinned for this compaction with the MARK bit):
+   - values in Java stack slots (they may be ints), the stack arrays themselves
+     (frames point into them), Frame and Thread object fields, monitors,
+     temporary roots;
+   - words on the C stack and in callee-saved registers, including pointers into
+     an object (natives hold array data pointers);
+   - objects with the FIXED header bit: a JarStream keeps pointers into itself,
+     and an object whose identity hash was taken keeps its address (the hash is
+     the address).
+   Precise references (object fields, reference arrays, statics, Class mirrors,
+   string constants, interned strings) are updated to the new addresses. */
+
+#define FIXED 2u
+#define PINNED(o) ((o)->info & (MARK|FIXED))
+
+void jvm_fix_object(Object *o) { if (o) o->info |= FIXED; }
+
+/* The allocated object that contains address a, or 0. */
+static Object *containing(Jvm *vm, uintptr_t a) {
+    if (a < (uintptr_t)vm->heap || a >= (uintptr_t)vm->heap_end) return 0;
+    u32 i = granule_index(vm, (const void *)a);
+    for (;;) {
+        u32 word = vm->starts[i/32] & (0xffffffffu >> (31-i%32));
+        if (word) {
+            u32 bit = 31-(u32)__builtin_clz(word);
+            Object *o = (Object *)(vm->heap+((i/32)*32+bit)*GRANULE);
+            return o->cls && a < (uintptr_t)o+SIZE(o)*GRANULE ? o : 0;
+        }
+        if (i < 32) return 0;
+        i = (i/32)*32-1;
+    }
+}
+
+static void pin_value(Jvm *vm, u32 value) {
+    if (value && is_object(vm, value)) ((Object *)(uintptr_t)value)->info |= MARK;
+}
+
+static void pin_word(Jvm *vm, uintptr_t value) {
+    Object *o = containing(vm, value);
+    if (o) o->info |= MARK;
+    o = containing(vm, value-1);  /* an end pointer, one past the object */
+    if (o) o->info |= MARK;
+}
+
+/* Callee-saved registers of the native callers, on this frame's stack. */
+static __attribute__((noinline)) void pin_c_stack(Jvm *vm) {
+    uintptr_t saved[8];
+#if defined(__arm__)
+    __asm__ volatile("stmia %0, {r4-r11}" : : "r"(saved) : "memory");
+#elif defined(__i386__)
+    __asm__ volatile("movl %%ebx, 0(%0)\n\tmovl %%esi, 4(%0)\n\tmovl %%edi, 8(%0)\n\tmovl %%ebp, 12(%0)"
+                     : : "r"(saved) : "memory");
+    saved[4] = saved[5] = saved[6] = saved[7] = 0;
+#else
+#error "pin_c_stack: unknown architecture"
+#endif
+    for (u32 i = 0; i < 8; i++) pin_word(vm, saved[i]);
+    for (uintptr_t *p = (uintptr_t *)&saved[8]; p < (uintptr_t *)vm->stack_base; p++) pin_word(vm, *p);
+}
+
+static void pin_roots(Jvm *vm) {
+    for (Thread *t = vm->threads; t; t = t->next) {
+        if (t->state == THREAD_DEAD) continue;
+        pin_value(vm, (u32)(uintptr_t)t->stack);
+        pin_value(vm, (u32)(uintptr_t)t->object);
+        pin_value(vm, (u32)(uintptr_t)t->exception);
+        pin_value(vm, (u32)(uintptr_t)t->waiting_on);
+        /* Slots in use only: above the top frame's operand area they are stale. */
+        u32 *used_end = t->depth ? t->frames[t->depth-1].stack+t->frames[t->depth-1].method->max_stack : t->slots;
+        if (used_end > t->slots_end) used_end = t->slots_end;
+        for (u32 *s = t->slots; s && s < used_end; s++) pin_value(vm, *s);
+        for (u32 i = 0; i < t->depth; i++) pin_value(vm, (u32)(uintptr_t)t->frames[i].monitor);
+    }
+    for (u32 i = 0; i < vm->temp_count; i++) pin_value(vm, (u32)(uintptr_t)vm->temp_roots[i]);
+    for (u32 i = 0; i < MAX_MONITORS; i++) pin_value(vm, (u32)(uintptr_t)vm->monitors[i].object);
+    pin_c_stack(vm);
+}
+
+/* Forwarding: table[k] is the new address of the first object that starts in
+   chunk k; the others follow by walking the chunk (pinned objects stay). */
+typedef struct Forward { u32 *table; u32 shift; } Forward;
+
+static Object *next_object(Jvm *vm, Object *o) {
+    for (u8 *p = (u8 *)o+SIZE(o)*GRANULE; p < vm->heap_end; p += SIZE((Object *)p)*GRANULE)
+        if (((Object *)p)->cls) return (Object *)p;
+    return 0;
+}
+
+static Object *first_in_chunk(Jvm *vm, const Forward *fw, u32 k) {
+    u32 first = (k << fw->shift)/GRANULE, end = ((k+1) << fw->shift)/GRANULE;
+    u32 limit = (u32)(vm->heap_end-vm->heap)/GRANULE;
+    if (end > limit) end = limit;
+    for (u32 i = first; i < end; i++)
+        if ((vm->starts[i/32] >> (i%32)) & 1) return (Object *)(vm->heap+i*GRANULE);
+    return 0;
+}
+
+static u32 forward(Jvm *vm, const Forward *fw, u32 value) {
+    if (!value || !is_object(vm, value)) return value;
+    Object *target = (Object *)(uintptr_t)value;
+    if (PINNED(target)) return value;
+    u32 k = (u32)((u8 *)target-vm->heap) >> fw->shift;
+    Object *o = first_in_chunk(vm, fw, k);
+    u32 to = fw->table[k];
+    while (o && o != target) {
+        to = (PINNED(o) ? (u32)(uintptr_t)o : to)+SIZE(o)*GRANULE;
+        o = next_object(vm, o);
+        if (o && PINNED(o)) to = (u32)(uintptr_t)o;
+    }
+    return to;
+}
+
+static void update_object(Jvm *vm, const Forward *fw, Object *o) {
+    Class *c = o->cls;
+    if (c->dimensions) {
+        if (c->element_type == 'L' || c->element_type == '[') {
+            Array *a = (Array *)o;
+            u32 *e = (u32 *)ARRAY_DATA(a);
+            for (u32 i = 0; i < a->length; i++) e[i] = forward(vm, fw, e[i]);
+        }
+        return;
+    }
+    u32 words = c->instance_bytes/4, *w = (u32 *)o;
+    for (u32 i = 2; i < words; i++)
+        if ((c->ref_map[i/32] >> (i%32)) & 1) w[i] = forward(vm, fw, w[i]);
+}
+
+/* Returns 1 if objects moved (the free list is rebuilt), 0 if it could not run. */
+static int compact(Jvm *vm) {
+    if (!vm->stack_base) return 0;
+    u32 heap_bytes = (u32)(vm->heap_end-vm->heap);
+    Forward fw = {vm->forward_table, vm->forward_shift};
+    u32 chunks = (heap_bytes >> fw.shift)+1;
+    for (u32 k = 0; k < chunks; k++) fw.table[k] = 0;
+    pin_roots(vm);
+    /* New addresses of the first object in each chunk. */
+    u32 to = (u32)(uintptr_t)vm->heap;
+    for (u8 *p = vm->heap; p < vm->heap_end; p += SIZE((Object *)p)*GRANULE) {
+        Object *o = (Object *)p;
+        if (!o->cls) continue;
+        u32 at = PINNED(o) ? (u32)(uintptr_t)p : to;
+        u32 k = (u32)(p-vm->heap) >> fw.shift;
+        if (!fw.table[k]) fw.table[k] = at;  /* address order: the chunk's first object */
+        to = at+SIZE(o)*GRANULE;
+    }
+    /* References. */
+    for (u8 *p = vm->heap; p < vm->heap_end; p += SIZE((Object *)p)*GRANULE)
+        if (((Object *)p)->cls) update_object(vm, &fw, (Object *)p);
+    for (Class *c = vm->classes; c; c = c->next) {
+        c->mirror = (Object *)(uintptr_t)forward(vm, &fw, (u32)(uintptr_t)c->mirror);
+        for (u32 i = 0; i < c->static_slots; i++)
+            if ((c->static_ref_map[i/32] >> (i%32)) & 1) c->statics[i] = forward(vm, &fw, c->statics[i]);
+        for (u32 i = 1; i < c->constant_count; i++)
+            if (c->constants[i].tag == 8 && c->constants[i].resolved)
+                c->constants[i].u.string = (Object *)(uintptr_t)forward(vm, &fw, (u32)(uintptr_t)c->constants[i].u.string);
+    }
+    for (u32 i = 0; i < vm->interned_count; i++)
+        vm->interned[i] = (Object *)(uintptr_t)forward(vm, &fw, (u32)(uintptr_t)vm->interned[i]);
+    /* Move, rebuild the start bitmap and the free list (holes below pinned objects, then the end). */
+    jvm_memset(vm->starts, 0, ((heap_bytes/GRANULE)+31)/32*4);
+    Object *free_head = 0, **tail = &free_head;
+    u8 *place = vm->heap;
+    vm->pinned_objects = vm->pinned_bytes = 0;
+    for (u8 *p = vm->heap; p < vm->heap_end;) {
+        Object *o = (Object *)p;
+        u32 size = SIZE(o);
+        u8 *next = p+size*GRANULE;
+        if (o->cls) {
+            if (PINNED(o)) {
+                vm->pinned_objects++;
+                vm->pinned_bytes += size*GRANULE;
+                if (place < p) {
+                    Object *hole = (Object *)place;
+                    u32 g = (u32)(p-place)/GRANULE;
+                    hole->cls = 0;
+                    hole->info = g << 2;
+                    if (g >= MIN_GRANULES) { *tail = hole; tail = &NEXT_FREE(hole); }  /* 1 granule: a filler */
+                }
+                o->info &= ~MARK;
+                set_start(vm, o);
+                place = next;
+            } else {
+                if (place != p) for (u32 i = 0; i < size*GRANULE/4; i++) ((u32 *)place)[i] = ((u32 *)p)[i];
+                set_start(vm, (Object *)place);
+                place += size*GRANULE;
+            }
+        }
+        p = next;
+    }
+    if (place < vm->heap_end) {
+        Object *hole = (Object *)place;
+        u32 g = (u32)(vm->heap_end-place)/GRANULE;
+        hole->cls = 0;
+        hole->info = g << 2;
+        if (g >= MIN_GRANULES) { *tail = hole; tail = &NEXT_FREE(hole); }
+    }
+    *tail = 0;
+    vm->free_list = free_head;
+    vm->compactions++;
+    return 1;
+}
+
+int jvm_compact_stress;  /* debug: compact after every collection */
+
+/* A fixed byte[] that holds metadata (class.c: meta_take); a root for good. */
+#define META_CHUNK (16*1024)
+static Object *allocate_at(Jvm *vm, u32 bytes, int top);
+u8 *meta_chunk(Jvm *vm, u32 bytes) {
+    if (vm->meta_chunk_count == MAX_META_CHUNKS) return 0;
+    Class *array = vm->primitive_arrays[4];  /* byte[] ("ZCFDBSIJ"), only once it exists:
+                                                creating it would need metadata itself */
+    if (!array) return 0;
+    u32 size = bytes > META_CHUNK ? bytes : META_CHUNK;
+    Array *a = (Array *)allocate_at(vm, sizeof(Array)+size, 0);
+    if (!a) return 0;
+    a->header.cls = array;
+    a->length = size;
+    a->header.info |= FIXED;
+    vm->meta_chunks[vm->meta_chunk_count++] = &a->header;
+    vm->chunk_end = (u8 *)ARRAY_DATA(a)+size;
+    return (u8 *)ARRAY_DATA(a);
+}
+uint32_t jvm_compactions(Jvm *vm) { return vm->compactions; }
+uint32_t jvm_pinned(Jvm *vm, uint32_t *bytes) { *bytes = vm->pinned_bytes; return vm->pinned_objects; }
+int jvm_compact(Jvm *vm) { return compact(vm); }
+
+/* Metadata left for classes still to load when the heap borrows the rest. */
+#define META_RESERVE (16*1024)
+
+/* The last free block, if it ends at heap_end (the free list is in address order). */
+static Object *tail_block(Jvm *vm, Object **previous) {
+    Object *last = 0, *before = 0;
+    for (Object *f = vm->free_list; f; before = last, last = f, f = NEXT_FREE(f)) {}
+    if (!last || (u8 *)last+SIZE(last)*GRANULE != vm->heap_end) return 0;
+    *previous = before;
+    return last;
+}
+
+/* For metadata: the heap's end moves down by at least bytes, out of its free tail. */
+int give_heap_tail(Jvm *vm, u32 bytes) {
+    u32 g = (bytes+GRANULE-1)/GRANULE;
+    Object *previous, *last = tail_block(vm, &previous);
+    if (!last || SIZE(last) < g) return 0;
+    if (SIZE(last)-g < MIN_GRANULES) {
+        g = SIZE(last);
+        if (previous) NEXT_FREE(previous) = 0; else vm->free_list = 0;
+    } else last->info = (SIZE(last)-g) << 2;
+    vm->heap_end -= g*GRANULE;
+    return 1;
+}
+
+/* For the heap: unused metadata space beyond META_RESERVE becomes heap, as much
+   as the allocation needs plus BORROW_STEP. Not all of it at once: applications
+   that size their caches by Runtime.totalMemory would fill it and leave nothing
+   for the classes they load later. */
+#define BORROW_STEP (64*1024)
+static int borrow_metadata(Jvm *vm, u32 need) {
+    u8 *limit = vm->meta_top-META_RESERVE;
+    if (limit <= vm->heap_end+MIN_GRANULES*GRANULE) return 0;
+    u32 g = (u32)(limit-vm->heap_end)/GRANULE, want = (need+BORROW_STEP)/GRANULE;
+    if (g > want) g = want;
+    Object *previous, *last = tail_block(vm, &previous);
+    if (last) last->info = (SIZE(last)+g) << 2;
+    else {
+        Object *block = (Object *)vm->heap_end, **tail = &vm->free_list;
+        while (*tail) tail = &NEXT_FREE(*tail);
+        block->cls = 0;
+        block->info = g << 2;
+        NEXT_FREE(block) = 0;
+        *tail = block;
+    }
+    vm->heap_end += g*GRANULE;
+    return 1;
+}
+
 static Object *allocate_at(Jvm *vm, u32 bytes, int top) {
     u32 g = (bytes+GRANULE-1)/GRANULE;
     if (g < MIN_GRANULES) g = MIN_GRANULES;
     Object *o = take(vm, g, top);
-    if (!o) { collect(vm); o = take(vm, g, top); }
+    if (!o) {
+        collect(vm);
+        if (jvm_compact_stress) compact(vm);
+        o = take(vm, g, top);
+    }
+    if (!o && borrow_metadata(vm, g*GRANULE)) o = take(vm, g, top);
+    if (!o && compact(vm)) o = take(vm, g, top);
     return o;
 }
 
@@ -283,6 +594,7 @@ void collect(Jvm *vm) {
     }
     for (u32 i = 0; i < vm->interned_count; i++) mark(&m, (u32)(uintptr_t)vm->interned[i]);
     for (u32 i = 0; i < vm->temp_count; i++) mark(&m, (u32)(uintptr_t)vm->temp_roots[i]);
+    for (u32 i = 0; i < vm->meta_chunk_count; i++) mark(&m, (u32)(uintptr_t)vm->meta_chunks[i]);
     for (u32 i = 0; i < MAX_MONITORS; i++)
         if (vm->monitors[i].owner) mark(&m, (u32)(uintptr_t)vm->monitors[i].object);
     drain(&m);

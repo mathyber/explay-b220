@@ -837,7 +837,17 @@ static Thread *next_runnable(Jvm *vm, Thread *from) {
     return 0;
 }
 
+static int run(Jvm *vm, u32 budget);
+
 int jvm_run(Jvm *vm, u32 budget) {
+    int here = 0;
+    vm->stack_base = &here+1;  /* compaction scans the C stack up to here */
+    int status = run(vm, budget);
+    vm->stack_base = 0;
+    return status;
+}
+
+static int run(Jvm *vm, u32 budget) {
     jvm_current_vm = vm;
     if (vm->status == JVM_ERROR) return JVM_ERROR;
     if (vm->halted) return JVM_DONE;

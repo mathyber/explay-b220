@@ -170,6 +170,8 @@ static void stats(Jvm *vm) {
         jvm_meta_parts(vm, parts);
         fprintf(stderr, "heap used %u, collections %u, peak live %u, largest free %u, metadata used %u\n", jvm_heap_used(vm),
                 jvm_gc_count(vm), jvm_heap_peak(vm), jvm_heap_largest_free(vm), jvm_meta_used(vm));
+        uint32_t pinned_bytes, pinned = jvm_pinned(vm, &pinned_bytes);
+        fprintf(stderr, "compactions %u, last pinned %u objects, %u bytes\n", jvm_compactions(vm), pinned, pinned_bytes);
         fprintf(stderr, "metadata: threads %u, %u classes: constants %u, methods/fields %u, bytecode %u\n",
                 parts[0], parts[1], parts[2], parts[3], parts[4]);
     }
@@ -295,6 +297,22 @@ int main(int argc, char **argv) {
     if (!jvm_start_main(vm, main_class)) { fprintf(stderr, "VM error: %s\n", jvm_error(vm)); return 70; }
     uint32_t start = host_ms(0);
     int next_key = 0, profile = getenv("GO1JVM_PROFILE") != 0;
+    extern int jvm_compact_stress;
+    jvm_compact_stress = getenv("GO1JVM_COMPACT") != 0;  /* debug: compact after every collection */
+    uint32_t rate = getenv("GO1JVM_RATE") ? (uint32_t)atoi(getenv("GO1JVM_RATE")) : 0;
+    uint64_t rate_done = 0;
+    const char *shots = getenv("GO1JVM_SHOTS");
+    char shot_prefix[260] = "";
+    uint32_t shot_next = 0, shot_step = 100, shot_index = 0;
+    if (shots) {
+        const char *comma = strchr(shots, ',');
+        size_t n = comma ? (size_t)(comma-shots) : strlen(shots);
+        if (n >= sizeof(shot_prefix)) n = sizeof(shot_prefix)-1;
+        memcpy(shot_prefix, shots, n);
+        if (comma) { shot_next = (uint32_t)atoi(comma+1); comma = strchr(comma+1, ','); }
+        if (comma) shot_step = (uint32_t)atoi(comma+1);
+        if (!shot_step) shot_step = 100;
+    }
     for (;;) {
         uint32_t elapsed = host_ms(0)-start;
         while (next_key < key_count && keys[next_key].at <= elapsed) {
@@ -302,7 +320,20 @@ int main(int argc, char **argv) {
             next_key++;
         }
         if (run_ms && elapsed >= run_ms) break;
-        int status = jvm_run(vm, profile ? 5000 : 200000);
+        /* GO1JVM_SHOTS=prefix,from_ms,step_ms: frames prefixNNNN.ppm for timing checks. */
+        if (shots && elapsed >= shot_next) {
+            char path[300];
+            snprintf(path, sizeof(path), "%s%04u.ppm", shot_prefix, shot_index++);
+            save_frame(path);
+            shot_next += shot_step;
+        }
+        /* GO1JVM_RATE=bytecodes per second: run at about a phone's speed. */
+        int status = jvm_run(vm, rate ? 2000 : profile ? 5000 : 200000);
+        if (rate && status == JVM_RUNNING) {
+            rate_done += 2000;
+            int32_t ahead = (int32_t)((uint64_t)rate_done*1000/rate)-(int32_t)(host_ms(0)-start);
+            if (ahead > 0) Sleep((DWORD)ahead);
+        }
         if (profile) profile_sample(vm);
         if (status == JVM_ERROR) { fprintf(stderr, "VM error: %s\n", jvm_error(vm)); stats(vm); return 70; }
         if (status == JVM_DONE) break;

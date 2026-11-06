@@ -136,7 +136,13 @@ static u32 format_double(char *out, double v, int digits) {
 #define ARG_REF(i) ((Object *)(uintptr_t)args[i])
 #define RETURN_REF(o) (result[0] = (u32)(uintptr_t)(o))
 
-static int object_hash(Thread *t, u32 *args, u32 *result) { (void)t; result[0] = args[0] >> 3; return 0; }
+/* The identity hash is the address: such an object is never moved afterwards. */
+static int object_hash(Thread *t, u32 *args, u32 *result) {
+    (void)t;
+    jvm_fix_object((Object *)(uintptr_t)args[0]);
+    result[0] = args[0] >> 3;
+    return 0;
+}
 
 static int object_clone(Thread *t, u32 *args, u32 *result) {
     Jvm *vm = thread_vm(t);
@@ -194,11 +200,19 @@ static int system_time(Thread *t, u32 *args, u32 *result) {
     return 0;
 }
 
-static int system_identity(Thread *t, u32 *args, u32 *result) { (void)t; result[0] = args[0] >> 3; return 0; }
+static int system_identity(Thread *t, u32 *args, u32 *result) {
+    (void)t;
+    jvm_fix_object((Object *)(uintptr_t)args[0]);
+    result[0] = args[0] >> 3;
+    return 0;
+}
 
+/* System.gc / Runtime.gc: a full collection with compaction, so a game that
+   frees memory before loading a level gets it back in one piece. */
 static int system_gc(Thread *t, u32 *args, u32 *result) {
     (void)args; (void)result;
     collect(thread_vm(t));
+    jvm_compact(thread_vm(t));
     return 0;
 }
 
@@ -497,7 +511,7 @@ static int class_read_resource(Thread *t, u32 *args, u32 *result) {
 }
 
 /* Large resources are read on demand (go1.ResourceStream): the JarStream lives
-   in a byte[] (heap objects never move) owned by the Java stream. */
+   in a byte[] owned by the Java stream, fixed in place (it points into itself). */
 static int class_open_resource(Thread *t, u32 *args, u32 *result) {
     Jvm *vm = thread_vm(t);
     Object *name = ARG_REF(0);
@@ -511,6 +525,7 @@ static int class_open_resource(Thread *t, u32 *args, u32 *result) {
     }
     Array *state = new_array(vm, primitive_array(vm, 'B'), sizeof(JarStream));
     if (!state) { throw_new(t, "java/lang/OutOfMemoryError", "resource stream"); return 1; }
+    jvm_fix_object(&state->header);
     if (!vm->host.stream(vm->host.context, path, (JarStream *)ARRAY_DATA(state), &size)) state = 0;
     RETURN_REF(state);
     return 0;
@@ -609,16 +624,24 @@ Jvm *jvm_create(const JvmHost *host, void *memory, uint32_t bytes, uint32_t meta
     jvm_memset(vm, 0, sizeof(Jvm));
     jvm_current_vm = vm;
     vm->host = *host;
-    vm->meta = vm->meta_top = base+((sizeof(Jvm)+7) & ~7u);
-    vm->meta_end = base+meta_bytes;
-    vm->heap = vm->meta_end;
-    vm->heap_end = vm->heap+((bytes-meta_bytes) & ~(u32)(GRANULE-1));
+    /* The heap grows up from the bottom, metadata down from the top; the line
+       between them moves both ways (heap.c: borrow_metadata, give_heap_tail):
+       metadata needs differ a lot between applications (Age of Empires III
+       used 356 KB of the 436 KB estimate, Opera Mini more than its estimate). */
+    vm->heap = base+((sizeof(Jvm)+GRANULE-1) & ~(u32)(GRANULE-1));
+    vm->meta_end = vm->meta_top = vm->meta = base+bytes;
+    vm->heap_end = vm->heap+((u32)(base+bytes-meta_bytes-vm->heap) & ~(u32)(GRANULE-1));
+    u32 most = (u32)(vm->meta_end-vm->heap);  /* the heap can never be larger */
+    vm->starts = meta_alloc(vm, (most/GRANULE+31)/32*4);
+    /* Compaction's forwarding table, kept for good: compaction is also what
+       frees metadata space, when there is no room left to put a table. */
+    vm->forward_shift = 10;
+    vm->forward_table = meta_alloc(vm, ((most >> vm->forward_shift)+1)*4);
     u32 heap_bytes = (u32)(vm->heap_end-vm->heap);
-    vm->starts = meta_alloc(vm, (heap_bytes/GRANULE+31)/32*4);
     vm->marks_capacity = 4096;
     vm->marks_stack = meta_alloc(vm, vm->marks_capacity*4);
     vm->interned = meta_alloc(vm, MAX_INTERNED*sizeof(Object *));
-    if (!vm->starts || !vm->marks_stack || !vm->interned) return 0;
+    if (!vm->starts || !vm->forward_table || !vm->marks_stack || !vm->interned) return 0;
     Object *all = (Object *)vm->heap;
     all->cls = 0;
     all->info = (heap_bytes/GRANULE) << 2;
@@ -645,7 +668,17 @@ Jvm *jvm_create(const JvmHost *host, void *memory, uint32_t bytes, uint32_t meta
     return vm;
 }
 
+static int start_main(Jvm *vm, const char *class_name);
+
 int jvm_start_main(Jvm *vm, const char *class_name) {
+    int here = 0;
+    vm->stack_base = &here+1;  /* compaction scans the C stack up to here */
+    int ok = start_main(vm, class_name);
+    vm->stack_base = 0;
+    return ok;
+}
+
+static int start_main(Jvm *vm, const char *class_name) {
     jvm_current_vm = vm;
     if (vm->status == JVM_ERROR) return 0;
     Class *c = find_class_c(vm, class_name);
@@ -673,7 +706,7 @@ uint32_t jvm_heap_largest_free(Jvm *vm) {
     for (Object *f = vm->free_list; f; f = *(Object **)(f+1)) if ((f->info >> 2)*GRANULE > best) best = (f->info >> 2)*GRANULE;
     return best;
 }
-uint32_t jvm_meta_used(Jvm *vm) { return (uint32_t)(vm->meta_top-vm->meta); }
+uint32_t jvm_meta_used(Jvm *vm) { return (uint32_t)(vm->meta_end-vm->meta_top); }
 
 void jvm_meta_parts(Jvm *vm, uint32_t parts[JVM_META_PARTS]) {
     jvm_memset(parts, 0, JVM_META_PARTS*sizeof(uint32_t));

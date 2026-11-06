@@ -563,7 +563,7 @@ static int draw_decode_png(Thread *t, u32 *args, u32 *result) {
     Array *alpha = pixels && has_alpha ? new_array(vm, bytes, png.width*png.height) : 0;
     u32 roots = 1+(raw != 0)+(pixels != 0);
     if (!raw || !pixels || (has_alpha && !alpha)) { pop_roots(vm, roots); throw_new(t, "java/lang/OutOfMemoryError", 0); return 1; }
-    /* The source array cannot move: the heap is non-moving. */
+    /* The source array is an argument: on the Java stack, so compaction leaves it in place. */
     int ok = png_decode_core(ARRAY_DATA(source)+I(1), (u32)I(2), &png, ARRAY_DATA(packed), ARRAY_DATA(raw),
                              (u16 *)ARRAY_DATA(pixels), alpha ? ARRAY_DATA(alpha) : 0);
     pop_roots(vm, roots);

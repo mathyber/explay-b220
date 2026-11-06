@@ -64,7 +64,7 @@ static void run_flash(u32 calls) { for (u32 i = 0; i < calls; i++) sink += api->
 
 static void save(void) {
     static const u16 path[] = {'E', ':', '\\', 'B', 'E', 'N', 'C', 'H', '.', 'T', 'X', 'T', 0};
-    if (api->size < sizeof(Go1Api)) return;
+    if (api->size < __builtin_offsetof(Go1Api, alloc_static)) return;
     u32 h = api->open_append(path);
     if (!h) return;
     for (u32 i = 0; i < line_count; i++) {

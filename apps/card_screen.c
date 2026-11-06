@@ -23,7 +23,7 @@ static void draw_bar(u16 *screen, u32 top, u16 color) {
 __attribute__((used, section(".entry")))
 u32 go1_main(const Go1Api *api, u32 message, u32 parameter) {
     (void)parameter;
-    if (api->version != GO1_API_VERSION || api->size < sizeof(Go1Api) || message == GO1_CLOSE) return 0;
+    if (api->version != GO1_API_VERSION || api->size < __builtin_offsetof(Go1Api, alloc_static) || message == GO1_CLOSE) return 0;
     u16 *screen = api->screen();
     if (message == GO1_OPEN) api->timer(500, 1);
     if (message == GO1_KEY_OK || message == GO1_KEY_SOFT_RIGHT) { api->exit(); return 1; }
