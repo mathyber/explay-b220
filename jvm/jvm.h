@@ -141,6 +141,7 @@ int jvm_png_decode(const uint8_t *data, uint32_t size, uint8_t *packed, uint8_t 
 
 /* Debugging: "Class.method" on top of the running thread (empty if none). */
 void jvm_debug_where(Jvm *vm, char *out, uint32_t capacity);
+void jvm_debug_threads(Jvm *vm, char *out, uint32_t capacity);
 uint32_t jvm_compactions(Jvm *vm);
 uint32_t jvm_pinned(Jvm *vm, uint32_t *bytes);  /* objects (and bytes) pinned at the last compaction */
 

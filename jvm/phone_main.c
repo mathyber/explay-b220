@@ -448,6 +448,20 @@ static void release_held(int all) {
     }
 }
 
+/* Keys pressed since the VM started. The release (and repeats) of a key pressed
+   before, such as OK that launched the game from the list, are not the MIDlet's:
+   a phone never sends keyReleased without keyPressed. Opera Mini feeds such
+   events into a buffer it shares with its worker thread without a common lock;
+   the stray release at startup raced the worker and killed it (index past the
+   end), leaving the loading screen forever. */
+static int down[HELD_KEYS];
+
+static int was_pressed(int code, int forget) {
+    for (u32 i = 0; i < HELD_KEYS; i++)
+        if (down[i] == code) { if (forget) down[i] = 0; return 1; }
+    return 0;
+}
+
 static void key(u32 message) {
     int code = midp_key(GO1_CODE(message)), type = 0;
     switch (GO1_KIND(message)) {
@@ -457,6 +471,10 @@ static void key(u32 message) {
     default: break;
     }
     if (!code || !type) return;
+    if (type == JVM_KEY_PRESSED) {
+        if (!was_pressed(code, 0))
+            for (u32 k = 0; k < HELD_KEYS; k++) if (!down[k]) { down[k] = code; break; }
+    } else if (!was_pressed(code, type == JVM_KEY_RELEASED)) return;
     u32 i = 0;
     while (i < HELD_KEYS && held[i].code != code) i++;
     if (type == JVM_KEY_PRESSED) {
@@ -608,7 +626,7 @@ static void start(const u16 *path) {
     u32 bytes = available-RESERVE;
     block = api->alloc(bytes);
     now_set = 0;  /* currentTimeMillis reads the RTC again for this VM */
-    for (u32 i = 0; i < HELD_KEYS; i++) held[i].code = 0;
+    for (u32 i = 0; i < HELD_KEYS; i++) held[i].code = down[i] = 0;
     vm = block ? jvm_create(&host, block, bytes, meta) : 0;
     if (!vm) { say("VM creation failed\n"); finished = 1; return; }
     if (!jvm_start_main(vm, name)) { say("VM: "); say(jvm_error(vm)); put('\n'); finished = 1; return; }
@@ -695,7 +713,9 @@ static void tick(void) {
 
 __attribute__((used, section(".entry")))
 u32 go1_main(const Go1Api *program_api, u32 message, u32 parameter) {
-    (void)parameter;
+    /* Emulator probes only (the loader never sends it): Java threads and JIT
+       totals as text into the 4 KB at parameter (jvm_debug_threads). */
+    if (message == 0xdeb6) { if (vm) jvm_debug_threads(vm, (char *)parameter, 4096); return 0; }
     api = program_api;
     if (api->version != GO1_API_VERSION) return 0;
     /* Older loaders lack file search and UCS-2 calls; text and exit always exist. */

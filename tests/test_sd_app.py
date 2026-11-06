@@ -2,6 +2,7 @@
 from pathlib import Path
 import fnmatch
 import struct
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -412,6 +413,58 @@ class NativeVmTests(unittest.TestCase):
         event(0xfc17)  # long right soft key: back to the list, GO1_CLOSE frees the VM
         event(0xf022)
         self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))
+
+    @unittest.skipUnless(JAVA_TOOLS,'Local JDK required')
+    def test_jit_output_matches_the_interpreter(self):
+        """Hot loops compiled to ARM (jvm/jit.c) print what the host interpreter prints,
+        exceptions thrown from compiled code included."""
+        from tools.build_java_phone import build_app,build_vm,zip_directory
+        from tools.build_jvm import LIBRARY,build_library,build_host
+        build_library();host=build_host();vm=build_vm()
+        for name in ('JitTest','JitTest2','JitTest3'):
+            with TemporaryDirectory() as folder:
+                library=Path(folder)/'JAVALIB.JAR'
+                zip_directory(LIBRARY,library)
+                app=build_app([ROOT/f'jvm/iotests/{name}.java'],name)
+                jar=Path(folder)/'APP.JAR';jar.write_bytes(app)
+                expected=subprocess.run([str(host),'-cp',str(LIBRARY),'-jar',str(jar)],capture_output=True,text=True,timeout=300).stdout
+                files={'E:\\APPS.LST':b'JAVA.GO1\r\n','E:\\JAVA.GO1':vm,'E:\\JAVALIB.JAR':library.read_bytes(),'E:\\APP.JAR':app}
+            event,calls=self.fixture(b'',files=files,budget=2000000000)
+            event(0xf021);event(0xfa1b)
+            for _ in range(400):
+                event(0xf020,param=0x40000100)
+                if '[finished]' in calls['texts']:break
+            self.assertIn('[finished]',calls['texts'],name)
+            # The console wraps lines at 28 characters.
+            for line in expected.splitlines():
+                for at in range(0,len(line),28):self.assertIn(line[at:at+28],calls['texts'],(name,line))
+
+    @unittest.skipUnless(JAVA_TOOLS,'Local JDK required')
+    def test_midlet_does_not_get_the_release_of_the_launching_key(self):
+        from tools.build_java_phone import build_app,build_vm,zip_directory
+        from tools.build_jvm import LIBRARY,build_library
+        build_library()
+        with TemporaryDirectory() as folder:
+            library=Path(folder)/'JAVALIB.JAR'
+            zip_directory(LIBRARY,library)
+            files={'E:\\APPS.LST':b'JAVA.GO1\r\n','E:\\JAVA.GO1':build_vm(),
+                   'E:\\JAVALIB.JAR':library.read_bytes(),
+                   'E:\\APP.JAR':build_app([ROOT/'jvm/iotests/KeyRelease.java'],'KeyRelease',True)}
+        event,calls=self.fixture(b'',files=files,budget=2000000000)
+        event(0xf021);event(0xfa1b)  # OK pressed in the loader: the MIDlet starts
+        for _ in range(120):
+            event(0xf020,param=0x40000100)
+            if calls['flushes']:break
+        self.assertTrue(calls['flushes'])
+        event(0xfb1b)  # its release: not the MIDlet's
+        for _ in range(20):event(0xf020,param=0x40000100)
+        console=lambda:''.join(dict.fromkeys(calls['texts']))  # wrapped lines, in order
+        self.assertNotIn('keyReleased',console())  # an uncaught Error would show its stack
+        event(0xfa04);event(0xfb04)  # right, pressed and released in the MIDlet
+        for _ in range(40):
+            event(0xf020,param=0x40000100)
+            if 'keyReleased' in console():break
+        self.assertIn('KeyRelease$1.keyReleased',console())
 
     def red_key_run(self,main):
         from tools.build_java_phone import build_app,build_vm,zip_directory

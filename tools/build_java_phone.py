@@ -29,7 +29,7 @@ FIRMWARE = ROOT/'analysis/firmware-patches/cut/b220-cut.bin'
 # The interpreter and the drawing code run in ARM state: in Thumb the interpreter
 # spilled pc/sp/locals to the stack on almost every bytecode (23 instructions for
 # simple bytecodes, 17 in ARM).
-ARM_FILES = ('interp.c', 'midp.c', 'jar.c', 'heap.c')  # drawing loops; inflate; heap.c: saves r4-r11 for compaction
+ARM_FILES = ('interp.c', 'midp.c', 'jar.c', 'heap.c', 'jit.c')  # drawing loops; inflate; heap.c: saves r4-r11 for compaction
 
 
 def build_vm():

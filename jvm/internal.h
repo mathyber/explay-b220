@@ -36,6 +36,13 @@ typedef struct Array {
 #define ARRAY_DATA(a) ((u8 *)(a)+sizeof(Array))
 #define FIELDS(o) ((u32 *)((u8 *)(o)+sizeof(Object)))
 
+/* jit.c: native code of a hot method; map gives the code word of each bytecode offset. */
+typedef struct JitCode { const u32 *code; const u16 *map; } JitCode;
+#define JIT_METHODS 64
+#define JIT_THRESHOLD 2000      /* backward jumps before a method is compiled */
+#define JIT_NEVER 0x7fffu
+#define JIT_COMPILED 0x8000u
+
 typedef struct Field {
     Class *owner;
     Utf8 name, desc;
@@ -56,6 +63,7 @@ struct Method {
     u16 handler_count, vtable_index;
     u8 return_slots;  /* 0, 1 or 2 */
     u8 return_ref;
+    u16 jit;  /* jit.c: backward jumps so far, JIT_NEVER, or JIT_COMPILED|index (in the padding before code_length) */
     u32 code_length;
     const u8 *code;
     const Handler *handlers;
@@ -182,6 +190,10 @@ struct Jvm {
     Thread *event_waiter;
     Class *image_class;
     u32 image_pixels, image_alpha, image_width, image_height, image_alpha_bits;
+    /* jit.c: compiled methods and their memory */
+    JitCode jit[JIT_METHODS];
+    u32 jit_count, jit_total;
+    u8 *jit_top, *jit_end;
     /* Frequently used classes and fields. */
     Class *object_class, *string_class, *class_class, *thread_class, *char_array;
     Class *primitive_arrays[12];
@@ -254,6 +266,10 @@ static inline u32 rd32(const u8 *p) { return (rd16(p)<<16)|rd16(p+2); }
 static inline Jvm *thread_vm(Thread *t);
 extern Jvm *jvm_current_vm;
 static inline Jvm *thread_vm(Thread *t) { (void)t; return jvm_current_vm; }
+
+/* jit.c */
+void jit_compile(Jvm *vm, Method *m);
+u32 jit_run(Jvm *vm, Method *m, u32 at, u32 **sp, u32 *locals, i32 *budget);
 
 void *jvm_memset(void *d, int c, u32 n);
 void *jvm_memcpy(void *d, const void *s, u32 n);

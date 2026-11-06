@@ -320,6 +320,10 @@ static Method *interface_target(Class *receiver, Method *m) {
 #define THROW(cls, msg) do { f->pc = start; f->sp = sp; throw_new(t, cls, msg); goto exception_exact; } while (0)
 #define NULL_CHECK(o) do { if (!(o)) THROW("java/lang/NullPointerException", 0); } while (0)
 #define CHECK_VM() do { if (vm->status == JVM_ERROR) { SAVE(); return 0; } } while (0)
+/* jit.c: compiled code from pc on, until it hands back to the interpreter. */
+#define JIT_GO() do { pc = m->code+jit_run(vm, m, (u32)(pc-m->code), &sp, locals, &budget); } while (0)
+/* After a jump: backward jumps make a method hot. */
+#define BACKEDGE() do { if (pc <= start) { u32 j_ = m->jit;         if (j_ < JIT_THRESHOLD) m->jit = (u16)(j_+1);         else { if (j_ == JIT_THRESHOLD) jit_compile(vm, m); if (m->jit & JIT_COMPILED) JIT_GO(); } } } while (0)
 
 static Array *check_array(Thread *t, u32 ref, i32 index, const char **error) {
     Array *a = (Array *)(uintptr_t)ref;
@@ -342,7 +346,8 @@ static Array *multi_array(Jvm *vm, Class *c, u32 *counts, u32 dims) {
     return a;
 }
 
-/* Returns the number of bytecodes run (all of budget unless the thread stopped). */
+/* Returns the number of bytecodes run (all of limit unless the thread stopped;
+   compiled code may run a few more). */
 #ifdef JVM_OP_STATS
 unsigned long long jvm_op_counts[256];  /* debug builds: bytecodes executed by opcode */
 #endif
@@ -366,8 +371,9 @@ enum {
 #define QUICK_OK(method) (!((method)->access & (ACC_SYNCHRONIZED|ACC_ABSTRACT)) && \
                           (!((method)->access & ACC_NATIVE) || (method)->native))
 
-u32 execute(Jvm *vm, Thread *t, u32 budget) {
-    const u32 initial = budget;
+u32 execute(Jvm *vm, Thread *t, u32 limit) {
+    i32 budget = (i32)limit;  /* compiled code may leave it below zero */
+    const i32 initial = budget;
     Frame *f; Method *m; const u8 *pc, *start; u32 *sp, *locals; Constant *cp;
     /* Handler of every opcode (L_default for unused ones): threaded dispatch. */
     static const void *const dispatch[256] = {
@@ -439,7 +445,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
     if (!t->depth) { t->state = THREAD_DEAD; return initial-budget; }
     RELOAD();
     if (t->exception) goto exception_caller;
-    while (budget--) {
+    while (budget-- > 0) {
         start = pc;
         u8 op = *pc++;
 #ifdef JVM_OP_STATS
@@ -603,16 +609,18 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             i32 v = (i32)POP();
             int jump = op == 0x99 ? v == 0 : op == 0x9a ? v != 0 : op == 0x9b ? v < 0 : op == 0x9c ? v >= 0 : op == 0x9d ? v > 0 : v <= 0;
             pc = jump ? start+(int16_t)rd16(pc) : pc+2;
+            BACKEDGE();
             break;
         }
         case 0x9f: L_9f: case 0xa0: L_a0: case 0xa1: L_a1: case 0xa2: L_a2: case 0xa3: L_a3: case 0xa4: L_a4: {
             i32 b = (i32)POP(), a = (i32)POP();
             int jump = op == 0x9f ? a == b : op == 0xa0 ? a != b : op == 0xa1 ? a < b : op == 0xa2 ? a >= b : op == 0xa3 ? a > b : a <= b;
             pc = jump ? start+(int16_t)rd16(pc) : pc+2;
+            BACKEDGE();
             break;
         }
-        case 0xa5: L_a5: case 0xa6: L_a6: { u32 b = POP(), a = POP(); pc = (op == 0xa5) == (a == b) ? start+(int16_t)rd16(pc) : pc+2; break; }
-        case 0xa7: L_a7: pc = start+(int16_t)rd16(pc); break;
+        case 0xa5: L_a5: case 0xa6: L_a6: { u32 b = POP(), a = POP(); pc = (op == 0xa5) == (a == b) ? start+(int16_t)rd16(pc) : pc+2; BACKEDGE(); break; }
+        case 0xa7: L_a7: pc = start+(int16_t)rd16(pc); BACKEDGE(); break;
         case 0xa8: L_a8: PUSH((u32)(pc+2-m->code)); pc = start+(int16_t)rd16(pc); break;
         case 0xa9: L_a9: pc = m->code+locals[*pc]; break;
         case 0xaa: L_aa: {
@@ -649,6 +657,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             if (!t->depth) { t->state = THREAD_DEAD; return initial-budget; }
             RELOAD();
             sp = target+slots;
+            if (m->jit & JIT_COMPILED) JIT_GO();  /* back into the caller's compiled loop */
             break;
         }
         case 0xb2: L_b2: case 0xb3: L_b3: case 0xb4: L_b4: case 0xb5: L_b5: {
@@ -959,8 +968,8 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             PUSH((uintptr_t)a);
             break;
         }
-        case 0xc6: L_c6: case 0xc7: L_c7: { u32 v = POP(); pc = (op == 0xc6) == !v ? start+(int16_t)rd16(pc) : pc+2; break; }
-        case 0xc8: L_c8: pc = start+(i32)rd32(pc); break;
+        case 0xc6: L_c6: case 0xc7: L_c7: { u32 v = POP(); pc = (op == 0xc6) == !v ? start+(int16_t)rd16(pc) : pc+2; BACKEDGE(); break; }
+        case 0xc8: L_c8: pc = start+(i32)rd32(pc); BACKEDGE(); break;
         case 0xc9: L_c9: PUSH((u32)(pc+4-m->code)); pc = start+(i32)rd32(pc); break;
         default: L_default:
             SAVE();
@@ -969,7 +978,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
         }
         /* Threaded dispatch: straight to the next handler (no bounds check, no
            jump back to the loop head); the loop head only starts the slice. */
-        if (!budget--) break;
+        if (budget-- <= 0) break;
         start = pc;
         op = *pc++;
 #ifdef JVM_OP_STATS
@@ -990,7 +999,7 @@ exception_caller:
         RELOAD();
     }
     SAVE();
-    return initial;
+    return (u32)(initial-budget);
 }
 
 /* ---------- scheduler ---------- */
@@ -1096,5 +1105,45 @@ void jvm_debug_where(Jvm *vm, char *out, uint32_t capacity) {
     for (uint32_t i = 0; i < b && n+1 < capacity; i++) out[n++] = (char)m->name[2+i];
     uint32_t c = utf8_length(m->desc);
     for (uint32_t i = 0; i < c && n+1 < capacity; i++) out[n++] = (char)m->desc[2+i];
+    /* the bytecode length, for the profile */
+    char digits[12]; uint32_t d = 0, len = m->code_length;
+    do { digits[d++] = (char)('0'+len%10); len /= 10; } while (len);
+    if (n+2+d < capacity) { out[n++] = ' '; out[n++] = '#'; while (d) out[n++] = digits[--d]; }
+    out[n] = 0;
+}
+
+/* Debugging (emulator probes): a line per thread with its state, waiting object
+   and frames as "Class.method@offset", innermost first. */
+void jvm_debug_threads(Jvm *vm, char *out, uint32_t capacity) {
+    uint32_t n = 0;
+#define OUT(c) do { if (n+1 < capacity) out[n++] = (char)(c); } while (0)
+    /* first line: compiled methods and their bytes */
+    uint32_t values[2] = {vm->jit_count, vm->jit_total};
+    for (int k = 0; k < 2; k++) {
+        char digits[12]; uint32_t d = 0, v = values[k];
+        do { digits[d++] = (char)('0'+v%10); v /= 10; } while (v);
+        OUT('j'); while (d) OUT(digits[--d]); OUT(' ');
+    }
+    OUT('\n');
+    for (Thread *t = vm->threads; t; t = t->next) {
+        OUT('0'+t->state); OUT(t == vm->current ? '*' : ' ');
+        uint32_t w = (uint32_t)(uintptr_t)t->waiting_on;
+        for (int s = 28; s >= 0; s -= 4) OUT("0123456789abcdef"[(w >> s) & 15]);
+        for (uint32_t d = t->depth; d-- > 0 && n+80 < capacity;) {
+            Frame *f = &t->frames[d];
+            Method *m = f->method;
+            OUT(' ');
+            for (uint32_t i = 0; i < utf8_length(m->owner->name) && i < 24; i++) OUT(m->owner->name[2+i]);
+            OUT('.');
+            for (uint32_t i = 0; i < utf8_length(m->name) && i < 16; i++) OUT(m->name[2+i]);
+            OUT('@');
+            char digits[12]; uint32_t k = 0, v = (uint32_t)(f->pc-m->code);
+            do { digits[k++] = (char)('0'+v%10); v /= 10; } while (v);
+            while (k) OUT(digits[--k]);
+            if (m->jit & JIT_COMPILED) OUT('J');
+        }
+        OUT('\n');
+    }
+#undef OUT
     out[n] = 0;
 }

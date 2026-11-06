@@ -17,7 +17,7 @@ SOURCES = ROOT/'jvm'
 JDK = ROOT/'analysis/toolchains/jdk-25.0.5+8/bin'
 LIBRARY = DIRECTORY/'lib'
 HOST = DIRECTORY/'go1jvm.exe'
-VM_FILES = ('class.c', 'heap.c', 'interp.c', 'native.c', 'jar.c', 'midp.c', 'io.c')
+VM_FILES = ('class.c', 'heap.c', 'interp.c', 'native.c', 'jar.c', 'midp.c', 'io.c', 'jit.c')
 
 
 def run(command, **options):
