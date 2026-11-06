@@ -36,6 +36,15 @@ static u32 bits(Bits *s, u32 need) {
     return value;
 }
 
+/* Bytes into the bit buffer up to 25+ bits, while input lasts (no error at the end). */
+static void fill(Bits *s) {
+    while (s->count <= 24) {
+        if (s->in >= s->end && !refill(s)) return;
+        s->buffer |= (u32)*s->in++ << s->count;
+        s->count += 8;
+    }
+}
+
 static int build(Huffman *h, const u8 *lengths, u32 n) {
     u16 offsets[16];
     for (u32 i = 0; i < 16; i++) h->counts[i] = 0;
@@ -49,10 +58,34 @@ static int build(Huffman *h, const u8 *lengths, u32 n) {
     offsets[1] = 0;
     for (u32 len = 1; len < 15; len++) offsets[len+1] = (u16)(offsets[len]+h->counts[len]);
     for (u32 i = 0; i < n; i++) if (lengths[i]) h->symbols[offsets[lengths[i]]++] = (u16)i;
+    /* Lookup table for short codes: canonical code of each symbol, bit-reversed
+       because the stream delivers codes most significant bit first. */
+    for (u32 i = 0; i < (1u << JAR_FAST_BITS); i++) h->fast[i] = 0;
+    u32 next[16], code = 0;
+    next[0] = 0;
+    for (u32 len = 1; len < 16; len++) { code = (code+(len > 1 ? h->counts[len-1] : 0)) << 1; next[len] = code; }
+    for (u32 i = 0; i < n; i++) {
+        u32 len = lengths[i];
+        if (!len) continue;
+        u32 c = next[len]++;
+        if (len > JAR_FAST_BITS) continue;
+        u32 reversed = 0;
+        for (u32 b = 0; b < len; b++) reversed |= ((c >> b) & 1) << (len-1-b);
+        for (u32 f = reversed; f < (1u << JAR_FAST_BITS); f += 1u << len) h->fast[f] = (u16)(len << 9 | i);
+    }
     return 1;
 }
 
 static int decode(Bits *s, const Huffman *h) {
+    if (s->count < JAR_FAST_BITS) fill(s);
+    if (s->count >= JAR_FAST_BITS) {
+        u32 e = h->fast[s->buffer & ((1u << JAR_FAST_BITS)-1)];
+        if (e) {
+            s->buffer >>= e >> 9;
+            s->count -= e >> 9;
+            return (int)(e & 511);
+        }
+    }
     int code = 0, first = 0, index = 0;
     for (u32 len = 1; len < 16; len++) {
         code |= (int)bits(s, 1);
@@ -124,7 +157,7 @@ static int dynamic_tables(Bits *s, Huffman *literals, Huffman *distances) {
     if (s->error || nlen > 286 || ndist > 30) return 0;
     u8 lengths[320];
     for (u32 i = 0; i < 19; i++) lengths[order[i]] = i < ncode ? (u8)bits(s, 3) : 0;
-    Huffman lencode;
+    static Huffman lencode;  /* static: the tables are large for the MMI task's stack */
     if (s->error || !build(&lencode, lengths, 19)) return 0;
     for (u32 i = 0; i < nlen+ndist;) {
         int symbol = decode(s, &lencode);
@@ -144,10 +177,11 @@ static int dynamic_tables(Bits *s, Huffman *literals, Huffman *distances) {
     return build(literals, lengths, nlen) && build(distances, lengths+nlen, ndist);
 }
 
-/* Stored block header after the 3 block bits: skip to a byte, LEN and NLEN. */
+/* Stored block header after the 3 block bits: skip to a byte, LEN and NLEN.
+   Whole bytes read ahead by decode() stay in the buffer. */
 static int stored_length(Bits *s, u32 *length) {
-    s->buffer = 0;
-    s->count = 0;
+    s->buffer >>= s->count & 7;
+    s->count -= s->count & 7;
     *length = bits(s, 16);
     u32 check = bits(s, 16);
     return !s->error && (*length ^ 0xffff) == check;
@@ -168,7 +202,7 @@ static int inflate(Bits *s) {
             fixed_tables();
             if (!codes(s, &fixed_literals, &fixed_distances)) return 0;
         } else if (type == 2) {
-            Huffman literals, distances;
+            static Huffman literals, distances;  /* static: see dynamic_tables */
             if (!dynamic_tables(s, &literals, &distances) || !codes(s, &literals, &distances)) return 0;
         } else return 0;
     } while (!last);

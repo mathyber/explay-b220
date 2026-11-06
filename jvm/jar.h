@@ -36,8 +36,11 @@ typedef struct JarBits {
     uint32_t chunk_size;
 } JarBits;
 
-/* Canonical Huffman code: count of codes per length and symbols in code order. */
-typedef struct JarHuffman { uint16_t counts[16]; uint16_t symbols[288]; } JarHuffman;
+/* Canonical Huffman code: count of codes per length and symbols in code order.
+   fast: codes of up to JAR_FAST_BITS bits by their next input bits (LSB first),
+   (length << 9) | symbol, 0 for longer codes. */
+#define JAR_FAST_BITS 8
+typedef struct JarHuffman { uint16_t counts[16]; uint16_t symbols[288]; uint16_t fast[1 << JAR_FAST_BITS]; } JarHuffman;
 
 /* An entry decompressed on demand: about 34 KB, most of it the window. It
    holds pointers into itself, so it must not move while in use. */

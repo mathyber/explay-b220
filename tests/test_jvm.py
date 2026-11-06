@@ -99,6 +99,38 @@ class JvmTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(run.stdout.encode()).hexdigest(),
                          '7fb9384590991f4942efc4a716afd5e78dd01b74f8338624c20439d4e90759c1')
 
+    def test_inflate_matches_python_for_every_block_kind(self):
+        """Stored (level 0), fixed and dynamic Huffman blocks, sizes 0..200 KB, read in odd chunks."""
+        import random, zipfile
+        out = Path(self.folder.name)/'inflatetest'
+        javac([ROOT/'jvm/iotests/InflateTest.java'], out)
+        rnd = random.Random(5)
+        words = [b'class', b'java/lang/', b'\x00\x01', b'Image', b'\xff\xfe\xfd', b'  ', b'png', b'opera']
+        entries = []
+        for i in range(120):
+            kind, size = i % 4, rnd.choice([0, 1, 7, 100, 1000, 5000, 40000, 200000])
+            if kind == 0: data = bytes(rnd.randrange(256) for _ in range(size))
+            elif kind == 1: data = b''.join(rnd.choice(words) for _ in range(size//4+1))[:size]
+            elif kind == 2: data = bytes([rnd.randrange(4)])*size
+            else: data = bytes((j*7+(j >> 5)) & 255 for j in range(size))
+            entries.append(data)
+        jar = Path(self.folder.name)/'inflate.jar'
+        with zipfile.ZipFile(jar, 'w') as z:
+            z.writestr('META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\nMain-Class: InflateTest\n')
+            z.write(out/'InflateTest.class', 'InflateTest.class')
+            for i, data in enumerate(entries):
+                z.writestr(zipfile.ZipInfo(f'e{i}'), data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=i % 10)
+        run = subprocess.run([str(HOST), '-heap', '2000', '-cp', str(LIBRARY), '-jar', str(jar)],
+                             capture_output=True, text=True, timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        lines = run.stdout.splitlines()
+        self.assertEqual(len(lines), len(entries))
+        for i, data in enumerate(entries):
+            checksum = 0
+            for b in data: checksum = (checksum*31+b) & 0xffffffff
+            if checksum >= 1 << 31: checksum -= 1 << 32
+            self.assertEqual(lines[i], f'{i} {len(data)} {checksum}')
+
     def make_jar(self, classes, path):
         """Classes deflated, small resources stored and deflated, a large one deflated (dynamic codes)."""
         import random, struct, zipfile
