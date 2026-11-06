@@ -472,6 +472,7 @@ static void drain(Marker *m) {
 /* Instruction length; 0 for jsr/ret (analysis gives up) and unknown opcodes. */
 static u32 instruction_length(const u8 *code, u32 pc, u32 size) {
     u8 op = code[pc];
+    if (op >= 0xd0 && op <= 0xdb) return 3;  /* quick forms of field and call instructions (interp.c) */
     if (op == 0xaa || op == 0xab) {
         u32 p = (pc+4) & ~3u;
         if (p+12 > size) return 0;

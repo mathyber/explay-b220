@@ -339,6 +339,22 @@ static Array *multi_array(Jvm *vm, Class *c, u32 *counts, u32 dims) {
 unsigned long long jvm_op_counts[256];  /* debug builds: bytecodes executed by opcode */
 #endif
 
+/* Quick forms (the KVM's "quickening"): after its first run an instruction is
+   rewritten in place so it skips resolution and checks.
+   - fields: the operand becomes the field's byte offset (instances) or stays
+     the constant index whose field is resolved and whose class is initialized
+     (statics);
+   - calls: the constant is resolved; static calls only once the class is
+     initialized and the method is plain (not native, not synchronized);
+     a virtual call whose actual target is not plain becomes INVOKEVIRTUAL_SLOW
+     for good (the general path, never quickened again). */
+enum {
+    GETFIELD_Q = 0xd0, GETFIELD_Q_WIDE, PUTFIELD_Q, PUTFIELD_Q_WIDE,
+    GETSTATIC_Q, GETSTATIC_Q_WIDE, PUTSTATIC_Q, PUTSTATIC_Q_WIDE,
+    INVOKEVIRTUAL_Q, INVOKESTATIC_Q, INVOKESPECIAL_Q, INVOKEVIRTUAL_SLOW
+};
+#define PLAIN(method) (!((method)->access & (ACC_NATIVE|ACC_SYNCHRONIZED|ACC_ABSTRACT)))
+
 u32 execute(Jvm *vm, Thread *t, u32 budget) {
     const u32 initial = budget;
     Frame *f; Method *m; const u8 *pc, *start; u32 *sp, *locals; Constant *cp;
@@ -564,10 +580,18 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             Field *fd = resolve_field(vm, m->owner, index);
             CHECK_VM();
             int wide = fd->desc[2] == 'J' || fd->desc[2] == 'D';
+            if (op >= 0xb4 && fd->offset < 65536) {
+                u8 *code = (u8 *)start;
+                code[0] = (u8)(op == 0xb4 ? (wide ? GETFIELD_Q_WIDE : GETFIELD_Q) : (wide ? PUTFIELD_Q_WIDE : PUTFIELD_Q));
+                code[1] = (u8)(fd->offset >> 8);
+                code[2] = (u8)fd->offset;
+            }
             if (op <= 0xb3) {
                 int ready = ensure_initialized(t, fd->owner, sp);
                 if (ready < 0) goto exception_exact_saved;
                 if (!ready) { f->pc = start; RELOAD(); break; }
+                if (fd->owner->state == CLASS_INITIALIZED)
+                    *(u8 *)start = (u8)(op == 0xb2 ? (wide ? GETSTATIC_Q_WIDE : GETSTATIC_Q) : (wide ? PUTSTATIC_Q_WIDE : PUTSTATIC_Q));
                 u32 *slot = &fd->owner->statics[fd->offset];
                 if (op == 0xb2) { if (wide) { PUSH(slot[0]); PUSH(slot[1]); } else PUSH(slot[0]); }
                 else if (wide) { slot[1] = POP(); slot[0] = POP(); } else slot[0] = POP();
@@ -586,17 +610,24 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             }
             break;
         }
-        case 0xb6: case 0xb7: case 0xb8: case 0xb9: {
+        case 0xb6: case 0xb7: case 0xb8: case 0xb9: case INVOKEVIRTUAL_SLOW: {
+            int slow = op == INVOKEVIRTUAL_SLOW;
+            if (slow) op = 0xb6;
             u16 index = (u16)rd16(pc);
             pc += op == 0xb9 ? 4 : 2;
             SAVE();
             Method *target = resolve_method(vm, m->owner, index);
             CHECK_VM();
             u32 *args = sp-target->arg_slots;
+            if (op == 0xb6 && !slow && !(target->owner->access & ACC_INTERFACE) && !(target->access & ACC_PRIVATE))
+                *(u8 *)start = INVOKEVIRTUAL_Q;
+            else if (op == 0xb7 && PLAIN(target) && !(target->owner->access & ACC_INTERFACE))
+                *(u8 *)start = INVOKESPECIAL_Q;
             if (op == 0xb8) {
                 int ready = ensure_initialized(t, target->owner, sp);
                 if (ready < 0) goto exception_exact_saved;
                 if (!ready) { f->pc = start; RELOAD(); break; }
+                if (target->owner->state == CLASS_INITIALIZED && PLAIN(target)) *(u8 *)start = INVOKESTATIC_Q;
             } else {
                 Object *receiver = REF(args[0]);
                 NULL_CHECK(receiver);
@@ -650,6 +681,74 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
                 break;
             }
             if (target->access & ACC_ABSTRACT) THROW("java/lang/AbstractMethodError", 0);
+            f->pc = pc; f->sp = args;
+            if (!push_frame(t, target, args)) goto exception_caller;
+            RELOAD();
+            break;
+        }
+        case GETFIELD_Q: {
+            u32 offset = rd16(pc);
+            pc += 2;
+            Object *o = REF(sp[-1]);
+            NULL_CHECK(o);
+            sp[-1] = *(u32 *)((u8 *)o+offset);
+            break;
+        }
+        case GETFIELD_Q_WIDE: {
+            u32 offset = rd16(pc);
+            pc += 2;
+            Object *o = REF(POP());
+            NULL_CHECK(o);
+            u32 *slot = (u32 *)((u8 *)o+offset);
+            PUSH(slot[0]); PUSH(slot[1]);
+            break;
+        }
+        case PUTFIELD_Q: {
+            u32 offset = rd16(pc);
+            pc += 2;
+            u32 value = POP();
+            Object *o = REF(POP());
+            NULL_CHECK(o);
+            *(u32 *)((u8 *)o+offset) = value;
+            break;
+        }
+        case PUTFIELD_Q_WIDE: {
+            u32 offset = rd16(pc);
+            pc += 2;
+            u32 lo = POP(), hi = POP();
+            Object *o = REF(POP());
+            NULL_CHECK(o);
+            u32 *slot = (u32 *)((u8 *)o+offset);
+            slot[0] = hi; slot[1] = lo;
+            break;
+        }
+        case GETSTATIC_Q: case GETSTATIC_Q_WIDE: case PUTSTATIC_Q: case PUTSTATIC_Q_WIDE: {
+            Field *fd = cp[rd16(pc)].u.field;
+            pc += 2;
+            u32 *slot = &fd->owner->statics[fd->offset];
+            if (op == GETSTATIC_Q) PUSH(slot[0]);
+            else if (op == GETSTATIC_Q_WIDE) { PUSH(slot[0]); PUSH(slot[1]); }
+            else if (op == PUTSTATIC_Q) slot[0] = POP();
+            else { slot[1] = POP(); slot[0] = POP(); }
+            break;
+        }
+        case INVOKEVIRTUAL_Q: case INVOKESPECIAL_Q: case INVOKESTATIC_Q: {
+            Method *target = cp[rd16(pc)].u.method;
+            u32 *args = sp-target->arg_slots;
+            if (op != INVOKESTATIC_Q) {
+                Object *receiver = REF(args[0]);
+                NULL_CHECK(receiver);
+                if (op == INVOKEVIRTUAL_Q) {
+                    target = receiver->cls->vtable[target->vtable_index];
+                    if (!target || !PLAIN(target)) {
+                        /* A native, synchronized or abstract override: the general path, for good. */
+                        *(u8 *)start = INVOKEVIRTUAL_SLOW;
+                        pc = start;
+                        break;
+                    }
+                }
+            }
+            pc += 2;
             f->pc = pc; f->sp = args;
             if (!push_frame(t, target, args)) goto exception_caller;
             RELOAD();
