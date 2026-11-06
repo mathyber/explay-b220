@@ -6,6 +6,7 @@ public final class Events {
     public static final int KEY_RELEASED = 2;
     public static final int KEY_REPEATED = 3;
     public static final int REPAINT = 4;
+    public static final int EXIT = 5;  /* the platform ends the MIDlet (red key) */
 
     private Events() {}
 

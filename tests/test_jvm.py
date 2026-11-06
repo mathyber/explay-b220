@@ -194,7 +194,10 @@ class JvmTests(unittest.TestCase):
         self.assertEqual(pressed.getpixel((5, 5)), (0, 128, 0))
         exited, _ = self.run_midlet([(700, -7)], 3000)
         self.assertEqual(exited.returncode, 0, exited.stderr)
-        self.assertIn('destroyApp', exited.stdout)
+        # MIDP: after notifyDestroyed the MIDlet has cleaned up itself; destroyApp is
+        # called only when the platform ends it (red key).
+        self.assertIn('startApp', exited.stdout)
+        self.assertNotIn('destroyApp', exited.stdout)
 
     def test_record_stores_players_and_nokia_graphics(self):
         classes = Path(self.folder.name)/'platform-classes'

@@ -73,7 +73,8 @@ typedef struct JvmIo {
 #define JVM_SCREEN_HEIGHT 220
 
 /* Events for MIDP, delivered in order to the Java event thread. */
-enum { JVM_KEY_PRESSED = 1, JVM_KEY_RELEASED = 2, JVM_KEY_REPEATED = 3, JVM_REPAINT = 4 };
+/* JVM_EXIT: the platform ends the MIDlet (red key): destroyApp(true), then the VM stops. */
+enum { JVM_KEY_PRESSED = 1, JVM_KEY_RELEASED = 2, JVM_KEY_REPEATED = 3, JVM_REPAINT = 4, JVM_EXIT = 5 };
 /* MIDP key codes (as on Nokia/Sony Ericsson phones). */
 enum {
     JVM_KEY_UP = -1, JVM_KEY_DOWN = -2, JVM_KEY_LEFT = -3, JVM_KEY_RIGHT = -4, JVM_KEY_FIRE = -5,
@@ -133,5 +134,8 @@ uint32_t jvm_manifest_value(const uint8_t *manifest, uint32_t size, const char *
 typedef struct JvmPngInfo { uint32_t width, height, packed_size, raw_size; int has_alpha; } JvmPngInfo;
 int jvm_png_info(const uint8_t *data, uint32_t size, JvmPngInfo *info);
 int jvm_png_decode(const uint8_t *data, uint32_t size, uint8_t *packed, uint8_t *raw, uint16_t *pixels, uint8_t *alpha);
+
+/* Debugging: "Class.method" on top of the running thread (empty if none). */
+void jvm_debug_where(Jvm *vm, char *out, uint32_t capacity);
 
 #endif

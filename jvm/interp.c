@@ -334,9 +334,11 @@ static Array *multi_array(Jvm *vm, Class *c, u32 *counts, u32 dims) {
     return a;
 }
 
-int execute(Jvm *vm, Thread *t, u32 budget) {
+/* Returns the number of bytecodes run (all of budget unless the thread stopped). */
+u32 execute(Jvm *vm, Thread *t, u32 budget) {
+    const u32 initial = budget;
     Frame *f; Method *m; const u8 *pc, *start; u32 *sp, *locals; Constant *cp;
-    if (!t->depth) { t->state = THREAD_DEAD; return 0; }
+    if (!t->depth) { t->state = THREAD_DEAD; return initial-budget; }
     RELOAD();
     if (t->exception) goto exception_caller;
     while (budget--) {
@@ -543,7 +545,7 @@ int execute(Jvm *vm, Thread *t, u32 budget) {
             u32 *target = f->locals;
             for (u32 i = 0; i < slots; i++) target[i] = result[i];
             t->depth--;
-            if (!t->depth) { t->state = THREAD_DEAD; return 0; }
+            if (!t->depth) { t->state = THREAD_DEAD; return initial-budget; }
             RELOAD();
             sp = target+slots;
             break;
@@ -598,7 +600,7 @@ int execute(Jvm *vm, Thread *t, u32 budget) {
             if (target->access & ACC_SYNCHRONIZED) {
                 Object *lock = target->access & ACC_STATIC ? class_mirror(vm, target->owner) : REF(args[0]);
                 CHECK_VM();
-                if (!monitor_enter(t, lock)) { f->pc = start; return 0; }
+                if (!monitor_enter(t, lock)) { f->pc = start; return initial-budget; }
                 if (target->access & ACC_NATIVE) { /* natives are short; release right after */ }
                 else {
                     f->pc = pc; f->sp = args;
@@ -637,7 +639,7 @@ int execute(Jvm *vm, Thread *t, u32 budget) {
                 sp = args;
                 for (u32 i = 0; i < target->return_slots; i++) PUSH(result[i]);
                 f->pc = pc; f->sp = sp;
-                if (t->state != THREAD_RUNNABLE) return 0;
+                if (t->state != THREAD_RUNNABLE) return initial-budget;
                 break;
             }
             if (target->access & ACC_ABSTRACT) THROW("java/lang/AbstractMethodError", 0);
@@ -646,7 +648,7 @@ int execute(Jvm *vm, Thread *t, u32 budget) {
             RELOAD();
             break;
         }
-        case 0xba: SAVE(); vm_fail(vm, "invokedynamic is not supported", 0); return 0;
+        case 0xba: SAVE(); vm_fail(vm, "invokedynamic is not supported", 0); return initial-budget;
         case 0xbb: {
             u16 index = (u16)rd16(pc);
             pc += 2;
@@ -718,7 +720,7 @@ int execute(Jvm *vm, Thread *t, u32 budget) {
             Object *o = REF(POP());
             NULL_CHECK(o);
             if (op == 0xc2) {
-                if (!monitor_enter(t, o)) { sp++; f->pc = start; f->sp = sp; return 0; }
+                if (!monitor_enter(t, o)) { sp++; f->pc = start; f->sp = sp; return initial-budget; }
             } else if (!monitor_exit(t, o)) goto exception_exact_unsaved;
             break;
         }
@@ -733,7 +735,7 @@ int execute(Jvm *vm, Thread *t, u32 budget) {
             case 0x37: case 0x39: locals[index+1] = POP(); locals[index] = POP(); break;
             case 0x84: locals[index] += (u32)(i32)(int16_t)rd16(pc); pc += 2; break;
             case 0xa9: pc = m->code+locals[index]; break;
-            default: SAVE(); vm_fail(vm, "bad wide instruction", 0); return 0;
+            default: SAVE(); vm_fail(vm, "bad wide instruction", 0); return initial-budget;
             }
             break;
         }
@@ -745,7 +747,7 @@ int execute(Jvm *vm, Thread *t, u32 budget) {
             Class *c = resolve_class(vm, m->owner, index);
             CHECK_VM();
             u32 counts[8];
-            if (dims > 8) { vm_fail(vm, "too many array dimensions", 0); return 0; }
+            if (dims > 8) { vm_fail(vm, "too many array dimensions", 0); return initial-budget; }
             for (u32 i = dims; i--;) {
                 i32 n = (i32)POP();
                 if (n < 0) THROW("java/lang/NegativeArraySizeException", 0);
@@ -764,24 +766,24 @@ int execute(Jvm *vm, Thread *t, u32 budget) {
         default:
             SAVE();
             vm_fail(vm, "unknown bytecode", 0);
-            return 0;
+            return initial-budget;
         }
         continue;
 exception_exact_unsaved:
         f->pc = start; f->sp = sp;
 exception_exact:
 exception_exact_saved:
-        if (vm->status == JVM_ERROR) return 0;
-        if (!handle_exception(t, 1)) return 0;
+        if (vm->status == JVM_ERROR) return initial-budget;
+        if (!handle_exception(t, 1)) return initial-budget;
         RELOAD();
         continue;
 exception_caller:
-        if (vm->status == JVM_ERROR) return 0;
-        if (!handle_exception(t, 0)) return 0;
+        if (vm->status == JVM_ERROR) return initial-budget;
+        if (!handle_exception(t, 0)) return initial-budget;
         RELOAD();
     }
     SAVE();
-    return 1;
+    return initial;
 }
 
 /* ---------- scheduler ---------- */
@@ -815,10 +817,19 @@ static void wake_threads(Jvm *vm) {
 int jvm_run(Jvm *vm, u32 budget) {
     jvm_current_vm = vm;
     if (vm->status == JVM_ERROR) return JVM_ERROR;
+    if (vm->halted) return JVM_DONE;
     while (budget) {
         wake_threads(vm);
         int any = 0;
-        for (Thread *t = vm->threads; t && budget; t = t->next) {
+        /* Start one thread further each pass: with slices close to the budget
+           the first threads in the list would otherwise get every tick. */
+        u32 count = 0;
+        for (Thread *t = vm->threads; t; t = t->next) count++;
+        Thread *first = vm->threads;
+        for (u32 skip = count ? vm->turn++ % count : 0; skip; skip--) first = first->next;
+        for (u32 k = 0; k < count && budget; k++) {
+            Thread *t = first;
+            for (u32 step = 0; step < k; step++) t = t->next ? t->next : vm->threads;
             if (t->state != THREAD_RUNNABLE) continue;
             any = 1;
             /* Bytecodes before switching threads. Phone JVMs switch on a timer
@@ -828,9 +839,12 @@ int jvm_run(Jvm *vm, u32 budget) {
                startup with 4000). A thread that sleeps or waits yields at once. */
             u32 slice = budget < THREAD_SLICE ? budget : THREAD_SLICE;
             vm->current = t;
-            execute(vm, t, slice);
-            budget -= slice;
+            /* Charge what ran: a thread that soon sleeps or waits leaves the
+               rest of the budget to the others. */
+            u32 used = execute(vm, t, slice);
+            budget -= used ? used : 1;
             if (vm->status == JVM_ERROR) return JVM_ERROR;
+            if (vm->halted) return JVM_DONE;
         }
         if (!any) {
             for (Thread *t = vm->threads; t; t = t->next)
@@ -846,4 +860,19 @@ uint32_t jvm_next_wake(Jvm *vm) {
     for (Thread *t = vm->threads; t; t = t->next)
         if ((t->state == THREAD_SLEEPING || (t->state == THREAD_WAITING && t->wake)) && t->wake < best) best = t->wake;
     return best;
+}
+
+/* Debugging (host profiler): "Class.method" on top of the current thread. */
+void jvm_debug_where(Jvm *vm, char *out, uint32_t capacity) {
+    Thread *t = vm->current;
+    out[0] = 0;
+    if (!t || !t->depth || capacity < 4) return;
+    Method *m = t->frames[t->depth-1].method;
+    uint32_t n = 0, a = utf8_length(m->owner->name), b = utf8_length(m->name);
+    for (uint32_t i = 0; i < a && n+2 < capacity; i++) out[n++] = (char)m->owner->name[2+i];
+    out[n++] = '.';
+    for (uint32_t i = 0; i < b && n+1 < capacity; i++) out[n++] = (char)m->name[2+i];
+    uint32_t c = utf8_length(m->desc);
+    for (uint32_t i = 0; i < c && n+1 < capacity; i++) out[n++] = (char)m->desc[2+i];
+    out[n] = 0;
 }

@@ -36,6 +36,9 @@ static void *block;
 static Jar library, application;
 static u32 library_file, application_file;
 static int finished, midp, choosing, from_list;
+/* The red key asked the MIDlet to end (destroyApp); past this ms it is closed anyway. */
+#define EXIT_GRACE_MS 3000
+static u32 exit_deadline;
 static char console[LINES][COLUMNS+1];
 static u32 row, column;
 static int dirty;
@@ -519,6 +522,7 @@ static void launch(u32 index) {
 
 /* Program over: back to the list it came from, or to SD Apps. */
 static void done(void) {
+    exit_deadline = 0;
     shutdown();
     if (!from_list) { api->exit(); return; }
     clear_screen();
@@ -555,6 +559,7 @@ static void choose(u32 message) {
 
 static void tick(void) {
     if (!vm || finished) return;
+    if (exit_deadline && (int32_t)(api->ms()-exit_deadline) >= 0) { done(); return; }
     int status = jvm_run(vm, SLICE);
     /* An uncaught exception or VM error brings the console back over the MIDlet. */
     if (midp && (status == JVM_ERROR || jvm_uncaught(vm))) { midp = 0; dirty = 1; }
@@ -581,8 +586,19 @@ u32 go1_main(const Go1Api *program_api, u32 message, u32 parameter) {
     if (message == GO1_CLOSE) { shutdown(); free_infos(); return 1; }
     if (message == GO1_OPEN) { open_list(); return 1; }
     if (choosing) {
+        if (message == GO1_KEY_END) { api->exit(); return 1; }
         if (GO1_IS_KEY(message)) choose(message);
         else if (message == GO1_PAINT) draw_list();
+        return 1;
+    }
+    /* Red key, as on phones of the time: a MIDlet gets destroyApp(true) and has
+       EXIT_GRACE_MS to finish; a second press, or a console program, ends at once. */
+    if (message == GO1_KEY_END) {
+        if (vm && midp && !finished && !exit_deadline) {
+            jvm_post_event(vm, JVM_EXIT, 0);
+            exit_deadline = api->ms()+EXIT_GRACE_MS;
+            if (!exit_deadline) exit_deadline = 1;
+        } else done();
         return 1;
     }
     if (message == GO1_TIMER) tick();

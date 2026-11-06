@@ -157,6 +157,8 @@ struct Jvm {
     u32 used, gc_count, uncaught, peak_live;
     Class *classes;
     Thread *threads, *current;
+    u32 turn;  /* round-robin start: which thread jvm_run begins with */
+    u8 halted; /* go1.Launcher.halt(): the MIDlet is finished, other threads or not */
     Monitor monitors[MAX_MONITORS];
     Object *temp_roots[MAX_TEMP_ROOTS];
     u32 temp_count;
@@ -211,7 +213,7 @@ void push_root(Jvm *vm, Object *o);
 void pop_roots(Jvm *vm, u32 count);
 
 /* interp.c */
-int execute(Jvm *vm, Thread *t, u32 budget);
+u32 execute(Jvm *vm, Thread *t, u32 budget);
 void throw_new(Thread *t, const char *class_name, const char *message);
 void throw_object(Thread *t, Object *exception);
 int invoke_method(Thread *t, Method *m, u32 *args);

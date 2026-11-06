@@ -10,6 +10,7 @@ public final class Launcher {
     private static final Hashtable properties = new Hashtable();
     private static MIDlet midlet;
     static boolean exiting;
+    private static boolean byPlatform;
 
     private Launcher() {}
 
@@ -17,10 +18,20 @@ public final class Launcher {
         return (String) properties.get(key);
     }
 
+    /* notifyDestroyed: the MIDlet has already cleaned up, destroyApp is not called. */
     public static void exit() {
         exiting = true;
         Events.post(Events.REPAINT, 0);
     }
+
+    /* The red key: the platform ends the MIDlet, which gets destroyApp(true) first. */
+    public static void platformExit() {
+        byPlatform = true;
+        exiting = true;
+    }
+
+    /* Ends the VM even if MIDlet threads are still running. */
+    private static native void halt();
 
     private static void readManifest() throws Exception {
         InputStream in = Launcher.class.getResourceAsStream("/META-INF/MANIFEST.MF");
@@ -66,7 +77,11 @@ public final class Launcher {
         Display display = Display.getDisplay(midlet);
         midlet.go1Start();
         display.run();
-        midlet.go1Destroy();
+        try {
+            if (byPlatform) midlet.go1Destroy();
+        } finally {
+            halt();
+        }
     }
 
     public static boolean isExiting() {

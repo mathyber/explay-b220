@@ -47,6 +47,14 @@ static int events_post(Thread *t, u32 *args, u32 *result) {
     return 0;
 }
 
+/* go1.Launcher.halt(): the MIDlet is destroyed; the VM ends even if MIDlet
+   threads are still alive, as the phone's application manager would end it. */
+static int launcher_halt(Thread *t, u32 *args, u32 *result) {
+    (void)args; (void)result;
+    thread_vm(t)->halted = 1;
+    return 0;
+}
+
 /* ---------- surfaces ---------- */
 
 typedef struct Surface { u16 *pixels; u8 *alpha; i32 width, height; } Surface;
@@ -573,6 +581,7 @@ static int draw_decode_png(Thread *t, u32 *args, u32 *result) {
 typedef struct Entry { const char *cls, *name, *desc; Native fn; } Entry;
 
 static const Entry entries[] = {
+    {"go1/Launcher", "halt", "()V", launcher_halt},
     {"go1/Events", "poll", "([I)Z", events_poll},
     {"go1/Events", "post", "(II)V", events_post},
     {"go1/Draw", "fillRect", "(Ljava/lang/Object;IIIIIIIII)V", draw_fill_rect},

@@ -142,7 +142,9 @@ public class Display {
         int[] event = new int[2];
         while (!Launcher.isExiting()) {
             if (Events.poll(event)) {
-                if (event[0] == Events.REPAINT) {
+                if (event[0] == Events.EXIT) {
+                    Launcher.platformExit();
+                } else if (event[0] == Events.REPAINT) {
                     synchronized (this) {
                         wakePosted = false;
                     }

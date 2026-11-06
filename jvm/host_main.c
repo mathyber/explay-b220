@@ -117,8 +117,36 @@ static int by_bytes(const void *a, const void *b) {
     return x < y ? 1 : x > y ? -1 : 0;
 }
 
+/* GO1JVM_PROFILE: sample the running method after every short slice. */
+static Usage samples[512];
+static uint32_t sample_count, sample_total;
+static void profile_sample(Jvm *vm) {
+    char where[64];
+    jvm_debug_where(vm, where, sizeof(where));
+    if (!where[0]) return;
+    sample_total++;
+    uint32_t i = 0;
+    while (i < sample_count && strcmp(samples[i].name, where)) i++;
+    if (i == sample_count) {
+        if (sample_count == sizeof(samples)/sizeof(samples[0])) return;
+        strcpy(samples[i].name, where);
+        sample_count++;
+    }
+    samples[i].count++;
+}
+static int by_count(const void *a, const void *b) {
+    uint32_t x = ((const Usage *)a)->count, y = ((const Usage *)b)->count;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
 /* GO1JVM_STATS: totals; GO1JVM_HEAP: live objects by class after a collection. */
 static void stats(Jvm *vm) {
+    if (sample_total) {
+        qsort(samples, sample_count, sizeof(samples[0]), by_count);
+        fprintf(stderr, "profile: %u samples\n", sample_total);
+        for (uint32_t i = 0; i < sample_count && i < 20; i++)
+            fprintf(stderr, "%5.1f%% %s\n", 100.0*samples[i].count/sample_total, samples[i].name);
+    }
     if (getenv("GO1JVM_STATS")) {
         uint32_t parts[JVM_META_PARTS];
         jvm_meta_parts(vm, parts);
@@ -248,7 +276,7 @@ int main(int argc, char **argv) {
     if (!vm) { fprintf(stderr, "VM creation failed\n"); return 70; }
     if (!jvm_start_main(vm, main_class)) { fprintf(stderr, "VM error: %s\n", jvm_error(vm)); return 70; }
     uint32_t start = host_ms(0);
-    int next_key = 0;
+    int next_key = 0, profile = getenv("GO1JVM_PROFILE") != 0;
     for (;;) {
         uint32_t elapsed = host_ms(0)-start;
         while (next_key < key_count && keys[next_key].at <= elapsed) {
@@ -256,7 +284,8 @@ int main(int argc, char **argv) {
             next_key++;
         }
         if (run_ms && elapsed >= run_ms) break;
-        int status = jvm_run(vm, 200000);
+        int status = jvm_run(vm, profile ? 5000 : 200000);
+        if (profile) profile_sample(vm);
         if (status == JVM_ERROR) { fprintf(stderr, "VM error: %s\n", jvm_error(vm)); stats(vm); return 70; }
         if (status == JVM_DONE) break;
         if (status == JVM_IDLE) {

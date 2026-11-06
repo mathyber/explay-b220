@@ -54,7 +54,7 @@ enum {
     GO1_UP = 0x01, GO1_DOWN = 0x02, GO1_LEFT = 0x03, GO1_RIGHT = 0x04,
     GO1_1 = 0x08, GO1_2, GO1_3, GO1_4, GO1_5, GO1_6, GO1_7, GO1_8, GO1_9,
     GO1_STAR = 0x11, GO1_0 = 0x12, GO1_HASH = 0x13,
-    GO1_SOFT_LEFT = 0x16, GO1_SOFT_RIGHT = 0x17, GO1_OK = 0x1b
+    GO1_SOFT_LEFT = 0x16, GO1_SOFT_RIGHT = 0x17, GO1_END = 0x18 /* red key */, GO1_OK = 0x1b
 };
 /* Presses of common keys. */
 #define GO1_KEY_UP (GO1_PRESS | GO1_UP)
@@ -64,6 +64,7 @@ enum {
 #define GO1_KEY_OK (GO1_PRESS | GO1_OK)
 #define GO1_KEY_SOFT_LEFT (GO1_PRESS | GO1_SOFT_LEFT)
 #define GO1_KEY_SOFT_RIGHT (GO1_PRESS | GO1_SOFT_RIGHT)
+#define GO1_KEY_END (GO1_PRESS | GO1_END)
 
 #define GO1_ATTR_DIRECTORY 0x10
 #define GO1_NAME_MAX 255

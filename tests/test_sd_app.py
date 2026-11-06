@@ -412,6 +412,45 @@ class NativeVmTests(unittest.TestCase):
         event(0xf022)
         self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))
 
+    def red_key_run(self,main):
+        from tools.build_java_phone import build_app,build_vm,zip_directory
+        from tools.build_jvm import LIBRARY,build_library
+        build_library()
+        with TemporaryDirectory() as folder:
+            library=Path(folder)/'JAVALIB.JAR'
+            zip_directory(LIBRARY,library)
+            files={'E:\\APPS.LST':b'JAVA.GO1\r\n','E:\\JAVA.GO1':build_vm(),
+                   'E:\\JAVALIB.JAR':library.read_bytes(),
+                   'E:\\APP.JAR':build_app([ROOT/'jvm/iotests/RedKey.java',ROOT/'jvm/iotests/RedKeyStuck.java'],main,True)}
+        event,calls=self.fixture(b'',files=files,budget=2000000000)
+        event(0xf021);event(0xfa1b)
+        for _ in range(120):
+            event(0xf020,param=0x40000100)
+            if calls['flushes']:break
+        self.assertTrue(calls['flushes'])
+        event(0xfa18);event(0xfb18)  # red key
+        return event,calls
+
+    def test_red_key_calls_destroy_app_and_ends_the_midlet(self):
+        event,calls=self.red_key_run('RedKey')
+        for _ in range(20):
+            state=event(0xf020,param=0x40000100)
+            if state['mode']==0:break
+        # destroyApp(true) ran, then the VM ended although a MIDlet thread still lives.
+        self.assertIn((r'E:\DESTROY.TXT',b'bye'),calls.get('writes',[]))
+        self.assertEqual(state['mode'],0)
+        event(0xf022)
+        self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))
+
+    def test_red_key_closes_a_midlet_whose_destroy_app_hangs(self):
+        event,calls=self.red_key_run('RedKeyStuck')
+        modes=[event(0xf020,param=0x40000100)['mode'] for _ in range(200)]  # 20 ms per tick
+        self.assertIn((r'E:\DESTROY.TXT',b'bye'),calls.get('writes',[]))
+        self.assertEqual(modes[:100].count(0),0)  # 2 s: still waiting for destroyApp
+        self.assertEqual(modes[-1],0)              # closed after the 3 s grace time
+        event(0xf022)
+        self.assertEqual(sorted(calls['freed']),sorted(calls['allocated']))
+
     def test_icon_is_listed_and_program_with_icon_runs(self):
         from tools.build_native_app import icon_bytes
         icon=ROOT/'jvm/phone_main.png'
