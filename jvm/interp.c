@@ -369,6 +369,73 @@ enum {
 u32 execute(Jvm *vm, Thread *t, u32 budget) {
     const u32 initial = budget;
     Frame *f; Method *m; const u8 *pc, *start; u32 *sp, *locals; Constant *cp;
+    /* Handler of every opcode (L_default for unused ones): threaded dispatch. */
+    static const void *const dispatch[256] = {
+        &&L_00, &&L_01, &&L_02, &&L_03,
+        &&L_04, &&L_05, &&L_06, &&L_07,
+        &&L_08, &&L_09, &&L_0a, &&L_0b,
+        &&L_0c, &&L_0d, &&L_0e, &&L_0f,
+        &&L_10, &&L_11, &&L_12, &&L_13,
+        &&L_14, &&L_15, &&L_16, &&L_17,
+        &&L_18, &&L_19, &&L_1a, &&L_1b,
+        &&L_1c, &&L_1d, &&L_1e, &&L_1f,
+        &&L_20, &&L_21, &&L_22, &&L_23,
+        &&L_24, &&L_25, &&L_26, &&L_27,
+        &&L_28, &&L_29, &&L_2a, &&L_2b,
+        &&L_2c, &&L_2d, &&L_2e, &&L_2f,
+        &&L_30, &&L_31, &&L_32, &&L_33,
+        &&L_34, &&L_35, &&L_36, &&L_37,
+        &&L_38, &&L_39, &&L_3a, &&L_3b,
+        &&L_3c, &&L_3d, &&L_3e, &&L_3f,
+        &&L_40, &&L_41, &&L_42, &&L_43,
+        &&L_44, &&L_45, &&L_46, &&L_47,
+        &&L_48, &&L_49, &&L_4a, &&L_4b,
+        &&L_4c, &&L_4d, &&L_4e, &&L_4f,
+        &&L_50, &&L_51, &&L_52, &&L_53,
+        &&L_54, &&L_55, &&L_56, &&L_57,
+        &&L_58, &&L_59, &&L_5a, &&L_5b,
+        &&L_5c, &&L_5d, &&L_5e, &&L_5f,
+        &&L_60, &&L_61, &&L_62, &&L_63,
+        &&L_64, &&L_65, &&L_66, &&L_67,
+        &&L_68, &&L_69, &&L_6a, &&L_6b,
+        &&L_6c, &&L_6d, &&L_6e, &&L_6f,
+        &&L_70, &&L_71, &&L_72, &&L_73,
+        &&L_74, &&L_75, &&L_76, &&L_77,
+        &&L_78, &&L_79, &&L_7a, &&L_7b,
+        &&L_7c, &&L_7d, &&L_7e, &&L_7f,
+        &&L_80, &&L_81, &&L_82, &&L_83,
+        &&L_84, &&L_85, &&L_86, &&L_87,
+        &&L_88, &&L_89, &&L_8a, &&L_8b,
+        &&L_8c, &&L_8d, &&L_8e, &&L_8f,
+        &&L_90, &&L_91, &&L_92, &&L_93,
+        &&L_94, &&L_95, &&L_96, &&L_97,
+        &&L_98, &&L_99, &&L_9a, &&L_9b,
+        &&L_9c, &&L_9d, &&L_9e, &&L_9f,
+        &&L_a0, &&L_a1, &&L_a2, &&L_a3,
+        &&L_a4, &&L_a5, &&L_a6, &&L_a7,
+        &&L_a8, &&L_a9, &&L_aa, &&L_ab,
+        &&L_ac, &&L_ad, &&L_ae, &&L_af,
+        &&L_b0, &&L_b1, &&L_b2, &&L_b3,
+        &&L_b4, &&L_b5, &&L_b6, &&L_b7,
+        &&L_b8, &&L_b9, &&L_ba, &&L_bb,
+        &&L_bc, &&L_bd, &&L_be, &&L_bf,
+        &&L_c0, &&L_c1, &&L_c2, &&L_c3,
+        &&L_c4, &&L_c5, &&L_c6, &&L_c7,
+        &&L_c8, &&L_c9, &&L_default, &&L_default,
+        &&L_default, &&L_default, &&L_default, &&L_default,
+        &&L_d0, &&L_d1, &&L_d2, &&L_d3,
+        &&L_d4, &&L_d5, &&L_d6, &&L_d7,
+        &&L_d8, &&L_d9, &&L_da, &&L_db,
+        &&L_default, &&L_default, &&L_default, &&L_default,
+        &&L_default, &&L_default, &&L_default, &&L_default,
+        &&L_default, &&L_default, &&L_default, &&L_default,
+        &&L_default, &&L_default, &&L_default, &&L_default,
+        &&L_default, &&L_default, &&L_default, &&L_default,
+        &&L_default, &&L_default, &&L_default, &&L_default,
+        &&L_default, &&L_default, &&L_default, &&L_default,
+        &&L_default, &&L_default, &&L_default, &&L_default,
+        &&L_default, &&L_default, &&L_default, &&L_default,
+    };
     if (!t->depth) { t->state = THREAD_DEAD; return initial-budget; }
     RELOAD();
     if (t->exception) goto exception_caller;
@@ -379,15 +446,15 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
         jvm_op_counts[op]++;
 #endif
         switch (op) {
-        case 0x00: break;
-        case 0x01: PUSH(0); break;
-        case 0x02: case 0x03: case 0x04: case 0x05: case 0x06: case 0x07: case 0x08: PUSH((i32)op-3); break;
-        case 0x09: case 0x0a: PUSHW((i64)(op-9)); break;
-        case 0x0b: case 0x0c: case 0x0d: PUSH(from_float((float)(op-0x0b))); break;
-        case 0x0e: case 0x0f: PUSHW(from_double((double)(op-0x0e))); break;
-        case 0x10: PUSH((i32)(int8_t)*pc++); break;
-        case 0x11: PUSH((i32)(int16_t)rd16(pc)); pc += 2; break;
-        case 0x12: case 0x13: {
+        case 0x00: L_00: break;
+        case 0x01: L_01: PUSH(0); break;
+        case 0x02: L_02: case 0x03: L_03: case 0x04: L_04: case 0x05: L_05: case 0x06: L_06: case 0x07: L_07: case 0x08: L_08: PUSH((i32)op-3); break;
+        case 0x09: L_09: case 0x0a: L_0a: PUSHW((i64)(op-9)); break;
+        case 0x0b: L_0b: case 0x0c: L_0c: case 0x0d: L_0d: PUSH(from_float((float)(op-0x0b))); break;
+        case 0x0e: L_0e: case 0x0f: L_0f: PUSHW(from_double((double)(op-0x0e))); break;
+        case 0x10: L_10: PUSH((i32)(int8_t)*pc++); break;
+        case 0x11: L_11: PUSH((i32)(int16_t)rd16(pc)); pc += 2; break;
+        case 0x12: L_12: case 0x13: L_13: {
             u16 index = op == 0x12 ? *pc : (u16)rd16(pc);
             pc += op == 0x12 ? 1 : 2;
             Constant *k = &cp[index];
@@ -406,15 +473,15 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             } else PUSH(k->u.value);
             break;
         }
-        case 0x14: { Constant *k = &cp[rd16(pc)]; pc += 2; PUSHW(((u64)k->u.value << 32) | k[1].u.value); break; }
-        case 0x15: case 0x17: case 0x19: PUSH(locals[*pc++]); break;
-        case 0x16: case 0x18: PUSH(locals[*pc]); PUSH(locals[*pc+1]); pc++; break;
-        case 0x1a: case 0x1b: case 0x1c: case 0x1d: PUSH(locals[op-0x1a]); break;
-        case 0x1e: case 0x1f: case 0x20: case 0x21: PUSH(locals[op-0x1e]); PUSH(locals[op - 0x1e + 1]); break;
-        case 0x22: case 0x23: case 0x24: case 0x25: PUSH(locals[op-0x22]); break;
-        case 0x26: case 0x27: case 0x28: case 0x29: PUSH(locals[op-0x26]); PUSH(locals[op-0x26+1]); break;
-        case 0x2a: case 0x2b: case 0x2c: case 0x2d: PUSH(locals[op-0x2a]); break;
-        case 0x2e: case 0x2f: case 0x30: case 0x31: case 0x32: case 0x33: case 0x34: case 0x35: {
+        case 0x14: L_14: { Constant *k = &cp[rd16(pc)]; pc += 2; PUSHW(((u64)k->u.value << 32) | k[1].u.value); break; }
+        case 0x15: L_15: case 0x17: L_17: case 0x19: L_19: PUSH(locals[*pc++]); break;
+        case 0x16: L_16: case 0x18: L_18: PUSH(locals[*pc]); PUSH(locals[*pc+1]); pc++; break;
+        case 0x1a: L_1a: case 0x1b: L_1b: case 0x1c: L_1c: case 0x1d: L_1d: PUSH(locals[op-0x1a]); break;
+        case 0x1e: L_1e: case 0x1f: L_1f: case 0x20: L_20: case 0x21: L_21: PUSH(locals[op-0x1e]); PUSH(locals[op - 0x1e + 1]); break;
+        case 0x22: L_22: case 0x23: L_23: case 0x24: L_24: case 0x25: L_25: PUSH(locals[op-0x22]); break;
+        case 0x26: L_26: case 0x27: L_27: case 0x28: L_28: case 0x29: L_29: PUSH(locals[op-0x26]); PUSH(locals[op-0x26+1]); break;
+        case 0x2a: L_2a: case 0x2b: L_2b: case 0x2c: L_2c: case 0x2d: L_2d: PUSH(locals[op-0x2a]); break;
+        case 0x2e: L_2e: case 0x2f: L_2f: case 0x30: L_30: case 0x31: L_31: case 0x32: L_32: case 0x33: L_33: case 0x34: L_34: case 0x35: L_35: {
             i32 index = (i32)POP();
             const char *error = 0;
             Array *a = check_array(t, POP(), index, &error);
@@ -429,14 +496,14 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             }
             break;
         }
-        case 0x36: case 0x38: case 0x3a: locals[*pc++] = POP(); break;
-        case 0x37: case 0x39: locals[*pc+1] = POP(); locals[*pc] = POP(); pc++; break;
-        case 0x3b: case 0x3c: case 0x3d: case 0x3e: locals[op-0x3b] = POP(); break;
-        case 0x3f: case 0x40: case 0x41: case 0x42: locals[op-0x3f+1] = POP(); locals[op-0x3f] = POP(); break;
-        case 0x43: case 0x44: case 0x45: case 0x46: locals[op-0x43] = POP(); break;
-        case 0x47: case 0x48: case 0x49: case 0x4a: locals[op-0x47+1] = POP(); locals[op-0x47] = POP(); break;
-        case 0x4b: case 0x4c: case 0x4d: case 0x4e: locals[op-0x4b] = POP(); break;
-        case 0x4f: case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: {
+        case 0x36: L_36: case 0x38: L_38: case 0x3a: L_3a: locals[*pc++] = POP(); break;
+        case 0x37: L_37: case 0x39: L_39: locals[*pc+1] = POP(); locals[*pc] = POP(); pc++; break;
+        case 0x3b: L_3b: case 0x3c: L_3c: case 0x3d: L_3d: case 0x3e: L_3e: locals[op-0x3b] = POP(); break;
+        case 0x3f: L_3f: case 0x40: L_40: case 0x41: L_41: case 0x42: L_42: locals[op-0x3f+1] = POP(); locals[op-0x3f] = POP(); break;
+        case 0x43: L_43: case 0x44: L_44: case 0x45: L_45: case 0x46: L_46: locals[op-0x43] = POP(); break;
+        case 0x47: L_47: case 0x48: L_48: case 0x49: L_49: case 0x4a: L_4a: locals[op-0x47+1] = POP(); locals[op-0x47] = POP(); break;
+        case 0x4b: L_4b: case 0x4c: L_4c: case 0x4d: L_4d: case 0x4e: L_4e: locals[op-0x4b] = POP(); break;
+        case 0x4f: L_4f: case 0x50: L_50: case 0x51: L_51: case 0x52: L_52: case 0x53: L_53: case 0x54: L_54: case 0x55: L_55: case 0x56: L_56: {
             u64 wide = 0; u32 value = 0;
             if (op == 0x50 || op == 0x52) wide = POPW(); else value = POP();
             i32 index = (i32)POP();
@@ -457,104 +524,104 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             }
             break;
         }
-        case 0x57: sp--; break;
-        case 0x58: sp -= 2; break;
-        case 0x59: sp[0] = sp[-1]; sp++; break;
-        case 0x5a: { u32 a = sp[-1], b = sp[-2]; sp[-2] = a; sp[-1] = b; sp[0] = a; sp++; break; }
-        case 0x5b: { u32 a = sp[-1], b = sp[-2], c = sp[-3]; sp[-3] = a; sp[-2] = c; sp[-1] = b; sp[0] = a; sp++; break; }
-        case 0x5c: sp[0] = sp[-2]; sp[1] = sp[-1]; sp += 2; break;
-        case 0x5d: { u32 a = sp[-1], b = sp[-2], c = sp[-3]; sp[-3] = b; sp[-2] = a; sp[-1] = c; sp[0] = b; sp[1] = a; sp += 2; break; }
-        case 0x5e: { u32 a = sp[-1], b = sp[-2], c = sp[-3], d = sp[-4];
+        case 0x57: L_57: sp--; break;
+        case 0x58: L_58: sp -= 2; break;
+        case 0x59: L_59: sp[0] = sp[-1]; sp++; break;
+        case 0x5a: L_5a: { u32 a = sp[-1], b = sp[-2]; sp[-2] = a; sp[-1] = b; sp[0] = a; sp++; break; }
+        case 0x5b: L_5b: { u32 a = sp[-1], b = sp[-2], c = sp[-3]; sp[-3] = a; sp[-2] = c; sp[-1] = b; sp[0] = a; sp++; break; }
+        case 0x5c: L_5c: sp[0] = sp[-2]; sp[1] = sp[-1]; sp += 2; break;
+        case 0x5d: L_5d: { u32 a = sp[-1], b = sp[-2], c = sp[-3]; sp[-3] = b; sp[-2] = a; sp[-1] = c; sp[0] = b; sp[1] = a; sp += 2; break; }
+        case 0x5e: L_5e: { u32 a = sp[-1], b = sp[-2], c = sp[-3], d = sp[-4];
                      sp[-4] = b; sp[-3] = a; sp[-2] = d; sp[-1] = c; sp[0] = b; sp[1] = a; sp += 2; break; }
-        case 0x5f: { u32 a = sp[-1]; sp[-1] = sp[-2]; sp[-2] = a; break; }
-        case 0x60: { i32 b = (i32)POP(), a = (i32)POP(); PUSH((u32)a+(u32)b); break; }
-        case 0x61: { u64 b = POPW(), a = POPW(); PUSHW(a+b); break; }
-        case 0x62: { float b = as_float(POP()), a = as_float(POP()); PUSH(from_float(a+b)); break; }
-        case 0x63: { double b = as_double(POPW()), a = as_double(POPW()); PUSHW(from_double(a+b)); break; }
-        case 0x64: { u32 b = POP(), a = POP(); PUSH(a-b); break; }
-        case 0x65: { u64 b = POPW(), a = POPW(); PUSHW(a-b); break; }
-        case 0x66: { float b = as_float(POP()), a = as_float(POP()); PUSH(from_float(a-b)); break; }
-        case 0x67: { double b = as_double(POPW()), a = as_double(POPW()); PUSHW(from_double(a-b)); break; }
-        case 0x68: { u32 b = POP(), a = POP(); PUSH(a*b); break; }
-        case 0x69: { u64 b = POPW(), a = POPW(); PUSHW(a*b); break; }
-        case 0x6a: { float b = as_float(POP()), a = as_float(POP()); PUSH(from_float(a*b)); break; }
-        case 0x6b: { double b = as_double(POPW()), a = as_double(POPW()); PUSHW(from_double(a*b)); break; }
-        case 0x6c: case 0x70: {
+        case 0x5f: L_5f: { u32 a = sp[-1]; sp[-1] = sp[-2]; sp[-2] = a; break; }
+        case 0x60: L_60: { i32 b = (i32)POP(), a = (i32)POP(); PUSH((u32)a+(u32)b); break; }
+        case 0x61: L_61: { u64 b = POPW(), a = POPW(); PUSHW(a+b); break; }
+        case 0x62: L_62: { float b = as_float(POP()), a = as_float(POP()); PUSH(from_float(a+b)); break; }
+        case 0x63: L_63: { double b = as_double(POPW()), a = as_double(POPW()); PUSHW(from_double(a+b)); break; }
+        case 0x64: L_64: { u32 b = POP(), a = POP(); PUSH(a-b); break; }
+        case 0x65: L_65: { u64 b = POPW(), a = POPW(); PUSHW(a-b); break; }
+        case 0x66: L_66: { float b = as_float(POP()), a = as_float(POP()); PUSH(from_float(a-b)); break; }
+        case 0x67: L_67: { double b = as_double(POPW()), a = as_double(POPW()); PUSHW(from_double(a-b)); break; }
+        case 0x68: L_68: { u32 b = POP(), a = POP(); PUSH(a*b); break; }
+        case 0x69: L_69: { u64 b = POPW(), a = POPW(); PUSHW(a*b); break; }
+        case 0x6a: L_6a: { float b = as_float(POP()), a = as_float(POP()); PUSH(from_float(a*b)); break; }
+        case 0x6b: L_6b: { double b = as_double(POPW()), a = as_double(POPW()); PUSHW(from_double(a*b)); break; }
+        case 0x6c: L_6c: case 0x70: L_70: {
             i32 b = (i32)POP(), a = (i32)POP();
             if (!b) THROW("java/lang/ArithmeticException", "/ by zero");
             if (b == -1) PUSH(op == 0x6c ? (u32)0-(u32)a : 0);
             else PUSH(op == 0x6c ? a/b : a%b);
             break;
         }
-        case 0x6d: case 0x71: {
+        case 0x6d: L_6d: case 0x71: L_71: {
             i64 b = (i64)POPW(), a = (i64)POPW();
             if (!b) THROW("java/lang/ArithmeticException", "/ by zero");
             if (b == -1) PUSHW(op == 0x6d ? (u64)0-(u64)a : 0);
             else PUSHW(op == 0x6d ? a/b : a%b);
             break;
         }
-        case 0x6e: { float b = as_float(POP()), a = as_float(POP()); PUSH(from_float(a/b)); break; }
-        case 0x6f: { double b = as_double(POPW()), a = as_double(POPW()); PUSHW(from_double(a/b)); break; }
-        case 0x72: { float b = as_float(POP()), a = as_float(POP()); PUSH(from_float((float)jvm_fmod(a, b))); break; }
-        case 0x73: { double b = as_double(POPW()), a = as_double(POPW()); PUSHW(from_double(jvm_fmod(a, b))); break; }
-        case 0x74: PUSH((u32)0-POP()); break;
-        case 0x75: PUSHW((u64)0-POPW()); break;
-        case 0x76: PUSH(POP() ^ 0x80000000u); break;
-        case 0x77: { u64 v = POPW(); PUSHW(v ^ 0x8000000000000000ull); break; }
-        case 0x78: { u32 s = POP() & 31, a = POP(); PUSH(a << s); break; }
-        case 0x79: { u32 s = POP() & 63; u64 a = POPW(); PUSHW(a << s); break; }
-        case 0x7a: { u32 s = POP() & 31; i32 a = (i32)POP(); PUSH(a >> s); break; }
-        case 0x7b: { u32 s = POP() & 63; i64 a = (i64)POPW(); PUSHW(a >> s); break; }
-        case 0x7c: { u32 s = POP() & 31, a = POP(); PUSH(a >> s); break; }
-        case 0x7d: { u32 s = POP() & 63; u64 a = POPW(); PUSHW(a >> s); break; }
-        case 0x7e: { u32 b = POP(), a = POP(); PUSH(a & b); break; }
-        case 0x7f: { u64 b = POPW(), a = POPW(); PUSHW(a & b); break; }
-        case 0x80: { u32 b = POP(), a = POP(); PUSH(a | b); break; }
-        case 0x81: { u64 b = POPW(), a = POPW(); PUSHW(a | b); break; }
-        case 0x82: { u32 b = POP(), a = POP(); PUSH(a ^ b); break; }
-        case 0x83: { u64 b = POPW(), a = POPW(); PUSHW(a ^ b); break; }
-        case 0x84: locals[pc[0]] += (u32)(i32)(int8_t)pc[1]; pc += 2; break;
-        case 0x85: PUSHW((u64)(i64)(i32)POP()); break;
-        case 0x86: PUSH(from_float((float)(i32)POP())); break;
-        case 0x87: PUSHW(from_double((double)(i32)POP())); break;
-        case 0x88: { u64 v = POPW(); PUSH((u32)v); break; }
-        case 0x89: PUSH(from_float((float)(i64)POPW())); break;
-        case 0x8a: PUSHW(from_double((double)(i64)POPW())); break;
-        case 0x8b: PUSH(f2i(as_float(POP()))); break;
-        case 0x8c: PUSHW(f2l(as_float(POP()))); break;
-        case 0x8d: PUSHW(from_double(as_float(POP()))); break;
-        case 0x8e: PUSH(f2i(as_double(POPW()))); break;
-        case 0x8f: PUSHW(f2l(as_double(POPW()))); break;
-        case 0x90: PUSH(from_float((float)as_double(POPW()))); break;
-        case 0x91: PUSH((i32)(int8_t)POP()); break;
-        case 0x92: PUSH((u16)POP()); break;
-        case 0x93: PUSH((i32)(int16_t)POP()); break;
-        case 0x94: { i64 b = (i64)POPW(), a = (i64)POPW(); PUSH((u32)(a < b ? -1 : a > b)); break; }
-        case 0x95: case 0x96: { float b = as_float(POP()), a = as_float(POP()); PUSH(compare(a, b, op == 0x95 ? -1 : 1)); break; }
-        case 0x97: case 0x98: { double b = as_double(POPW()), a = as_double(POPW()); PUSH(compare(a, b, op == 0x97 ? -1 : 1)); break; }
-        case 0x99: case 0x9a: case 0x9b: case 0x9c: case 0x9d: case 0x9e: {
+        case 0x6e: L_6e: { float b = as_float(POP()), a = as_float(POP()); PUSH(from_float(a/b)); break; }
+        case 0x6f: L_6f: { double b = as_double(POPW()), a = as_double(POPW()); PUSHW(from_double(a/b)); break; }
+        case 0x72: L_72: { float b = as_float(POP()), a = as_float(POP()); PUSH(from_float((float)jvm_fmod(a, b))); break; }
+        case 0x73: L_73: { double b = as_double(POPW()), a = as_double(POPW()); PUSHW(from_double(jvm_fmod(a, b))); break; }
+        case 0x74: L_74: PUSH((u32)0-POP()); break;
+        case 0x75: L_75: PUSHW((u64)0-POPW()); break;
+        case 0x76: L_76: PUSH(POP() ^ 0x80000000u); break;
+        case 0x77: L_77: { u64 v = POPW(); PUSHW(v ^ 0x8000000000000000ull); break; }
+        case 0x78: L_78: { u32 s = POP() & 31, a = POP(); PUSH(a << s); break; }
+        case 0x79: L_79: { u32 s = POP() & 63; u64 a = POPW(); PUSHW(a << s); break; }
+        case 0x7a: L_7a: { u32 s = POP() & 31; i32 a = (i32)POP(); PUSH(a >> s); break; }
+        case 0x7b: L_7b: { u32 s = POP() & 63; i64 a = (i64)POPW(); PUSHW(a >> s); break; }
+        case 0x7c: L_7c: { u32 s = POP() & 31, a = POP(); PUSH(a >> s); break; }
+        case 0x7d: L_7d: { u32 s = POP() & 63; u64 a = POPW(); PUSHW(a >> s); break; }
+        case 0x7e: L_7e: { u32 b = POP(), a = POP(); PUSH(a & b); break; }
+        case 0x7f: L_7f: { u64 b = POPW(), a = POPW(); PUSHW(a & b); break; }
+        case 0x80: L_80: { u32 b = POP(), a = POP(); PUSH(a | b); break; }
+        case 0x81: L_81: { u64 b = POPW(), a = POPW(); PUSHW(a | b); break; }
+        case 0x82: L_82: { u32 b = POP(), a = POP(); PUSH(a ^ b); break; }
+        case 0x83: L_83: { u64 b = POPW(), a = POPW(); PUSHW(a ^ b); break; }
+        case 0x84: L_84: locals[pc[0]] += (u32)(i32)(int8_t)pc[1]; pc += 2; break;
+        case 0x85: L_85: PUSHW((u64)(i64)(i32)POP()); break;
+        case 0x86: L_86: PUSH(from_float((float)(i32)POP())); break;
+        case 0x87: L_87: PUSHW(from_double((double)(i32)POP())); break;
+        case 0x88: L_88: { u64 v = POPW(); PUSH((u32)v); break; }
+        case 0x89: L_89: PUSH(from_float((float)(i64)POPW())); break;
+        case 0x8a: L_8a: PUSHW(from_double((double)(i64)POPW())); break;
+        case 0x8b: L_8b: PUSH(f2i(as_float(POP()))); break;
+        case 0x8c: L_8c: PUSHW(f2l(as_float(POP()))); break;
+        case 0x8d: L_8d: PUSHW(from_double(as_float(POP()))); break;
+        case 0x8e: L_8e: PUSH(f2i(as_double(POPW()))); break;
+        case 0x8f: L_8f: PUSHW(f2l(as_double(POPW()))); break;
+        case 0x90: L_90: PUSH(from_float((float)as_double(POPW()))); break;
+        case 0x91: L_91: PUSH((i32)(int8_t)POP()); break;
+        case 0x92: L_92: PUSH((u16)POP()); break;
+        case 0x93: L_93: PUSH((i32)(int16_t)POP()); break;
+        case 0x94: L_94: { i64 b = (i64)POPW(), a = (i64)POPW(); PUSH((u32)(a < b ? -1 : a > b)); break; }
+        case 0x95: L_95: case 0x96: L_96: { float b = as_float(POP()), a = as_float(POP()); PUSH(compare(a, b, op == 0x95 ? -1 : 1)); break; }
+        case 0x97: L_97: case 0x98: L_98: { double b = as_double(POPW()), a = as_double(POPW()); PUSH(compare(a, b, op == 0x97 ? -1 : 1)); break; }
+        case 0x99: L_99: case 0x9a: L_9a: case 0x9b: L_9b: case 0x9c: L_9c: case 0x9d: L_9d: case 0x9e: L_9e: {
             i32 v = (i32)POP();
             int jump = op == 0x99 ? v == 0 : op == 0x9a ? v != 0 : op == 0x9b ? v < 0 : op == 0x9c ? v >= 0 : op == 0x9d ? v > 0 : v <= 0;
             pc = jump ? start+(int16_t)rd16(pc) : pc+2;
             break;
         }
-        case 0x9f: case 0xa0: case 0xa1: case 0xa2: case 0xa3: case 0xa4: {
+        case 0x9f: L_9f: case 0xa0: L_a0: case 0xa1: L_a1: case 0xa2: L_a2: case 0xa3: L_a3: case 0xa4: L_a4: {
             i32 b = (i32)POP(), a = (i32)POP();
             int jump = op == 0x9f ? a == b : op == 0xa0 ? a != b : op == 0xa1 ? a < b : op == 0xa2 ? a >= b : op == 0xa3 ? a > b : a <= b;
             pc = jump ? start+(int16_t)rd16(pc) : pc+2;
             break;
         }
-        case 0xa5: case 0xa6: { u32 b = POP(), a = POP(); pc = (op == 0xa5) == (a == b) ? start+(int16_t)rd16(pc) : pc+2; break; }
-        case 0xa7: pc = start+(int16_t)rd16(pc); break;
-        case 0xa8: PUSH((u32)(pc+2-m->code)); pc = start+(int16_t)rd16(pc); break;
-        case 0xa9: pc = m->code+locals[*pc]; break;
-        case 0xaa: {
+        case 0xa5: L_a5: case 0xa6: L_a6: { u32 b = POP(), a = POP(); pc = (op == 0xa5) == (a == b) ? start+(int16_t)rd16(pc) : pc+2; break; }
+        case 0xa7: L_a7: pc = start+(int16_t)rd16(pc); break;
+        case 0xa8: L_a8: PUSH((u32)(pc+2-m->code)); pc = start+(int16_t)rd16(pc); break;
+        case 0xa9: L_a9: pc = m->code+locals[*pc]; break;
+        case 0xaa: L_aa: {
             const u8 *p = m->code+(((u32)(start-m->code)+4) & ~3u);
             i32 index = (i32)POP(), low = (i32)rd32(p+4), high = (i32)rd32(p+8);
             pc = start+(i32)rd32(index < low || index > high ? p : p+12+(index-low)*4);
             break;
         }
-        case 0xab: {
+        case 0xab: L_ab: {
             const u8 *p = m->code+(((u32)(start-m->code)+4) & ~3u);
             i32 key = (i32)POP();
             u32 pairs = rd32(p+4);
@@ -568,7 +635,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             pc = start+offset;
             break;
         }
-        case 0xac: case 0xad: case 0xae: case 0xaf: case 0xb0: case 0xb1: {
+        case 0xac: L_ac: case 0xad: L_ad: case 0xae: L_ae: case 0xaf: L_af: case 0xb0: L_b0: case 0xb1: L_b1: {
             u32 slots = op == 0xb1 ? 0 : (op == 0xad || op == 0xaf) ? 2 : 1;
             u32 *result = sp-slots;
             if (f->monitor) {
@@ -584,7 +651,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             sp = target+slots;
             break;
         }
-        case 0xb2: case 0xb3: case 0xb4: case 0xb5: {
+        case 0xb2: L_b2: case 0xb3: L_b3: case 0xb4: L_b4: case 0xb5: L_b5: {
             u16 index = (u16)rd16(pc);
             pc += 2;
             SAVE();
@@ -621,7 +688,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             }
             break;
         }
-        case 0xb6: case 0xb7: case 0xb8: case 0xb9: case INVOKEVIRTUAL_SLOW: {
+        case 0xb6: L_b6: case 0xb7: L_b7: case 0xb8: L_b8: case 0xb9: L_b9: case INVOKEVIRTUAL_SLOW: L_db: {
             int slow = op == INVOKEVIRTUAL_SLOW;
             if (slow) op = 0xb6;
             u16 index = (u16)rd16(pc);
@@ -697,7 +764,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             RELOAD();
             break;
         }
-        case GETFIELD_Q: {
+        case GETFIELD_Q: L_d0: {
             u32 offset = rd16(pc);
             pc += 2;
             Object *o = REF(sp[-1]);
@@ -705,7 +772,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             sp[-1] = *(u32 *)((u8 *)o+offset);
             break;
         }
-        case GETFIELD_Q_WIDE: {
+        case GETFIELD_Q_WIDE: L_d1: {
             u32 offset = rd16(pc);
             pc += 2;
             Object *o = REF(POP());
@@ -714,7 +781,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             PUSH(slot[0]); PUSH(slot[1]);
             break;
         }
-        case PUTFIELD_Q: {
+        case PUTFIELD_Q: L_d2: {
             u32 offset = rd16(pc);
             pc += 2;
             u32 value = POP();
@@ -723,7 +790,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             *(u32 *)((u8 *)o+offset) = value;
             break;
         }
-        case PUTFIELD_Q_WIDE: {
+        case PUTFIELD_Q_WIDE: L_d3: {
             u32 offset = rd16(pc);
             pc += 2;
             u32 lo = POP(), hi = POP();
@@ -733,7 +800,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             slot[0] = hi; slot[1] = lo;
             break;
         }
-        case GETSTATIC_Q: case GETSTATIC_Q_WIDE: case PUTSTATIC_Q: case PUTSTATIC_Q_WIDE: {
+        case GETSTATIC_Q: L_d4: case GETSTATIC_Q_WIDE: L_d5: case PUTSTATIC_Q: L_d6: case PUTSTATIC_Q_WIDE: L_d7: {
             Field *fd = cp[rd16(pc)].u.field;
             pc += 2;
             u32 *slot = &fd->owner->statics[fd->offset];
@@ -743,7 +810,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             else { slot[1] = POP(); slot[0] = POP(); }
             break;
         }
-        case INVOKEVIRTUAL_Q: case INVOKESPECIAL_Q: case INVOKESTATIC_Q: {
+        case INVOKEVIRTUAL_Q: L_d8: case INVOKESPECIAL_Q: L_da: case INVOKESTATIC_Q: L_d9: {
             Method *target = cp[rd16(pc)].u.method;
             u32 *args = sp-target->arg_slots;
             if (op != INVOKESTATIC_Q) {
@@ -780,8 +847,8 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             RELOAD();
             break;
         }
-        case 0xba: SAVE(); vm_fail(vm, "invokedynamic is not supported", 0); return initial-budget;
-        case 0xbb: {
+        case 0xba: L_ba: SAVE(); vm_fail(vm, "invokedynamic is not supported", 0); return initial-budget;
+        case 0xbb: L_bb: {
             u16 index = (u16)rd16(pc);
             pc += 2;
             SAVE();
@@ -795,7 +862,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             PUSH((uintptr_t)o);
             break;
         }
-        case 0xbc: case 0xbd: {
+        case 0xbc: L_bc: case 0xbd: L_bd: {
             i32 count = (i32)POP();
             Class *c;
             SAVE();
@@ -829,15 +896,15 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             PUSH((uintptr_t)a);
             break;
         }
-        case 0xbe: { Array *a = (Array *)REF(POP()); NULL_CHECK(a); PUSH(a->length); break; }
-        case 0xbf: {
+        case 0xbe: L_be: { Array *a = (Array *)REF(POP()); NULL_CHECK(a); PUSH(a->length); break; }
+        case 0xbf: L_bf: {
             Object *e = REF(POP());
             NULL_CHECK(e);
             f->pc = start; f->sp = sp;
             t->exception = e;
             goto exception_exact;
         }
-        case 0xc0: case 0xc1: {
+        case 0xc0: L_c0: case 0xc1: L_c1: {
             u16 index = (u16)rd16(pc);
             pc += 2;
             Object *o = REF(sp[-1]);
@@ -848,7 +915,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             else sp[-1] = o && is_subclass(o->cls, c);
             break;
         }
-        case 0xc2: case 0xc3: {
+        case 0xc2: L_c2: case 0xc3: L_c3: {
             Object *o = REF(POP());
             NULL_CHECK(o);
             if (op == 0xc2) {
@@ -856,7 +923,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             } else if (!monitor_exit(t, o)) goto exception_exact_unsaved;
             break;
         }
-        case 0xc4: {
+        case 0xc4: L_c4: {
             u8 wide_op = *pc++;
             u32 index = rd16(pc);
             pc += 2;
@@ -871,7 +938,7 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             }
             break;
         }
-        case 0xc5: {
+        case 0xc5: L_c5: {
             u16 index = (u16)rd16(pc);
             u32 dims = pc[2];
             pc += 3;
@@ -892,15 +959,23 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
             PUSH((uintptr_t)a);
             break;
         }
-        case 0xc6: case 0xc7: { u32 v = POP(); pc = (op == 0xc6) == !v ? start+(int16_t)rd16(pc) : pc+2; break; }
-        case 0xc8: pc = start+(i32)rd32(pc); break;
-        case 0xc9: PUSH((u32)(pc+4-m->code)); pc = start+(i32)rd32(pc); break;
-        default:
+        case 0xc6: L_c6: case 0xc7: L_c7: { u32 v = POP(); pc = (op == 0xc6) == !v ? start+(int16_t)rd16(pc) : pc+2; break; }
+        case 0xc8: L_c8: pc = start+(i32)rd32(pc); break;
+        case 0xc9: L_c9: PUSH((u32)(pc+4-m->code)); pc = start+(i32)rd32(pc); break;
+        default: L_default:
             SAVE();
             vm_fail(vm, "unknown bytecode", 0);
             return initial-budget;
         }
-        continue;
+        /* Threaded dispatch: straight to the next handler (no bounds check, no
+           jump back to the loop head); the loop head only starts the slice. */
+        if (!budget--) break;
+        start = pc;
+        op = *pc++;
+#ifdef JVM_OP_STATS
+        jvm_op_counts[op]++;
+#endif
+        goto *dispatch[op];
 exception_exact_unsaved:
         f->pc = start; f->sp = sp;
 exception_exact:
