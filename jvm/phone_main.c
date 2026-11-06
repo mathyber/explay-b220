@@ -367,8 +367,29 @@ static int64_t host_now(void *context) {
     if (!set || estimate < rtc-2000 || estimate > rtc+3000) { ms0 = ms; s0 = s; set = 1; estimate = rtc; }
     return estimate+315532800LL*1000;  /* 1970-01-01 to 1980-01-01 */
 }
-static uint16_t *host_screen(void *context) { (void)context; return api->screen(); }
-static void host_flush(void *context, int x, int y, int w, int h) { (void)context; api->flush((u32)x, (u32)y, (u32)w, (u32)h); }
+/* MIDlets draw into a back buffer; a flush copies the finished rectangle to the
+   window's screen buffer and then asks the firmware to show it. The firmware
+   sends the screen buffer to the LCD later, so drawing straight into it showed
+   frames still being painted (Age of Empires III redraws its menu all the time). */
+static u16 *back;
+static uint16_t *host_screen(void *context) { (void)context; return back ? back : api->screen(); }
+static void host_flush(void *context, int x, int y, int w, int h) {
+    (void)context;
+    if (back) {
+        if (x < 0) { w += x; x = 0; }
+        if (y < 0) { h += y; y = 0; }
+        if (x+w > JVM_SCREEN_WIDTH) w = JVM_SCREEN_WIDTH-x;
+        if (y+h > JVM_SCREEN_HEIGHT) h = JVM_SCREEN_HEIGHT-y;
+        if (w <= 0 || h <= 0) return;
+        u16 *screen = api->screen();
+        for (int row = y; row < y+h; row++) {
+            const u16 *from = back+row*JVM_SCREEN_WIDTH+x;
+            u16 *to = screen+row*JVM_SCREEN_WIDTH+x;
+            for (int i = 0; i < w; i++) to[i] = from[i];
+        }
+    }
+    api->flush((u32)x, (u32)y, (u32)w, (u32)h);
+}
 
 /* Phone key code to a MIDP key code (0 when unmapped). */
 static int midp_key(u32 code) {
@@ -403,6 +424,7 @@ static void shutdown(void) {
     if (library_file) { jar_close(&library); api->close(library_file); library_file = 0; }
     if (application_file) { jar_close(&application); api->close(application_file); application_file = 0; }
     if (block) { api->free(block); block = 0; }
+    if (back) { api->free(back); back = 0; }
     vm = 0;
 }
 
@@ -502,6 +524,12 @@ static void start(const u16 *path) {
     /* Metadata grows with the application's classes (measured: about 1.4 bytes
        per class file byte plus the library); the heap gets the rest. */
     u32 meta = META_BASE+jar_class_bytes(&application)/5*7;
+    if (midp) {
+        back = api->alloc(JVM_SCREEN_WIDTH*JVM_SCREEN_HEIGHT*2);
+        if (!back) { say("Not enough memory\n"); finished = 1; return; }
+        u16 *screen = api->screen();
+        for (u32 i = 0; i < JVM_SCREEN_WIDTH*JVM_SCREEN_HEIGHT; i++) back[i] = screen[i];
+    }
     u32 available = api->heap_free();
     if (available < meta+RESERVE+HEAP_MIN) { say("Not enough memory\n"); finished = 1; return; }
     u32 bytes = available-RESERVE;

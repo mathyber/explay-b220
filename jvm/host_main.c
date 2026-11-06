@@ -140,7 +140,25 @@ static int by_count(const void *a, const void *b) {
 }
 
 /* GO1JVM_STATS: totals; GO1JVM_HEAP: live objects by class after a collection. */
+#ifdef JVM_OP_STATS
+extern unsigned long long jvm_op_counts[256];
+#endif
+
 static void stats(Jvm *vm) {
+#ifdef JVM_OP_STATS
+    unsigned long long total = 0;
+    for (int i = 0; i < 256; i++) total += jvm_op_counts[i];
+    if (total) {
+        fprintf(stderr, "bytecodes %llu\n", total);
+        for (int n = 0; n < 40; n++) {
+            int best = 0;
+            for (int i = 1; i < 256; i++) if (jvm_op_counts[i] > jvm_op_counts[best]) best = i;
+            if (!jvm_op_counts[best]) break;
+            fprintf(stderr, "op 0x%02x %5.1f%%\n", best, 100.0*jvm_op_counts[best]/total);
+            jvm_op_counts[best] = 0;
+        }
+    }
+#endif
     if (sample_total) {
         qsort(samples, sample_count, sizeof(samples[0]), by_count);
         fprintf(stderr, "profile: %u samples\n", sample_total);

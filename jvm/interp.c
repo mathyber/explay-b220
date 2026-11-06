@@ -335,6 +335,10 @@ static Array *multi_array(Jvm *vm, Class *c, u32 *counts, u32 dims) {
 }
 
 /* Returns the number of bytecodes run (all of budget unless the thread stopped). */
+#ifdef JVM_OP_STATS
+unsigned long long jvm_op_counts[256];  /* debug builds: bytecodes executed by opcode */
+#endif
+
 u32 execute(Jvm *vm, Thread *t, u32 budget) {
     const u32 initial = budget;
     Frame *f; Method *m; const u8 *pc, *start; u32 *sp, *locals; Constant *cp;
@@ -344,6 +348,9 @@ u32 execute(Jvm *vm, Thread *t, u32 budget) {
     while (budget--) {
         start = pc;
         u8 op = *pc++;
+#ifdef JVM_OP_STATS
+        jvm_op_counts[op]++;
+#endif
         switch (op) {
         case 0x00: break;
         case 0x01: PUSH(0); break;
