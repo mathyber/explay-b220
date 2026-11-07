@@ -1837,20 +1837,38 @@ static void draw_page(void) {
 
 
 static int loading(void);
-static char edit[400];
-static u32 edit_len, cursor, tap_key, tap_index, tap_time, digits_mode, edit_field;  /* edit_field: index+1 when editing a field */
-static const char *const keys[11] = {" 0", "./:-_1", "abc2", "def3", "ghi4", "jkl5", "mno6", "pqrs7", "tuv8", "wxyz9", "?=&%+@!~*#"};
+/* The editor keeps UCS-2 characters; addresses and field values get UTF-8. */
+#define EDIT_MAX 400
+static u16 edit[EDIT_MAX];
+static u32 edit_len, cursor, tap_key, tap_index, tap_time, edit_mode, edit_field;  /* edit_field: index+1 when editing a field */
+enum { M_LATIN, M_RUSSIAN, M_DIGITS };
+/* Letters by key 0-9 and * (UTF-8): a press types the first, quick presses
+   of the same key go through the rest. Russian as on phones of the time. */
+static const char *const latin[11] = {" 0", "./:-_1", "abc2", "def3", "ghi4", "jkl5", "mno6", "pqrs7", "tuv8", "wxyz9", "?=&%+@!~*#"};
+static const char *const russian[11] = {" 0", ".,?!-:1", "абвг2", "деёжз3", "ийкл4", "мноп5", "рсту6", "фхцч7", "шщъы8", "ьэюя9",
+                                        "?=&%+@!~*#"};
 
-static void edit_insert(char c) {
-    if (edit_len+1 >= sizeof(edit)) return;
-    memmove(edit+cursor+1, edit+cursor, edit_len-cursor+1);
+static void edit_insert(u16 c) {
+    if (edit_len+1 >= EDIT_MAX) return;
+    for (u32 i = edit_len; i > cursor; i--) edit[i] = edit[i-1];
     edit[cursor++] = c;
     edit_len++;
 }
 
+static void edit_set(const char *utf8) {
+    edit_len = cursor = widen_utf8(edit, utf8, EDIT_MAX);
+    tap_key = 0;
+}
+
+static void edit_utf8(char *out, u32 capacity) {
+    u32 n = 0;
+    out[0] = 0;
+    for (u32 i = 0; i < edit_len; i++) put_utf8(out, &n, capacity, edit[i]);
+}
+
 static void draw_edit(void) {
     fill(0, TOP, W, VIEW, C_BACK);
-    static const char *const help[] = {"1: . / : - _    0: пробел", "*: ? = & % +   #: abc/123", "Вверх — стереть всё"};
+    static const char *const help[] = {"1: . / : - _    0: пробел", "*: ? = & %   #: abc/абв/123", "Вверх — стереть всё"};
     u16 line[48];
     u32 n = widen_utf8(line, edit_field ? "Поле формы" : "Адрес или поиск", 48);
     int y = TOP+4, x = MARGIN;
@@ -1859,7 +1877,7 @@ static void draw_edit(void) {
     u32 lh = font_height(F_TEXT);
     fill(0, y-2, W, 4*(int)lh+4, 0x2104);
     for (u32 i = 0; i <= edit_len; i++) {
-        u16 c = i < edit_len ? (u16)(u8)edit[i] : ' ';
+        u16 c = i < edit_len ? edit[i] : ' ';
         u32 w = char_width(F_TEXT, c);
         if (x+(int)w > W-MARGIN) { x = MARGIN; y += (int)lh; }
         if (i == cursor) fill(x, y, 1, (int)lh, tap_key ? C_HEAD : C_TEXT);
@@ -1872,25 +1890,24 @@ static void draw_edit(void) {
         draw_chars(F_SMALL, MARGIN, y+(int)i*15, line, n, C_GRAY, TOP, BOTTOM);
     }
     draw_bars(edit_field ? "Готово" : "Перейти", edit_len ? "Стереть" : "Отмена", 0);
-
-    u16 mode[4] = {digits_mode ? '1' : 'a', digits_mode ? '2' : 'b', digits_mode ? '3' : 'c', 0};
-    draw_chars(F_SMALL, W/2-10, BOTTOM+2, mode, 3, C_BAR_TEXT, 0, H);
+    u16 mode[4];
+    n = widen_utf8(mode, edit_mode == M_RUSSIAN ? "абв" : edit_mode == M_DIGITS ? "123" : "abc", 4);
+    draw_chars(F_SMALL, W/2-10, BOTTOM+2, mode, n, C_BAR_TEXT, 0, H);
 }
 
 static void field_done(void) {
-    edit[edit_len] = 0;
     Field *f = &fields[edit_field-1];
-    char *value = fpool+f->value;
-    if (f->value != ~0u) copy(value, edit, f->cap+1);
+    if (f->value != ~0u) edit_utf8(fpool+f->value, f->cap+1);
     edit_field = 0;
     editing = 0;
     if (!loading()) api->timer(0, 0);
 }
 
 static void go(void) {
-    edit[edit_len] = 0;
     if (edit_field) { field_done(); return; }
-    const char *s = edit;
+    static char typed[URL_MAX], target[URL_MAX];
+    edit_utf8(typed, sizeof(typed));
+    const char *s = typed;
     while (*s == ' ') s++;
     if (!*s) return;
     int has_dot = 0, has_space = 0, has_scheme = 0;
@@ -1899,7 +1916,6 @@ static void go(void) {
         if (*c == ' ') has_space = 1;
         if (*c == ':' && c[1] == '/') has_scheme = 1;
     }
-    char target[600];
     u32 n = 0;
     target[0] = 0;
     if (has_scheme) copy(target, s, sizeof(target));
@@ -1924,12 +1940,12 @@ static int edit_key(u32 kind, u32 code) {
     if (kind != GO1_PRESS && kind != GO1_REPEAT) return 0;
     int digit = code >= GO1_1 && code <= GO1_9 ? (int)(code-GO1_1+1) : code == GO1_0 ? 0 : -1;
     u32 slot = digit >= 0 ? (u32)digit : code == GO1_STAR ? 10 : 99;
-    if (code == GO1_HASH && kind == GO1_PRESS) { digits_mode = !digits_mode; tap_key = 0; return 1; }
+    if (code == GO1_HASH && kind == GO1_PRESS) { edit_mode = (edit_mode+1)%3; tap_key = 0; return 1; }
     if (slot < 11 && kind == GO1_PRESS) {
         u32 now = api->ms();
-        if (digits_mode && slot < 10) { edit_insert((char)('0'+slot)); tap_key = 0; return 1; }
-        const char *set = keys[slot];
-        u32 count = (u32)strlen(set);
+        if (edit_mode == M_DIGITS && slot < 10) { edit_insert((u16)('0'+slot)); tap_key = 0; return 1; }
+        u16 set[16];
+        u32 count = widen_utf8(set, (edit_mode == M_RUSSIAN ? russian : latin)[slot], 16);
         if (tap_key == slot+1 && now-tap_time < 1000 && cursor) {
             tap_index = (tap_index+1)%count;
             edit[cursor-1] = set[tap_index];
@@ -1944,11 +1960,11 @@ static int edit_key(u32 kind, u32 code) {
     tap_key = 0;
     if (code == GO1_LEFT && cursor) cursor--;
     else if (code == GO1_RIGHT && cursor < edit_len) cursor++;
-    else if (code == GO1_UP) { edit_len = cursor = 0; edit[0] = 0; }  /* clear */
+    else if (code == GO1_UP) edit_len = cursor = 0;  /* clear */
     else if (code == GO1_DOWN) cursor = edit_len;
     else if (code == GO1_SOFT_RIGHT) {
         if (!edit_len) { editing = 0; edit_field = 0; if (!loading()) api->timer(0, 0); return 1; }
-        if (cursor) { memmove(edit+cursor-1, edit+cursor, edit_len-cursor+1); cursor--; edit_len--; }
+        if (cursor) { for (u32 i = cursor-1; i+1 < edit_len; i++) edit[i] = edit[i+1]; cursor--; edit_len--; }
     } else if ((code == GO1_OK || code == GO1_SOFT_LEFT) && kind == GO1_PRESS) go();
     return 1;
 }
@@ -1956,10 +1972,8 @@ static int edit_key(u32 kind, u32 code) {
 static void open_editor(void) {
     editing = 1;
     edit_field = 0;
-    if (starts(current, "about:")) copy(edit, "https://", sizeof(edit));
-    else copy(edit, current, sizeof(edit));
-    edit_len = cursor = (u32)strlen(edit);
-    tap_key = 0;
+    edit_mode = M_LATIN;  /* addresses are Latin; a search may switch with # */
+    edit_set(starts(current, "about:") ? "https://" : current);
     api->timer(loading() ? 50 : 100, 1);
 }
 
@@ -2026,9 +2040,7 @@ static void field_key(u32 field) {
     case T_TEXT: case T_PASSWORD: case T_TEXTAREA:
         editing = 1;
         edit_field = field;
-        copy(edit, pooled(f->value), sizeof(edit));
-        edit_len = cursor = (u32)strlen(edit);
-        tap_key = 0;
+        edit_set(pooled(f->value));
         api->timer(loading() ? 50 : 100, 1);
         break;
     case T_CHECK: f->checked = !f->checked; break;

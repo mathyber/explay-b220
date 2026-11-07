@@ -168,7 +168,17 @@ int main(int argc, char **argv) {
             selected = (u32)atoi(argv[++i]);
             go1_main(a, GO1_KEY_OK, 0);
             wait_page();
-        } else if (!strcmp(c, "request")) { fwrite(request, 1, request_len, stdout); putchar('\n'); }
+        } else if (!strcmp(c, "keys") && i+1 < argc) {
+            /* 0-9 * # digits and keys; ^ v < > arrows; L R soft keys; O OK */
+            for (const char *k = argv[++i]; *k; k++) {
+                u32 code = *k >= '1' && *k <= '9' ? GO1_1+(u32)(*k-'1') : *k == '0' ? GO1_0 : *k == '*' ? GO1_STAR :
+                           *k == '#' ? GO1_HASH : *k == '^' ? GO1_UP : *k == 'v' ? GO1_DOWN : *k == '<' ? GO1_LEFT :
+                           *k == '>' ? GO1_RIGHT : *k == 'L' ? GO1_SOFT_LEFT : *k == 'R' ? GO1_SOFT_RIGHT : GO1_OK;
+                go1_main(a, GO1_PRESS | code, 0);
+            }
+            wait_page();
+        } else if (!strcmp(c, "edit")) { u16 z = 0; print_utf8(edit, edit_len); (void)z; putchar('\n'); }
+        else if (!strcmp(c, "request")) { fwrite(request, 1, request_len, stdout); putchar('\n'); }
         else if (!strcmp(c, "cookies")) {
             for (u32 k = 0; k < COOKIE_MAX; k++)
                 if (cookies[k].used) printf("%s=%s domain=%s path=%s%s\n", cookies[k].name, cookies[k].value, cookies[k].domain,

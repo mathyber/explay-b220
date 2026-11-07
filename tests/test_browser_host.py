@@ -150,5 +150,16 @@ class BrowserHostTests(unittest.TestCase):
         self.assertIn('GET /echo?alone=solo', out[3])
 
 
+    def test_russian_multitap_in_a_field_and_a_search(self):
+        # field 1: OK opens the editor, up clears, # to Russian; привет: 5555 6 4 222 33 666 (> ends a letter)
+        out = self.run_browser('load', self.base+'/form', 'ok', '1', 'keys', '^#5555>6>4>222>33>666', 'edit',
+                               'keys', 'L', 'ok', '8', 'page')
+        self.assertEqual(out[3].strip(), 'привет')
+        self.assertIn('q=%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D1%82', ''.join(out[6].split()))
+        # # cycles abc -> абв -> 123: mixed text
+        out = self.run_browser('load', self.base+'/form', 'ok', '1', 'keys', '^2#2#2#2', 'edit')
+        self.assertEqual(out[3].strip(), 'aа2a')
+
+
 if __name__ == '__main__':
     unittest.main()
