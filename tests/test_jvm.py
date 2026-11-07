@@ -99,6 +99,20 @@ class JvmTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(run.stdout.encode()).hexdigest(),
                          '7fb9384590991f4942efc4a716afd5e78dd01b74f8338624c20439d4e90759c1')
 
+    def test_wide_blits_match_the_pixel_by_pixel_copy(self):
+        """drawRegion of 100x40 images at every source/destination alignment: opaque,
+        bit alpha, byte alpha (eight pixels per mask byte, joined half-word copies)."""
+        import hashlib
+        out = Path(self.folder.name)/'blittest'
+        javac([ROOT/'jvm/iotests/BlitTest.java'], out)
+        run = subprocess.run([str(HOST), '-cp', f'{LIBRARY};{out}', 'BlitTest'],
+                             capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(run.stdout.splitlines()), 241)
+        # Checksums of the pixel-at-a-time loops before the eight-pixel mask bytes.
+        self.assertEqual(hashlib.sha256(run.stdout.encode()).hexdigest(),
+                         '0e467ead5b83fc1cd0183bddb7aa1ffc1b7fd23ea56c8edc96eea59b18ae33f9')
+
     def test_inflate_matches_python_for_every_block_kind(self):
         """Stored (level 0), fixed and dynamic Huffman blocks, sizes 0..200 KB, read in odd chunks."""
         import random, zipfile

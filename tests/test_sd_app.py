@@ -421,7 +421,8 @@ class NativeVmTests(unittest.TestCase):
         from tools.build_java_phone import build_app,build_vm,zip_directory
         from tools.build_jvm import LIBRARY,build_library,build_host
         build_library();host=build_host();vm=build_vm()
-        for name in ('JitTest','JitTest2','JitTest3','JitTest4'):
+        # BlitTest: the blits on the big-endian phone (half-word joins depend on byte order).
+        for name in ('JitTest','JitTest2','JitTest3','JitTest4','BlitTest'):
             with TemporaryDirectory() as folder:
                 library=Path(folder)/'JAVALIB.JAR'
                 zip_directory(LIBRARY,library)
@@ -431,7 +432,7 @@ class NativeVmTests(unittest.TestCase):
                 files={'E:\\APPS.LST':b'JAVA.GO1\r\n','E:\\JAVA.GO1':vm,'E:\\JAVALIB.JAR':library.read_bytes(),'E:\\APP.JAR':app}
             event,calls=self.fixture(b'',files=files,budget=2000000000)
             event(0xf021);event(0xfa1b)
-            for _ in range(400):
+            for _ in range(600):
                 event(0xf020,param=0x40000100)
                 if '[finished]' in calls['texts']:break
             self.assertIn('[finished]',calls['texts'],name)

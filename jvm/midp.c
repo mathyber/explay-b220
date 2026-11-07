@@ -140,13 +140,31 @@ static inline void plot(Surface *s, const Clip *c, i32 x, i32 y, u16 color) {
 
 /* n pixels copied forward: two at a time when both rows are equally aligned. */
 static void copy16(u16 *to, const u16 *from, i32 n) {
-    if ((((uintptr_t)to ^ (uintptr_t)from) & 2) == 0) {
-        if (n > 0 && ((uintptr_t)to & 2)) { *to++ = *from++; n--; }
-        u32 *t = (u32 *)to;
+    if (n > 0 && ((uintptr_t)to & 2)) { *to++ = *from++; n--; }
+    u32 *t = (u32 *)to;
+    if (!((uintptr_t)from & 2)) {
+        /* Both word aligned: eight pixels per round. */
         const u32 *f = (const u32 *)from;
+        for (; n >= 8; n -= 8, t += 4, f += 4) { u32 a = f[0], b = f[1], c = f[2], d = f[3]; t[0] = a; t[1] = b; t[2] = c; t[3] = d; }
         for (; n >= 2; n -= 2) *t++ = *f++;
-        to = (u16 *)t; from = (const u16 *)f;
+        from = (const u16 *)f;
+    } else if (n >= 2) {
+        /* The source half a word off: whole words joined from two neighbours.
+           The first read starts at the pixel before from, in the same word. */
+        const u32 *f = (const u32 *)(from-1);
+        u32 prev = *f++;
+        for (; n >= 2; n -= 2) {
+            u32 next = *f++;
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+            *t++ = prev << 16 | next >> 16;
+#else
+            *t++ = prev >> 16 | next << 16;
+#endif
+            prev = next;
+        }
+        from = (const u16 *)f-1;
     }
+    to = (u16 *)t;
     while (n-- > 0) *to++ = *from++;
 }
 
@@ -279,25 +297,32 @@ static int draw_region(Thread *t, u32 *args, u32 *result) {
             continue;
         }
         if (src.bits) {
-            /* A bit per pixel: copy or skip; left to right, whole mask bytes at once. */
+            /* A bit per pixel: copy or skip. Left to right, eight pixels per mask
+               byte; at any source position the byte is made of two neighbours. */
             const u8 *mask = src.alpha;
-            for (i32 i = 0; i < n;) {
-                if (step == 1 && !(at & 7) && n-i >= 8) {
-                    u8 m8 = mask[at >> 3];
+            i32 i = 0;
+            if (step == 1) {
+                for (; n-i >= 8; i += 8, at += 8) {
+                    u32 shift = (u32)at & 7, byte = (u32)at >> 3;
+                    u32 m8 = shift ? ((mask[byte] | (u32)mask[byte+1] << 8) >> shift) & 0xff : mask[byte];
+                    if (!m8) continue;
                     if (m8 == 0xff) {
-                        for (i32 k = 0; k < 8; k++) to[i+k] = from[at+k];
-                        if (to_alpha) for (i32 k = 0; k < 8; k++) to_alpha[i+k] = 255;
-                        i += 8; at += 8;
+                        copy16(to+i, from+at, 8);
+                        if (to_alpha) jvm_memset(to_alpha+i, 255, 8);
                         continue;
                     }
-                    if (!m8) { i += 8; at += 8; continue; }
+                    for (u32 k = 0; k < 8; k++, m8 >>= 1)
+                        if (m8 & 1) {
+                            to[i+(i32)k] = from[at+(i32)k];
+                            if (to_alpha) to_alpha[i+(i32)k] = 255;
+                        }
                 }
+            }
+            for (; i < n; i++, at += step)
                 if ((mask[at >> 3] >> (at & 7)) & 1) {
                     to[i] = from[at];
                     if (to_alpha) to_alpha[i] = 255;
                 }
-                i++; at += step;
-            }
             continue;
         }
         const u8 *alpha = src.alpha;
