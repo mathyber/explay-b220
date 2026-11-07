@@ -422,7 +422,7 @@ class NativeVmTests(unittest.TestCase):
         from tools.build_jvm import LIBRARY,build_library,build_host
         build_library();host=build_host();vm=build_vm()
         # BlitTest: the blits on the big-endian phone (half-word joins depend on byte order).
-        for name in ('JitTest','JitTest2','JitTest3','JitTest4','BlitTest'):
+        for name in ('JitTest','JitTest2','JitTest3','JitTest4','BlitTest','CopyTest'):
             with TemporaryDirectory() as folder:
                 library=Path(folder)/'JAVALIB.JAR'
                 zip_directory(LIBRARY,library)

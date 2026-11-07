@@ -320,8 +320,21 @@ static Method *interface_target(Class *receiver, Method *m) {
 #define THROW(cls, msg) do { f->pc = start; f->sp = sp; throw_new(t, cls, msg); goto exception_exact; } while (0)
 #define NULL_CHECK(o) do { if (!(o)) THROW("java/lang/NullPointerException", 0); } while (0)
 #define CHECK_VM() do { if (vm->status == JVM_ERROR) { SAVE(); return 0; } } while (0)
-/* jit.c: compiled code from pc on, until it hands back to the interpreter. */
-#define JIT_GO() do { pc = m->code+jit_run(vm, m, (u32)(pc-m->code), &sp, locals, &budget); } while (0)
+/* jit.c: compiled code from pc on, until it hands back to the interpreter.
+   Inline here (jit_run is the same as a function): only at a block start; sp
+   and budget go through copies, since taking their own address would keep them
+   in memory all through execute. */
+#ifdef __arm__
+#define JIT_GO() do { const JitCode *c_ = &vm->jit[m->jit & ~JIT_COMPILED]; \
+        u32 at_ = (u32)(pc-m->code); \
+        if (at_ < m->code_length && (c_->map[at_] & JIT_BLOCK)) { \
+            JitCtx ctx_ = {sp, locals, budget}; \
+            pc = m->code+((JitEntry)(uintptr_t)c_->code)(&ctx_, c_->code+JIT_WORD(c_->map[at_])); \
+            sp = ctx_.sp; budget = ctx_.budget; } } while (0)
+#else
+#define JIT_GO() do { u32 *sp_ = sp; i32 budget_ = budget; \
+        pc = m->code+jit_run(vm, m, (u32)(pc-m->code), &sp_, locals, &budget_); sp = sp_; budget = budget_; } while (0)
+#endif
 /* Methods get hot by backward jumps and by calls: past JIT_THRESHOLD of both
    together they are compiled and run compiled from then on. */
 #define HOT() do { u32 j_ = m->jit; \

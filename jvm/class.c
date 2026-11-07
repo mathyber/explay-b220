@@ -3,11 +3,51 @@
 
 Jvm *jvm_current_vm;
 
-void *jvm_memset(void *d, int c, u32 n) { u8 *p = d; while (n--) *p++ = (u8)c; return d; }
+/* Words where both ends allow it: new objects are cleared and arrays copied
+   with these (byte at a time they took 6% and 2% of Opera Mini's start). */
+void *jvm_memset(void *d, int c, u32 n) {
+    u8 *p = d, v = (u8)c;
+    while (n && ((uintptr_t)p & 3)) { *p++ = v; n--; }
+    u32 w = v*0x01010101u, *q = (u32 *)p;
+    for (; n >= 16; n -= 16, q += 4) { q[0] = w; q[1] = w; q[2] = w; q[3] = w; }
+    for (; n >= 4; n -= 4) *q++ = w;
+    p = (u8 *)q;
+    while (n--) *p++ = v;
+    return d;
+}
+
+/* memmove: forwards when the target is below the source, else backwards. */
 void *jvm_memcpy(void *d, const void *s, u32 n) {
     u8 *p = d; const u8 *q = s;
-    if (p < q) while (n--) *p++ = *q++;
-    else { p += n; q += n; while (n--) *--p = *--q; }
+    if (p == q || !n) return d;
+    int words = !(((uintptr_t)p ^ (uintptr_t)q) & 3);
+    if (p < q) {
+        if (words) {
+            while (n && ((uintptr_t)p & 3)) { *p++ = *q++; n--; }
+            u32 *wp = (u32 *)p; const u32 *wq = (const u32 *)q;
+            for (; n >= 16; n -= 16, wp += 4, wq += 4) {
+                u32 a = wq[0], b = wq[1], c = wq[2], e = wq[3];
+                wp[0] = a; wp[1] = b; wp[2] = c; wp[3] = e;
+            }
+            for (; n >= 4; n -= 4) *wp++ = *wq++;
+            p = (u8 *)wp; q = (const u8 *)wq;
+        }
+        while (n--) *p++ = *q++;
+    } else {
+        p += n; q += n;
+        if (words) {
+            while (n && ((uintptr_t)p & 3)) { *--p = *--q; n--; }
+            u32 *wp = (u32 *)p; const u32 *wq = (const u32 *)q;
+            for (; n >= 16; n -= 16) {
+                wp -= 4; wq -= 4;
+                u32 a = wq[0], b = wq[1], c = wq[2], e = wq[3];
+                wp[0] = a; wp[1] = b; wp[2] = c; wp[3] = e;
+            }
+            for (; n >= 4; n -= 4) *--wp = *--wq;
+            p = (u8 *)wp; q = (const u8 *)wq;
+        }
+        while (n--) *--p = *--q;
+    }
     return d;
 }
 int jvm_memcmp(const void *a, const void *b, u32 n) {

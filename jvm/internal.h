@@ -36,8 +36,15 @@ typedef struct Array {
 #define ARRAY_DATA(a) ((u8 *)(a)+sizeof(Array))
 #define FIELDS(o) ((u32 *)((u8 *)(o)+sizeof(Object)))
 
-/* jit.c: native code of a hot method; map gives the code word of each bytecode offset. */
+/* jit.c: native code of a hot method; map gives the code word of each bytecode
+   offset, with JIT_BLOCK where compiled code can be entered (a block start). */
 typedef struct JitCode { const u32 *code; const u16 *map; } JitCode;
+#define JIT_BLOCK 0x8000u
+#define JIT_WORD(x) ((x) & 0x7fffu)
+/* Compiled code's entry: the operand stack, locals and budget in, the bytecode
+   offset where it stopped out (sp and budget updated). */
+typedef struct JitCtx { u32 *sp; u32 *locals; i32 budget; } JitCtx;
+typedef u32 (*JitEntry)(JitCtx *ctx, const u32 *at);
 #define JIT_METHODS 64
 #define JIT_THRESHOLD 2000      /* backward jumps before a method is compiled */
 #define JIT_NEVER 0x7fffu
