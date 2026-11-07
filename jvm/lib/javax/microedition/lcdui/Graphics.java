@@ -31,6 +31,15 @@ public class Graphics {
         font = Font.getDefaultFont();
     }
 
+    /* The state paint() starts with: Canvas reuses one Graphics for every paint. */
+    void reset(int x, int y, int w, int h) {
+        tx = ty = 0;
+        color = 0;
+        stroke = SOLID;
+        font = Font.getDefaultFont();
+        setClip(x, y, w, h);
+    }
+
     public void translate(int x, int y) { tx += x; ty += y; }
     public int getTranslateX() { return tx; }
     public int getTranslateY() { return ty; }

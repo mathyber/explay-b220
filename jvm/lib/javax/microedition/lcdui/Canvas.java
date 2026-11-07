@@ -109,10 +109,20 @@ public abstract class Canvas extends Displayable {
     public void go1Show() { showNotify(); }
     public void go1Hide() { hideNotify(); }
 
+    /* One Graphics for every paint, its state reset each time, as phones do: games
+       keep objects made from it, such as Nokia's DirectGraphics. GAZila's bus,
+       drawn turned through a DirectGraphics kept from an earlier frame, got that
+       frame's last clip and vanished in turns. */
+    private Graphics screen;
+    private int screenHeight;
+
     public void go1Paint(Graphics g) {
-        Graphics own = new Graphics(null, Display.WIDTH, getHeight());
-        own.setClip(g.getClipX(), g.getClipY(), g.getClipWidth(), g.getClipHeight());
-        paint(own);
+        if (screen == null || screenHeight != getHeight()) {
+            screenHeight = getHeight();
+            screen = new Graphics(null, Display.WIDTH, screenHeight);
+        }
+        screen.reset(g.getClipX(), g.getClipY(), g.getClipWidth(), g.getClipHeight());
+        paint(screen);
         paintCommands(g);
     }
 

@@ -113,6 +113,15 @@ class JvmTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(run.stdout.encode()).hexdigest(),
                          '0e467ead5b83fc1cd0183bddb7aa1ffc1b7fd23ea56c8edc96eea59b18ae33f9')
 
+    def test_canvas_paints_with_one_graphics_reset_each_time(self):
+        """Games keep objects made from paint()'s Graphics (Nokia DirectGraphics in GAZila)."""
+        out = Path(self.folder.name)/'painttest'
+        javac([ROOT/'jvm/iotests/PaintTest.java'], out)
+        run = subprocess.run([str(HOST), '-cp', f'{LIBRARY};{out}', 'PaintTest'],
+                             capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.strip(), 'true 0,0 0 10,20,30,40; true 0,0 0 0,0,176,100;')
+
     def test_inflate_matches_python_for_every_block_kind(self):
         """Stored (level 0), fixed and dynamic Huffman blocks, sizes 0..200 KB, read in odd chunks."""
         import random, zipfile
