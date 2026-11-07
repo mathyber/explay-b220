@@ -4,12 +4,15 @@
 Packet data and TCP come from the firmware (GO1 API), TLS 1.0-1.2 from
 BearSSL with the Mozilla root certificates (tools/build_browser.py), text in
 the GO1 JVM bitmap fonts (Latin, Cyrillic). HTML is read as a stream: text,
-headings, paragraphs, lists, links and image alt text; no scripts, styles,
-forms or pictures. A query without a dot goes to DuckDuckGo Lite.
+headings, paragraphs, lists, links, image alt text and forms (sent by GET or
+POST); no scripts, styles or pictures. Cookies are kept while the browser
+runs; responses may come gzip- or deflate-compressed. A query without a dot
+goes to DuckDuckGo Lite.
 
-Keys: up/down - previous/next link or scroll, left/right - page up/down,
-OK - open the link, left soft key - address, right soft key - back,
-* - reload, # - start page. The address editor uses multi-tap. */
+Keys: up/down - previous/next link or field, else scroll; left/right - page
+up/down; OK - open the link, edit or toggle the field, press the button; left
+soft key - address; right soft key - back; * - reload; # - start page. The
+address and field editor uses multi-tap. */
 #include "go1.h"
 #include "bearssl.h"
 
@@ -163,6 +166,9 @@ static u32 text_width(u32 f, const u16 *s, u32 n) { u32 w = 0; for (u32 i = 0; i
 
 /* ---------- entropy: SHA-256 pool fed by RAM, clocks, key and network timing ---------- */
 
+#ifndef ENTROPY_RAM
+#define ENTROPY_RAM ((const void *)0x04080000u)  /* MMI task stacks and queues (tests point it elsewhere) */
+#endif
 static br_sha256_context pool;
 static void stir(const void *data, u32 n) { br_sha256_update(&pool, data, n); }
 static void stir_time(void) { u32 t[2] = {api->ms(), api->clock()}; stir(t, sizeof(t)); }
@@ -177,7 +183,7 @@ static void stir_time(void) { u32 t[2] = {api->ms(), api->clock()}; stir(t, size
 
 typedef struct { u32 start; u16 length, x, link; u8 font; u8 color; } Run;  /* link: index+1, 0 none */
 typedef struct { u32 run, y; u16 count, height; } Line;
-typedef struct { u32 href, line; } Link;
+typedef struct { u32 href, line; u16 field; } Link;  /* field: index+1 for a form field */
 
 static u16 text[TEXT_MAX];
 static Run runs[RUN_MAX];
@@ -188,12 +194,29 @@ static u32 text_len, run_count, line_count, link_count, href_len, page_height, t
 static u16 page_title[48];
 static u32 title_len;
 
+/* forms (see the forms section) */
+#define FORM_MAX 24
+#define FIELD_MAX 160
+#define POOL_MAX 24000
+#define VALUE_ROOM 200   /* bytes an editable value can grow to */
+enum { T_TEXT, T_PASSWORD, T_HIDDEN, T_CHECK, T_RADIO, T_SELECT, T_SUBMIT, T_TEXTAREA };
+typedef struct { u32 action; u8 post, has_submit; } Form;   /* action: pool offset ("" = this page) */
+typedef struct { u8 type, form, checked; u16 option, option_count; u32 name, value, cap, options; } Field;
+static Form forms[FORM_MAX];
+static Field fields[FIELD_MAX];
+static char fpool[POOL_MAX];   /* names, values, options ("value\0label\0" pairs) */
+static u32 form_count, field_count, pool_len, form_open, in_select, in_option, in_textarea;
+static char option_value[256], option_label[256], area[1024];
+static u32 option_label_len, option_selected, option_has_value, area_len;
+
+
 /* layout state */
 static u32 line_x, line_height, gap_pending, space_pending, at_line_start;
 static u32 style_font, style_color, style_link, pre;
 static u16 word[48];
 static u32 word_len, word_width;
 
+static void forms_reset(void);
 static void page_reset(void) {
     text_len = run_count = line_count = link_count = href_len = truncated = title_len = 0;
     page_height = 0;
@@ -201,6 +224,7 @@ static void page_reset(void) {
     style_font = F_TEXT; style_color = 0; style_link = 0; pre = 0;
     word_len = word_width = 0;
     page_title[0] = 0;
+    forms_reset();
 }
 
 static void open_line(void) {
@@ -298,8 +322,10 @@ static void block(u32 gap) {
 
 /* ---------- URLs ---------- */
 
-typedef struct { u32 https, port; char host[128]; char path[600]; } Url;
-static char current[800];
+#define URL_MAX 1600
+typedef struct { u32 https, port; char host[128]; char path[URL_MAX]; } Url;
+static char current[URL_MAX];
+static Url url;  /* of the page being loaded */
 
 static void copy(char *dst, const char *src, u32 capacity) {
     u32 n = 0;
@@ -431,8 +457,17 @@ static void title_char(u32 c) {
     if (title_len+1 < sizeof(page_title)/2) { page_title[title_len++] = (u16)c; page_title[title_len] = 0; }
 }
 
+static void put_utf8(char *out, u32 *n, u32 capacity, u32 c);
+
 static void text_char(u32 c) {
     if (in_title) { title_char(c); return; }
+    if (in_select) {  /* option labels are not page text */
+        if (in_option) {
+            if (c == '\n' || c == '\t' || c == '\r') c = ' ';
+            if (c != ' ' || option_label_len) put_utf8(option_label, &option_label_len, sizeof(option_label), c);
+        }
+        return;
+    }
     emit_char(c);
 }
 
@@ -453,6 +488,188 @@ static void bullet(void) {
     space_pending = 1;
 }
 
+/* ---------- forms ---------- */
+
+static u32 widen_utf8(u16 *out, const char *s, u32 capacity);
+
+static void forms_reset(void) {
+    form_count = field_count = pool_len = form_open = in_select = in_option = in_textarea = 0;
+}
+
+/* A string in the pool with room to grow to `room` bytes; ~0 when full. */
+static u32 pool_add(const char *str, u32 room) {
+    u32 len = (u32)strlen(str), size = (len > room ? len : room)+1;
+    if (pool_len+size > POOL_MAX) return ~0u;
+    u32 at = pool_len;
+    memcpy(fpool+at, str, len+1);
+    pool_len += size;
+    return at;
+}
+static const char *pooled(u32 at) { return at == ~0u ? "" : fpool+at; }
+
+/* An attribute without a value (checked, selected). */
+static int flag(const char *t, const char *name) {
+    u32 len = (u32)strlen(name);
+    for (const char *p = t; *p; p++)
+        if ((p == t || p[-1] == ' ' || p[-1] == '\t' || p[-1] == '\n' || p[-1] == '"' || p[-1] == '\'') && starts(p, name)) {
+            char c = p[len];
+            if (!c || c == ' ' || c == '\t' || c == '\n' || c == '/' || c == '=' || c == '>') return 1;
+        }
+    return 0;
+}
+
+static u32 add_field(u32 type, const char *name, const char *value, u32 room) {
+    if (field_count >= FIELD_MAX) return 0;
+    Field *f = &fields[field_count];
+    f->type = (u8)type; f->form = (u8)form_open; f->checked = 0; f->option = f->option_count = 0; f->options = ~0u;
+    f->name = pool_add(name, 0);
+    f->value = pool_add(value, room);
+    f->cap = room > strlen(value) ? room : (u32)strlen(value);
+    if (f->name == ~0u || f->value == ~0u) return 0;
+    if (type == T_SUBMIT && form_open) forms[form_open-1].has_submit = 1;
+    return ++field_count;
+}
+
+/* A field on the page: a link to it, drawn as `chars` placeholder characters
+   (draw_field paints the box over them) or as the label (buttons). */
+static void show_field(u32 field, const char *label, u32 chars) {
+    if (!field || link_count >= LINK_MAX) return;
+    flush_word();
+    if (space_pending && !at_line_start) {  /* the space before stays outside the field */
+        u16 sp = ' ';
+        u32 w = char_width(style_font, ' ');
+        if (line_x+w <= WIDTH) put_run(&sp, 1, w);
+        space_pending = 0;
+    }
+    u32 saved_link = style_link, saved_color = style_color;
+    links[link_count].href = 0;
+    links[link_count].line = line_count ? line_count-1 : 0;
+    links[link_count].field = (u16)field;
+    style_link = ++link_count;
+    style_color = 1;
+    if (label) {
+        u16 wide[64];
+        u32 n = widen_utf8(wide, label, 64);
+        emit_char('[');
+        for (u32 i = 0; i < n; i++) emit_char(wide[i] == ' ' ? 0xa0 : wide[i]);
+        emit_char(']');
+    } else for (u32 i = 0; i < chars; i++) emit_char('_');
+    flush_word();
+    space_pending = 1;
+    style_link = saved_link; style_color = saved_color;
+}
+
+static void option_done(void) {
+    if (!in_option) return;
+    in_option = 0;
+    while (option_label_len && option_label[option_label_len-1] == ' ') option_label_len--;
+    option_label[option_label_len] = 0;
+    Field *f = &fields[in_select-1];
+    const char *value = option_has_value ? option_value : option_label;
+    u32 a = pool_add(value, 0), b = pool_add(option_label, 0);
+    if (a == ~0u || b == ~0u) return;
+    if (!f->option_count) f->options = a;
+    if (option_selected) f->option = f->option_count;
+    f->option_count++;
+}
+
+/* The value (and label) of a select's option `index`. */
+static const char *option_at(const Field *f, u32 index, int label) {
+    const char *p = pooled(f->options);
+    if (f->options == ~0u) return "";
+    for (u32 i = 0; i < index; i++) { p += strlen(p)+1; p += strlen(p)+1; }
+    return label ? p+strlen(p)+1 : p;
+}
+
+static void form_tag(const char *name, int closing) {
+    char value[600], type[24], fname[96];
+    if (tag_is(name, "form")) {
+        if (closing) {
+            if (form_open && !forms[form_open-1].has_submit)
+                show_field(add_field(T_SUBMIT, "", "", 0), "Отправить", 0);
+            form_open = 0;
+            return;
+        }
+        if (form_count >= FORM_MAX) { form_open = 0; return; }
+        Form *f = &forms[form_count];
+        if (!attribute(tag, "action", value, sizeof(value))) value[0] = 0;
+        f->action = pool_add(value, 0);
+        f->post = attribute(tag, "method", type, sizeof(type)) && starts(type, "post");
+        f->has_submit = 0;
+        form_open = ++form_count;
+        return;
+    }
+    if (!attribute(tag, "name", fname, sizeof(fname))) fname[0] = 0;
+    if (tag_is(name, "input") && !closing) {
+        if (!attribute(tag, "type", type, sizeof(type))) copy(type, "text", sizeof(type));
+        if (!attribute(tag, "value", value, sizeof(value))) value[0] = 0;
+        if (starts(type, "hidden")) add_field(T_HIDDEN, fname, value, 0);
+        else if (starts(type, "submit") || starts(type, "image")) {
+            const char *label = value[0] ? value : "Отправить";
+            if (starts(type, "image") && attribute(tag, "alt", value, sizeof(value)) && value[0]) label = value;
+            show_field(add_field(T_SUBMIT, fname, starts(type, "image") ? "" : value, 0), label, 0);
+        } else if (starts(type, "checkbox") || starts(type, "radio")) {
+            u32 field = add_field(starts(type, "radio") ? T_RADIO : T_CHECK, fname, value[0] ? value : "on", 0);
+            if (field) fields[field-1].checked = (u8)flag(tag, "checked");
+            show_field(field, 0, 3);
+        } else if (starts(type, "button") || starts(type, "reset") || starts(type, "file")) {
+            /* scripts or files: nothing to do here */
+        } else show_field(add_field(starts(type, "password") ? T_PASSWORD : T_TEXT, fname, value, VALUE_ROOM), 0, 14);
+        return;
+    }
+    if (tag_is(name, "button")) {
+        if (closing) { if (style_link && links[style_link-1].field) { flush_word(); style_link = 0; style_color = 0; } return; }
+        if (attribute(tag, "type", type, sizeof(type)) && !starts(type, "submit")) return;
+        if (!attribute(tag, "value", value, sizeof(value))) value[0] = 0;
+        u32 field = add_field(T_SUBMIT, fname, value, 0);
+        if (!field || link_count >= LINK_MAX) return;
+        flush_word();
+        links[link_count].href = 0;
+        links[link_count].line = line_count ? line_count-1 : 0;
+        links[link_count].field = (u16)field;
+        style_link = ++link_count;
+        style_color = 1;
+        return;
+    }
+    if (tag_is(name, "select")) {
+        if (closing) {
+            option_done();
+            if (in_select) show_field(in_select, 0, 14);
+            in_select = 0;
+            return;
+        }
+        in_select = add_field(T_SELECT, fname, "", 0);
+        return;
+    }
+    if (tag_is(name, "option") && in_select) {
+        option_done();
+        if (closing) return;
+        in_option = 1;
+        option_label_len = 0;
+        option_has_value = (u32)attribute(tag, "value", option_value, sizeof(option_value));
+        option_selected = (u32)flag(tag, "selected");
+        return;
+    }
+}
+
+/* The text of a textarea, read raw up to its closing tag. */
+static void textarea_done(void) {
+    /* the raw text ends with the closing tag's "</textarea" (10 characters) */
+    area_len = area_len >= 10 ? area_len-10 : 0;
+    area[area_len] = 0;
+    u32 at = 0;
+    while (area[at] == '\r' || area[at] == '\n') at++;  /* the newline after <textarea> */
+    fields[in_textarea-1].value = pool_add(area+at, VALUE_ROOM);
+    fields[in_textarea-1].cap = VALUE_ROOM > area_len ? VALUE_ROOM : area_len;
+    show_field(in_textarea, 0, 14);
+    in_textarea = 0;
+}
+
+static int form_name(const char *name) {
+    return tag_is(name, "form") || tag_is(name, "input") || tag_is(name, "button") || tag_is(name, "select") ||
+           tag_is(name, "option") || tag_is(name, "textarea");
+}
+
 static void handle_tag(void) {
     tag[tag_len] = 0;
     int closing = tag[0] == '/';
@@ -465,12 +682,23 @@ static void handle_tag(void) {
     }
     name[n] = 0;
     if (!closing && (tag_is(name, "script") || tag_is(name, "style") || tag_is(name, "svg") ||
-                     tag_is(name, "template") || tag_is(name, "select") || tag_is(name, "textarea"))) {
+                     tag_is(name, "template") || tag_is(name, "textarea"))) {
         html_state = H_RAW;
         tag_len = 0;
-        /* Index into raw_end: script, style, svg, template, select, textarea. */
+        /* Index into raw_end: script, style, svg, template, -, textarea (kept as the field's text). */
         raw_kind = tag_is(name, "script") ? 1 : tag_is(name, "style") ? 2 : tag_is(name, "svg") ? 3 :
-                   tag_is(name, "template") ? 4 : tag_is(name, "select") ? 5 : 6;
+                   tag_is(name, "template") ? 4 : 6;
+        if (raw_kind == 6) {
+            char fname[96];
+            if (!attribute(tag, "name", fname, sizeof(fname))) fname[0] = 0;
+            in_textarea = add_field(T_TEXTAREA, fname, "", 0);
+            area_len = 0;
+        }
+        return;
+    }
+    if (form_name(name)) {
+        if (tag_is(name, "form")) block(5);
+        form_tag(name, closing);
         return;
     }
     if (tag_is(name, "title")) {
@@ -503,7 +731,7 @@ static void handle_tag(void) {
         style_color = closing ? 0 : 2;
         return;
     }
-    if (tag_is(name, "p") || tag_is(name, "blockquote") || tag_is(name, "table") || tag_is(name, "form") ||
+    if (tag_is(name, "p") || tag_is(name, "blockquote") || tag_is(name, "table") ||
         tag_is(name, "hr") || tag_is(name, "figure")) { block(5); return; }
     if (tag_is(name, "pre")) { block(5); pre = !closing; return; }
     if (tag_is(name, "ul") || tag_is(name, "ol")) {
@@ -532,6 +760,7 @@ static void handle_tag(void) {
                 memcpy(hrefs+href_len, href, len+1);
                 links[link_count].href = href_len;
                 links[link_count].line = line_count ? line_count-1 : 0;
+                links[link_count].field = 0;
                 href_len += len+1;
                 style_link = ++link_count;
                 style_color = 1;
@@ -552,19 +781,6 @@ static void handle_tag(void) {
         }
         return;
     }
-    if (tag_is(name, "input") && !closing) {
-        char value[48], type[16];
-        if (attribute(tag, "type", type, sizeof(type)) && starts(type, "hidden")) return;
-        if (attribute(tag, "value", value, sizeof(value)) && value[0]) {
-            u32 saved = style_color;
-            style_color = 3;
-            emit_char('[');
-            for (const char *a = value; *a; a++) emit_char((u8)*a);
-            emit_char(']');
-            flush_word();
-            style_color = saved;
-        }
-    }
 }
 
 static int after_equals(void) {
@@ -573,7 +789,7 @@ static int after_equals(void) {
     return i && tag[i-1] == '=';
 }
 
-static const char *const raw_end[] = {"", "</script", "</style", "</svg", "</template", "</select", "</textarea"};
+static const char *const raw_end[] = {"", "</script", "</style", "</svg", "</template", "", "</textarea"};
 
 static void entity_done(int terminated) {
     entity[entity_len] = 0;
@@ -633,9 +849,16 @@ static void html_char(u32 c) {
         return;
     case H_RAW: {
         const char *end = raw_end[raw_kind];
+        if (raw_kind == 6 && in_textarea) put_utf8(area, &area_len, sizeof(area), c);
         u32 len = (u32)strlen(end);
         char lower = (char)(c >= 'A' && c <= 'Z' ? c+32 : c);
-        if (lower == end[tag_len]) { tag_len++; if (tag_len == len) { html_state = H_TAG; tag_len = 0; quote = 0; tag[0] = 0; } }
+        if (lower == end[tag_len]) {
+            tag_len++;
+            if (tag_len == len) {
+                html_state = H_TAG; tag_len = 0; quote = 0; tag[0] = 0;
+                if (raw_kind == 6 && in_textarea) textarea_done();
+            }
+        }
         else tag_len = lower == '<' ? 1 : 0;
         return;
     }
@@ -708,12 +931,265 @@ static void append_status_number(u32 value, const char *suffix) {
     status[n] = 0;
 }
 
+/* ---------- cookies: kept while the browser runs ---------- */
+
+#define COOKIE_MAX 48
+typedef struct { char domain[64], path[64], name[64], value[320]; u8 used, host_only, secure; } Cookie;
+static Cookie cookies[COOKIE_MAX];
+
+static int same(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
+
+/* host is domain or a subdomain of it */
+static int under(const char *host, const char *domain) {
+    u32 h = (u32)strlen(host), d = (u32)strlen(domain);
+    if (!d || h < d) return 0;
+    if (h == d) return same(host, domain);
+    return host[h-d-1] == '.' && same(host+h-d, domain);
+}
+
+static void trim_copy(char *out, const char *from, const char *to, u32 capacity) {
+    while (from < to && (*from == ' ' || *from == '\t')) from++;
+    while (to > from && (to[-1] == ' ' || to[-1] == '\t' || to[-1] == '\r')) to--;
+    u32 n = 0;
+    while (from < to && n+1 < capacity) out[n++] = *from++;
+    out[n] = 0;
+}
+
+/* The year in an Expires date ("Thu, 01 Jan 1970 00:00:00 GMT"), 0 if none. */
+static u32 expires_year(const char *v) {
+    for (; *v; v++)
+        if (v[0] >= '0' && v[0] <= '9' && v[1] >= '0' && v[1] <= '9' && v[2] >= '0' && v[2] <= '9' &&
+            v[3] >= '0' && v[3] <= '9' && !(v[4] >= '0' && v[4] <= '9'))
+            return (u32)((v[0]-'0')*1000+(v[1]-'0')*100+(v[2]-'0')*10+(v[3]-'0'));
+    return 0;
+}
+
+/* Set-Cookie from the page being loaded (url). */
+static void cookie_set(const char *line) {
+    const char *p = line, *semi;
+    for (semi = p; *semi && *semi != ';'; semi++) {}
+    const char *eq = p;
+    while (eq < semi && *eq != '=') eq++;
+    if (eq == semi) return;
+    Cookie c;
+    trim_copy(c.name, p, eq, sizeof(c.name));
+    trim_copy(c.value, eq+1, semi, sizeof(c.value));
+    if (!c.name[0]) return;
+    copy(c.domain, url.host, sizeof(c.domain));
+    c.host_only = 1; c.secure = 0;
+    /* default path: the request path up to its last slash */
+    u32 n = 0, last = 0;
+    while (url.path[n] && url.path[n] != '?' && n+1 < sizeof(c.path)) { c.path[n] = url.path[n]; if (url.path[n] == '/') last = n; n++; }
+    c.path[last ? last : 1] = 0;
+    if (!last) c.path[0] = '/';
+    int remove = 0;
+    for (p = *semi ? semi+1 : semi; *p;) {
+        for (semi = p; *semi && *semi != ';'; semi++) {}
+        char attr[96];
+        trim_copy(attr, p, semi, sizeof(attr));
+        if (starts(attr, "domain=")) {
+            const char *d = attr+7;
+            while (*d == '.') d++;
+            char lower[64];
+            u32 k = 0;
+            for (; d[k] && k+1 < sizeof(lower); k++) lower[k] = d[k] >= 'A' && d[k] <= 'Z' ? (char)(d[k]+32) : d[k];
+            lower[k] = 0;
+            if (!under(url.host, lower)) return;  /* another site's domain */
+            copy(c.domain, lower, sizeof(c.domain));
+            c.host_only = 0;
+        } else if (starts(attr, "path=") && attr[5] == '/') copy(c.path, attr+5, sizeof(c.path));
+        else if (starts(attr, "max-age=")) { const char *v = attr+8; if (*v == '-' || *v == '0') remove = 1; }
+        else if (starts(attr, "expires=")) {
+            u32 year = expires_year(attr+8), now = api->clock();
+            if (year && now && year < 1980+now/31556952) remove = 1;
+        } else if (same(attr, "secure") || same(attr, "Secure")) c.secure = 1;
+        p = *semi ? semi+1 : semi;
+    }
+    Cookie *slot = 0;
+    for (u32 i = 0; i < COOKIE_MAX; i++)
+        if (cookies[i].used && same(cookies[i].name, c.name) && same(cookies[i].domain, c.domain) && same(cookies[i].path, c.path))
+            slot = &cookies[i];
+    if (remove) { if (slot) slot->used = 0; return; }
+    if (!slot) for (u32 i = 0; i < COOKIE_MAX && !slot; i++) if (!cookies[i].used) slot = &cookies[i];
+    if (!slot) slot = &cookies[api->ms() % COOKIE_MAX];  /* full: one goes */
+    c.used = 1;
+    *slot = c;
+}
+
+/* "Cookie: ..." for the page being loaded, appended to out. */
+static void add(char *out, u32 *n, u32 capacity, const char *s);
+static void cookie_header(char *out, u32 *n, u32 capacity) {
+    int any = 0;
+    for (u32 i = 0; i < COOKIE_MAX; i++) {
+        const Cookie *c = &cookies[i];
+        if (!c->used || (c->secure && !url.https)) continue;
+        if (c->host_only ? !same(url.host, c->domain) : !under(url.host, c->domain)) continue;
+        if (!starts(url.path, c->path)) continue;
+        add(out, n, capacity, any ? "; " : "Cookie: ");
+        add(out, n, capacity, c->name);
+        add(out, n, capacity, "=");
+        add(out, n, capacity, c->value);
+        any = 1;
+    }
+    if (any) add(out, n, capacity, "\r\n");
+}
+
+/* ---------- gzip and deflate (whole response, then inflated into the page) ---------- */
+
+#define GZ_IN (64*1024)
+static u8 *gz_in, *gz_window;   /* from the heap when the browser opens; 0: compression not asked for */
+static u32 gz_len, gz_overflow, encoding;  /* encoding: 0 identity, 1 gzip, 2 deflate */
+static u32 in_pos, bit_buffer, bit_count, out_count, inflate_error;
+
+static void body_byte(u32 b);
+static u32 bits(u32 need) {
+    while (bit_count < need) {
+        if (in_pos >= gz_len) { inflate_error = 1; return 0; }
+        bit_buffer |= (u32)gz_in[in_pos++] << bit_count;
+        bit_count += 8;
+    }
+    u32 v = bit_buffer & ((1u << need)-1);
+    bit_buffer >>= need;
+    bit_count -= need;
+    return v;
+}
+
+static void out_byte(u32 b) {
+    gz_window[out_count++ & 32767] = (u8)b;
+    if (!truncated) body_byte(b);
+}
+
+typedef struct { u16 count[16], symbol[320]; } Huffman;
+
+static int huffman(Huffman *h, const u8 *lengths, u32 n) {
+    u16 offs[16];
+    for (u32 i = 0; i < 16; i++) h->count[i] = 0;
+    for (u32 i = 0; i < n; i++) h->count[lengths[i]]++;
+    if (h->count[0] == n) return 0;
+    int left = 1;
+    for (u32 i = 1; i < 16; i++) { left <<= 1; left -= h->count[i]; if (left < 0) return -1; }
+    offs[1] = 0;
+    for (u32 i = 1; i < 15; i++) offs[i+1] = (u16)(offs[i]+h->count[i]);
+    for (u32 i = 0; i < n; i++) if (lengths[i]) h->symbol[offs[lengths[i]]++] = (u16)i;
+    return left;
+}
+
+static int decode(const Huffman *h) {
+    int code = 0, first = 0, index = 0;
+    for (u32 len = 1; len < 16; len++) {
+        code |= (int)bits(1);
+        int count = h->count[len];
+        if (code-count < first) return h->symbol[index+(code-first)];
+        index += count; first += count;
+        first <<= 1; code <<= 1;
+        if (inflate_error) return -1;
+    }
+    return -1;
+}
+
+static const u16 length_base[29] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258};
+static const u8 length_extra[29] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
+static const u16 dist_base[30] = {1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073,
+                                  4097, 6145, 8193, 12289, 16385, 24577};
+static const u8 dist_extra[30] = {0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13};
+
+static int codes(const Huffman *lengths, const Huffman *distances) {
+    for (;;) {
+        int symbol = decode(lengths);
+        if (symbol < 0 || inflate_error) return -1;
+        if (symbol < 256) { out_byte((u32)symbol); if (truncated) return 0; continue; }
+        if (symbol == 256) return 0;
+        symbol -= 257;
+        if (symbol >= 29) return -1;
+        u32 len = length_base[symbol]+bits(length_extra[symbol]);
+        int d = decode(distances);
+        if (d < 0 || d >= 30) return -1;
+        u32 dist = dist_base[d]+bits(dist_extra[d]);
+        if (inflate_error || dist > out_count || dist > 32768) return -1;
+        while (len--) out_byte(gz_window[(out_count-dist) & 32767]);
+        if (truncated) return 0;
+    }
+}
+
+static Huffman fixed_lengths, fixed_distances, dyn_lengths, dyn_distances;
+
+static int inflate_blocks(void) {
+    static int fixed_ready;
+    if (!fixed_ready) {
+        u8 l[288];
+        u32 i = 0;
+        for (; i < 144; i++) l[i] = 8;
+        for (; i < 256; i++) l[i] = 9;
+        for (; i < 280; i++) l[i] = 7;
+        for (; i < 288; i++) l[i] = 8;
+        huffman(&fixed_lengths, l, 288);
+        for (i = 0; i < 30; i++) l[i] = 5;
+        huffman(&fixed_distances, l, 30);
+        fixed_ready = 1;
+    }
+    u32 last;
+    do {
+        last = bits(1);
+        u32 type = bits(2);
+        if (inflate_error) return -1;
+        if (type == 0) {
+            bit_buffer = 0; bit_count = 0;
+            if (in_pos+4 > gz_len) return -1;
+            u32 len = gz_in[in_pos] | (u32)gz_in[in_pos+1] << 8;
+            in_pos += 4;
+            if (in_pos+len > gz_len) return -1;
+            while (len--) { out_byte(gz_in[in_pos++]); if (truncated) return 0; }
+        } else if (type == 1) {
+            if (codes(&fixed_lengths, &fixed_distances)) return -1;
+        } else if (type == 2) {
+            static const u8 order[19] = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
+            u8 l[320];
+            u32 nlen = bits(5)+257, ndist = bits(5)+1, ncode = bits(4)+4;
+            if (nlen > 286 || ndist > 30) return -1;
+            for (u32 i = 0; i < 19; i++) l[order[i]] = (u8)(i < ncode ? bits(3) : 0);
+            if (huffman(&dyn_lengths, l, 19) != 0) return -1;
+            for (u32 i = 0; i < nlen+ndist;) {
+                int symbol = decode(&dyn_lengths);
+                if (symbol < 0) return -1;
+                if (symbol < 16) { l[i++] = (u8)symbol; continue; }
+                u32 len = 0, repeat;
+                if (symbol == 16) { if (!i) return -1; len = l[i-1]; repeat = 3+bits(2); }
+                else if (symbol == 17) repeat = 3+bits(3);
+                else repeat = 11+bits(7);
+                if (i+repeat > nlen+ndist) return -1;
+                while (repeat--) l[i++] = (u8)len;
+            }
+            if (!l[256]) return -1;
+            if (huffman(&dyn_lengths, l, nlen) < 0 || huffman(&dyn_distances, l+nlen, ndist) < 0) return -1;
+            if (codes(&dyn_lengths, &dyn_distances)) return -1;
+        } else return -1;
+        if (truncated) return 0;
+    } while (!last);
+    return 0;
+}
+
+/* The compressed body into the page. */
+static void inflate_body(void) {
+    in_pos = 0; bit_buffer = bit_count = out_count = inflate_error = 0;
+    if (encoding == 1) {
+        if (gz_len < 18 || gz_in[0] != 0x1f || gz_in[1] != 0x8b || gz_in[2] != 8) return;
+        u32 flags = gz_in[3];
+        in_pos = 10;
+        if (flags & 4) in_pos += 2+(gz_in[in_pos] | (u32)gz_in[in_pos+1] << 8);
+        if (flags & 8) { while (in_pos < gz_len && gz_in[in_pos]) in_pos++; in_pos++; }
+        if (flags & 16) { while (in_pos < gz_len && gz_in[in_pos]) in_pos++; in_pos++; }
+        if (flags & 2) in_pos += 2;
+        if (in_pos >= gz_len) return;
+    } else if (gz_len >= 2 && (gz_in[0] & 15) == 8 && !((gz_in[0] << 8 | gz_in[1]) % 31)) in_pos = 2;  /* zlib, else raw deflate */
+    inflate_blocks();
+}
+
 /* ---------- HTTP ---------- */
 
 enum { R_HEADERS, R_BODY, R_CHUNK_SIZE, R_CHUNK_DATA, R_CHUNK_END, R_DONE };
 static u32 http_state, status_code, chunked, content_length, has_length, body_received, header_len, chunk_left;
 static u32 chunk_digits, chunk_extension, unsupported;
-static char header[4096];
+static char header[8192];
 static char location[600];
 static char content_type[64];
 
@@ -721,6 +1197,7 @@ static void http_reset(void) {
     http_state = R_HEADERS; status_code = 0; chunked = 0; content_length = 0; has_length = 0;
     body_received = 0; header_len = 0; chunk_left = 0; chunk_digits = 0; chunk_extension = 0;
     location[0] = 0; content_type[0] = 0; unsupported = 0; refresh[0] = 0;
+    encoding = 0; gz_len = 0; gz_overflow = 0;
     html_state = H_TEXT; in_title = 0; list_depth = 0; charset_1251 = 0; utf8_need = 0; plain = 0;
 }
 
@@ -747,6 +1224,13 @@ static void headers_done(void) {
         *end = 0;
         if (end > line && end[-1] == '\r') end[-1] = 0;
         if (header_is(line, "location")) header_value(line, location, sizeof(location));
+        else if (header_is(line, "set-cookie")) { const char *v = line+11; while (*v == ' ') v++; cookie_set(v); }
+        else if (header_is(line, "content-encoding")) {
+            header_value(line, value, sizeof(value));
+            if (starts(value, "gzip") || starts(value, "x-gzip")) encoding = 1;
+            else if (starts(value, "deflate")) encoding = 2;
+            else if (value[0] && !starts(value, "identity")) unsupported = 1;
+        }
         else if (header_is(line, "content-type")) {
             header_value(line, content_type, sizeof(content_type));
             for (char *c = content_type; *c; c++) if (*c >= 'A' && *c <= 'Z') *c = (char)(*c+32);
@@ -774,6 +1258,14 @@ static void headers_done(void) {
 static void body(const u8 *p, u32 n) {
     body_received += n;
     if (unsupported || (status_code >= 300 && status_code < 400)) return;
+    if (encoding) {  /* inflated when it has all arrived */
+        if (!gz_in) { unsupported = 1; return; }
+        u32 room = GZ_IN-gz_len;
+        if (n > room) { gz_overflow = 1; n = room; }
+        memcpy(gz_in+gz_len, p, n);
+        gz_len += n;
+        return;
+    }
     for (u32 i = 0; i < n && !truncated; i++) body_byte(p[i]);
 }
 
@@ -831,8 +1323,7 @@ static int http_bytes(const u8 *p, u32 n) {
 
 enum { N_IDLE, N_PDP, N_DNS, N_CONNECT, N_IO, N_DONE };
 static u32 net_step, net_since, sock, address, use_tls, request_len, request_sent, redirects, received_total;
-static Url url;
-static char request[1200];
+static char request[6144];
 static br_ssl_client_context sc;
 static br_x509_minimal_context xc;
 static u8 tls_in[BR_SSL_BUFSIZE_INPUT];
@@ -841,10 +1332,22 @@ static u32 tls_ready;
 
 static void add(char *out, u32 *n, u32 capacity, const char *s) { while (*s && *n+1 < capacity) out[(*n)++] = *s++; out[*n] = 0; }
 
+/* A form sent by POST: the body for the next load, then for its request. */
+static char post_body[2048];
+static u32 post_len, post_pending, post_now;
+
+static void add_number(char *out, u32 *n, u32 capacity, u32 v) {
+    char digits[12];
+    u32 d = 0;
+    do { digits[d++] = (char)('0'+v%10); v /= 10; } while (v);
+    while (d && *n+1 < capacity) out[(*n)++] = digits[--d];
+    out[*n] = 0;
+}
+
 static void build_request(void) {
     u32 n = 0;
     request[0] = 0;
-    add(request, &n, sizeof(request), "GET ");
+    add(request, &n, sizeof(request), post_now ? "POST " : "GET ");
     add(request, &n, sizeof(request), url.path);
     add(request, &n, sizeof(request), " HTTP/1.1\r\nHost: ");
     add(request, &n, sizeof(request), url.host);
@@ -857,9 +1360,17 @@ static void build_request(void) {
         port[k] = 0;
         add(request, &n, sizeof(request), port);
     }
-    add(request, &n, sizeof(request), "\r\nUser-Agent: Mozilla/5.0 (Linux; Mobile) GO1Browser/0.1 (Explay B220)\r\n"
-        "Accept: text/html,text/plain;q=0.9,*/*;q=0.5\r\nAccept-Language: ru,en;q=0.7\r\n"
-        "Accept-Encoding: identity\r\nConnection: close\r\n\r\n");
+    add(request, &n, sizeof(request), "\r\nUser-Agent: Mozilla/5.0 (Linux; Mobile) GO1Browser/0.2 (Explay B220)\r\n"
+        "Accept: text/html,text/plain;q=0.9,*/*;q=0.5\r\nAccept-Language: ru,en;q=0.7\r\n");
+    add(request, &n, sizeof(request), gz_in ? "Accept-Encoding: gzip, deflate\r\n" : "Accept-Encoding: identity\r\n");
+    cookie_header(request, &n, sizeof(request));
+    if (post_now) {
+        add(request, &n, sizeof(request), "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: ");
+        add_number(request, &n, sizeof(request), post_len);
+        add(request, &n, sizeof(request), "\r\n");
+    }
+    add(request, &n, sizeof(request), "Connection: close\r\n\r\n");
+    if (post_now && n+post_len < sizeof(request)) { memcpy(request+n, post_body, post_len); n += post_len; }
     request_len = n;
     request_sent = 0;
 }
@@ -1022,7 +1533,7 @@ static void net_tick(void) {
 /* ---------- history, pages ---------- */
 
 #define HISTORY 12
-static char history[HISTORY][600];
+static char history[HISTORY][URL_MAX];
 static u32 history_count;
 static u32 scroll, selected, editing;
 
@@ -1171,11 +1682,15 @@ static void finish(const char *error) {
     net_step = N_DONE;
     if (!error && refresh[0] && redirects < 6 && status_code < 300) copy(location, refresh, sizeof(location));
     if (!error && ((status_code >= 300 && status_code < 400) || refresh[0]) && location[0] && redirects < 6) {
-        char next[600];
+        static char next[URL_MAX];
         resolve(current, location, next, sizeof(next));
         redirects++;
         load(next, 0);
         return;
+    }
+    if (encoding && gz_len && !unsupported) {
+        inflate_body();
+        if (gz_overflow) truncated = 1;
     }
     flush_word();
     if (error) {
@@ -1210,8 +1725,10 @@ static void load(const char *address_text, int remember) {
         copy(history[history_count++], current, sizeof(history[0]));
     }
     if (remember) redirects = 0;
+    post_now = post_pending;  /* a form sent by POST; redirects after it are GET */
+    post_pending = 0;
     if (starts(address_text, "about:start")) { show_internal(start_page_html(), "about:start"); net_step = N_IDLE; return; }
-    copy(current, address_text, sizeof(current));
+    if (address_text != current) copy(current, address_text, sizeof(current));
     page_reset();
     http_reset();
     scroll = 0; selected = 0;
@@ -1250,6 +1767,35 @@ static void draw_bars(const char *left, const char *right, const u16 *top) {
     draw_label(BOTTOM+2, right, 1);
 }
 
+/* A form field over its placeholder run: a box with the value, a check box,
+   a radio button, the chosen option. */
+static void draw_field(const Field *f, const Run *run, int x, int y, u32 fh, int chosen) {
+    u32 skip = 0;
+    while (skip < run->length && text[run->start+skip] == ' ') { x += (int)char_width(run->font, ' '); skip++; }
+    int w = (int)text_width(run->font, text+run->start+skip, run->length-skip);
+    int top = y < TOP ? TOP : y, bottom = y+(int)fh > BOTTOM ? BOTTOM : y+(int)fh;
+    if (bottom <= top) return;
+    fill(x, top, w, bottom-top, chosen ? C_SELECT : 0x2945);
+    u16 shown[64];
+    u32 n = 0;
+    if (f->type == T_CHECK || f->type == T_RADIO) {
+        shown[0] = f->checked ? (f->type == T_CHECK ? 'x' : 0x2022) : ' ';
+        n = 1;
+        x += (w-(int)char_width(run->font, shown[0]))/2;
+    } else {
+        const char *value = f->type == T_SELECT ? option_at(f, f->option, 1) : pooled(f->value);
+        n = widen_utf8(shown, value, 60);
+        if (f->type == T_PASSWORD) for (u32 i = 0; i < n; i++) shown[i] = '*';
+        for (u32 i = 0; i < n; i++) if (shown[i] == '\n' || shown[i] == '\r' || shown[i] == '\t') shown[i] = ' ';
+        x += 2;
+        u32 room = (u32)(w-4-(f->type == T_SELECT ? 8 : 0)), width = 0, k = 0;
+        while (k < n && width+char_width(run->font, shown[k]) <= room) width += char_width(run->font, shown[k++]);
+        n = k;
+        if (f->type == T_SELECT) { u16 mark = 'v'; draw_chars(run->font, x+w-10, y, &mark, 1, C_GRAY, top, bottom); }
+    }
+    draw_chars(run->font, x, y, shown, n, C_TEXT, top, bottom);
+}
+
 static void draw_page(void) {
     fill(0, TOP, W, VIEW, C_BACK);
     for (u32 i = 0; i < line_count; i++) {
@@ -1261,6 +1807,10 @@ static void draw_page(void) {
             u32 fh = font_height(run->font);
             int x = MARGIN+run->x, y = TOP+(int)l->y-(int)scroll+(int)(l->height-fh);
             u32 color = palette[run->color & 3];
+            if (run->link && links[run->link-1].field && fields[links[run->link-1].field-1].type != T_SUBMIT) {
+                draw_field(&fields[links[run->link-1].field-1], run, x, y, fh, run->link == selected);
+                continue;
+            }
             if (run->link && run->link == selected) {
                 u32 w = text_width(run->font, text+run->start, run->length);
                 int top = y < TOP ? TOP : y, bottom = y+(int)fh > BOTTOM ? BOTTOM : y+(int)fh;
@@ -1286,8 +1836,9 @@ static void draw_page(void) {
 /* ---------- address editor ---------- */
 
 
+static int loading(void);
 static char edit[400];
-static u32 edit_len, cursor, tap_key, tap_index, tap_time, digits_mode;
+static u32 edit_len, cursor, tap_key, tap_index, tap_time, digits_mode, edit_field;  /* edit_field: index+1 when editing a field */
 static const char *const keys[11] = {" 0", "./:-_1", "abc2", "def3", "ghi4", "jkl5", "mno6", "pqrs7", "tuv8", "wxyz9", "?=&%+@!~*#"};
 
 static void edit_insert(char c) {
@@ -1301,7 +1852,7 @@ static void draw_edit(void) {
     fill(0, TOP, W, VIEW, C_BACK);
     static const char *const help[] = {"1: . / : - _    0: пробел", "*: ? = & % +   #: abc/123", "Вверх — стереть всё"};
     u16 line[48];
-    u32 n = widen_utf8(line, "Адрес или поиск", 48);
+    u32 n = widen_utf8(line, edit_field ? "Поле формы" : "Адрес или поиск", 48);
     int y = TOP+4, x = MARGIN;
     draw_chars(F_SMALL, MARGIN, y, line, n, C_GRAY, TOP, BOTTOM);
     y += 16;
@@ -1320,14 +1871,25 @@ static void draw_edit(void) {
         n = widen_utf8(line, help[i], 48);
         draw_chars(F_SMALL, MARGIN, y+(int)i*15, line, n, C_GRAY, TOP, BOTTOM);
     }
-    draw_bars("Перейти", edit_len ? "Стереть" : "Отмена", 0);
+    draw_bars(edit_field ? "Готово" : "Перейти", edit_len ? "Стереть" : "Отмена", 0);
 
     u16 mode[4] = {digits_mode ? '1' : 'a', digits_mode ? '2' : 'b', digits_mode ? '3' : 'c', 0};
     draw_chars(F_SMALL, W/2-10, BOTTOM+2, mode, 3, C_BAR_TEXT, 0, H);
 }
 
+static void field_done(void) {
+    edit[edit_len] = 0;
+    Field *f = &fields[edit_field-1];
+    char *value = fpool+f->value;
+    if (f->value != ~0u) copy(value, edit, f->cap+1);
+    edit_field = 0;
+    editing = 0;
+    if (!loading()) api->timer(0, 0);
+}
+
 static void go(void) {
     edit[edit_len] = 0;
+    if (edit_field) { field_done(); return; }
     const char *s = edit;
     while (*s == ' ') s++;
     if (!*s) return;
@@ -1385,7 +1947,7 @@ static int edit_key(u32 kind, u32 code) {
     else if (code == GO1_UP) { edit_len = cursor = 0; edit[0] = 0; }  /* clear */
     else if (code == GO1_DOWN) cursor = edit_len;
     else if (code == GO1_SOFT_RIGHT) {
-        if (!edit_len) { editing = 0; if (!loading()) api->timer(0, 0); return 1; }
+        if (!edit_len) { editing = 0; edit_field = 0; if (!loading()) api->timer(0, 0); return 1; }
         if (cursor) { memmove(edit+cursor-1, edit+cursor, edit_len-cursor+1); cursor--; edit_len--; }
     } else if ((code == GO1_OK || code == GO1_SOFT_LEFT) && kind == GO1_PRESS) go();
     return 1;
@@ -1393,11 +1955,91 @@ static int edit_key(u32 kind, u32 code) {
 
 static void open_editor(void) {
     editing = 1;
+    edit_field = 0;
     if (starts(current, "about:")) copy(edit, "https://", sizeof(edit));
     else copy(edit, current, sizeof(edit));
     edit_len = cursor = (u32)strlen(edit);
     tap_key = 0;
     api->timer(loading() ? 50 : 100, 1);
+}
+
+/* ---------- sending a form ---------- */
+
+static void add_encoded(char *out, u32 *n, u32 capacity, const char *s) {
+    static const char hex[] = "0123456789ABCDEF";
+    for (const u8 *c = (const u8 *)s; *c && *n+4 < capacity; c++) {
+        if ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') ||
+            *c == '-' || *c == '_' || *c == '.' || *c == '*') out[(*n)++] = (char)*c;
+        else if (*c == ' ') out[(*n)++] = '+';
+        else { out[(*n)++] = '%'; out[(*n)++] = hex[*c >> 4]; out[(*n)++] = hex[*c & 15]; }
+    }
+    out[*n] = 0;
+}
+
+static void add_pair(char *out, u32 *n, u32 capacity, const char *name, const char *value) {
+    if (!name[0]) return;
+    if (*n) add(out, n, capacity, "&");
+    add_encoded(out, n, capacity, name);
+    add(out, n, capacity, "=");
+    add_encoded(out, n, capacity, value);
+}
+
+/* The form of `button` sent as application/x-www-form-urlencoded (UTF-8). */
+static void submit(u32 button) {
+    const Field *b = &fields[button-1];
+    if (!b->form) return;
+    static char query[2048];
+    u32 n = 0;
+    query[0] = 0;
+    for (u32 i = 0; i < field_count; i++) {
+        const Field *f = &fields[i];
+        if (f->form != b->form) continue;
+        const char *name = pooled(f->name);
+        switch (f->type) {
+        case T_TEXT: case T_PASSWORD: case T_HIDDEN: case T_TEXTAREA: add_pair(query, &n, sizeof(query), name, pooled(f->value)); break;
+        case T_CHECK: case T_RADIO: if (f->checked) add_pair(query, &n, sizeof(query), name, pooled(f->value)); break;
+        case T_SELECT: if (f->option_count) add_pair(query, &n, sizeof(query), name, option_at(f, f->option, 0)); break;
+        case T_SUBMIT: if (i == button-1) add_pair(query, &n, sizeof(query), name, pooled(f->value)); break;
+        }
+    }
+    const Form *form = &forms[b->form-1];
+    static char target[URL_MAX];
+    resolve(current, pooled(form->action), target, sizeof(target));
+    if (form->post) {
+        copy(post_body, query, sizeof(post_body));
+        post_len = (u32)strlen(post_body);
+        post_pending = 1;
+    } else {
+        u32 end = 0;
+        while (target[end] && target[end] != '?' && target[end] != '#') end++;
+        target[end] = 0;
+        add(target, &end, sizeof(target), "?");
+        add(target, &end, sizeof(target), query);
+    }
+    load(target, 1);
+}
+
+/* OK on a field: edit it, toggle it, take the next option, or send the form. */
+static void field_key(u32 field) {
+    Field *f = &fields[field-1];
+    switch (f->type) {
+    case T_TEXT: case T_PASSWORD: case T_TEXTAREA:
+        editing = 1;
+        edit_field = field;
+        copy(edit, pooled(f->value), sizeof(edit));
+        edit_len = cursor = (u32)strlen(edit);
+        tap_key = 0;
+        api->timer(loading() ? 50 : 100, 1);
+        break;
+    case T_CHECK: f->checked = !f->checked; break;
+    case T_RADIO:
+        for (u32 i = 0; i < field_count; i++)
+            if (fields[i].type == T_RADIO && fields[i].form == f->form && same(pooled(fields[i].name), pooled(f->name))) fields[i].checked = 0;
+        f->checked = 1;
+        break;
+    case T_SELECT: if (f->option_count) f->option = (u16)((f->option+1) % f->option_count); break;
+    case T_SUBMIT: submit(field); break;
+    }
 }
 
 /* ---------- page keys ---------- */
@@ -1441,19 +2083,22 @@ static int page_key(u32 kind, u32 code) {
         selected = 0;
     } else if (kind != GO1_PRESS) return 0;
     else if ((code == GO1_OK || code == GO1_5) && selected) {
-        char next[600];
-        resolve(current, hrefs+links[selected-1].href, next, sizeof(next));
-        load(next, 1);
+        if (links[selected-1].field) field_key(links[selected-1].field);
+        else {
+            static char next[URL_MAX];
+            resolve(current, hrefs+links[selected-1].href, next, sizeof(next));
+            load(next, 1);
+        }
     } else if (code == GO1_SOFT_LEFT) open_editor();
     else if (code == GO1_SOFT_RIGHT) {
         if (history_count) {
-            char back[600];
+            static char back[URL_MAX];
             copy(back, history[--history_count], sizeof(back));
             redirects = 0;
             load(back, 0);
         } else api->exit();
     } else if (code == GO1_STAR && !starts(current, "about:")) {
-        char again[800];
+        static char again[URL_MAX];
         copy(again, current, sizeof(again));
         redirects = 0;
         load(again, 0);
@@ -1485,12 +2130,16 @@ u32 go1_main(const Go1Api *program_api, u32 message, u32 parameter) {
         fonts[F_SMALL] = font_s_data; fonts[F_TEXT] = font_m_data; fonts[F_HEAD] = font_l_data;
         screen = api->screen();
         br_sha256_init(&pool);
-        stir((const void *)0x04080000u, 0x10000);  /* MMI task stacks and queues */
+        stir(ENTROPY_RAM, 0x10000);  /* MMI task stacks and queues */
         stir_time();
         br_ssl_client_init_full(&sc, &xc, browser_anchors, browser_anchor_count);
         seed_load();
         seed_store();
         marks_load();
+        /* Buffers for compressed pages; without them the server is asked for plain ones. */
+        gz_in = api->alloc(GZ_IN);
+        gz_window = gz_in ? api->alloc(32768) : 0;
+        if (!gz_window && gz_in) { api->free(gz_in); gz_in = 0; }
         history_count = 0; editing = 0; net_step = N_IDLE; sock = 0;
         show_internal(start_page_html(), "about:start");
         draw();
@@ -1499,6 +2148,7 @@ u32 go1_main(const Go1Api *program_api, u32 message, u32 parameter) {
     if (message == GO1_CLOSE) {
         api->timer(0, 0);
         if (sock) { api->tcp_close(sock); sock = 0; }
+        if (gz_in) { api->free(gz_in); api->free(gz_window); gz_in = gz_window = 0; }
         return 1;
     }
     if (message == GO1_TIMER) {

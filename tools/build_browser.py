@@ -137,6 +137,28 @@ def build():
     return program, anchors
 
 
+HOST = OUTPUT/'browser_host.exe'
+
+
+def build_host():
+    """browser.c on the PC with sockets for the GO1 API (apps/browser/host_test.c), for tests."""
+    import os
+    import subprocess
+    from .setup_arm_toolchain import EXECUTABLE as ZIG
+    data, _ = generate()
+    libraries = sorted(str(p) for p in (BEARSSL/'src').rglob('*.c'))
+    environment = os.environ.copy()
+    environment['ZIG_GLOBAL_CACHE_DIR'] = str(ROOT/'analysis/toolchains/cache')
+    environment['ZIG_LOCAL_CACHE_DIR'] = str(ROOT/'analysis/toolchains/local-cache')
+    command = [str(ZIG), 'cc', '-target', 'x86-windows-gnu', '-O1', '-w', '-Ipatches', f'-I{BEARSSL/"inc"}',
+               f'-I{BEARSSL/"src"}', f'-I{ROOT/"apps/browser"}', str(ROOT/'apps/browser/host_test.c'), str(data),
+               *libraries, '-lws2_32', '-o', str(HOST)]
+    result = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True, text=True)
+    if result.returncode:
+        raise ValueError('host build failed:\n'+result.stderr[-3000:])
+    return HOST
+
+
 def default_card():
     from .build_java_phone import default_card as card
     return card()
