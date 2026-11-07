@@ -1841,7 +1841,13 @@ static int loading(void);
 #define EDIT_MAX 400
 static u16 edit[EDIT_MAX];
 static u32 edit_len, cursor, tap_key, tap_index, tap_time, edit_mode, edit_field;  /* edit_field: index+1 when editing a field */
-enum { M_LATIN, M_RUSSIAN, M_DIGITS };
+enum { M_LATIN, M_LATIN_UPPER, M_RUSSIAN, M_RUSSIAN_UPPER, M_DIGITS, M_MODES };
+static const char *const mode_names[M_MODES] = {"abc", "ABC", "абв", "АБВ", "123"};
+
+static u16 upper(u16 c) {
+    if ((c >= 'a' && c <= 'z') || (c >= 0x430 && c <= 0x44f)) return (u16)(c-0x20);
+    return c == 0x451 ? 0x401 : c;  /* ё */
+}
 /* Letters by key 0-9 and * (UTF-8): a press types the first, quick presses
    of the same key go through the rest. Russian as on phones of the time. */
 static const char *const latin[11] = {" 0", "./:-_1", "abc2", "def3", "ghi4", "jkl5", "mno6", "pqrs7", "tuv8", "wxyz9", "?=&%+@!~*#"};
@@ -1868,7 +1874,7 @@ static void edit_utf8(char *out, u32 capacity) {
 
 static void draw_edit(void) {
     fill(0, TOP, W, VIEW, C_BACK);
-    static const char *const help[] = {"1: . / : - _    0: пробел", "*: ? = & %   #: abc/абв/123", "Вверх — стереть всё"};
+    static const char *const help[] = {"1: . / : - _   *: ? = & %", "0: пробел   вверх: стереть всё", "#: abc ABC абв АБВ 123"};
     u16 line[48];
     u32 n = widen_utf8(line, edit_field ? "Поле формы" : "Адрес или поиск", 48);
     int y = TOP+4, x = MARGIN;
@@ -1891,7 +1897,7 @@ static void draw_edit(void) {
     }
     draw_bars(edit_field ? "Готово" : "Перейти", edit_len ? "Стереть" : "Отмена", 0);
     u16 mode[4];
-    n = widen_utf8(mode, edit_mode == M_RUSSIAN ? "абв" : edit_mode == M_DIGITS ? "123" : "abc", 4);
+    n = widen_utf8(mode, mode_names[edit_mode], 4);
     draw_chars(F_SMALL, W/2-10, BOTTOM+2, mode, n, C_BAR_TEXT, 0, H);
 }
 
@@ -1940,12 +1946,15 @@ static int edit_key(u32 kind, u32 code) {
     if (kind != GO1_PRESS && kind != GO1_REPEAT) return 0;
     int digit = code >= GO1_1 && code <= GO1_9 ? (int)(code-GO1_1+1) : code == GO1_0 ? 0 : -1;
     u32 slot = digit >= 0 ? (u32)digit : code == GO1_STAR ? 10 : 99;
-    if (code == GO1_HASH && kind == GO1_PRESS) { edit_mode = (edit_mode+1)%3; tap_key = 0; return 1; }
+    if (code == GO1_HASH && kind == GO1_PRESS) { edit_mode = (edit_mode+1)%M_MODES; tap_key = 0; return 1; }
     if (slot < 11 && kind == GO1_PRESS) {
         u32 now = api->ms();
         if (edit_mode == M_DIGITS && slot < 10) { edit_insert((u16)('0'+slot)); tap_key = 0; return 1; }
         u16 set[16];
-        u32 count = widen_utf8(set, (edit_mode == M_RUSSIAN ? russian : latin)[slot], 16);
+        int russian_mode = edit_mode == M_RUSSIAN || edit_mode == M_RUSSIAN_UPPER;
+        u32 count = widen_utf8(set, (russian_mode ? russian : latin)[slot], 16);
+        if (edit_mode == M_LATIN_UPPER || edit_mode == M_RUSSIAN_UPPER)
+            for (u32 i = 0; i < count; i++) set[i] = upper(set[i]);
         if (tap_key == slot+1 && now-tap_time < 1000 && cursor) {
             tap_index = (tap_index+1)%count;
             edit[cursor-1] = set[tap_index];
