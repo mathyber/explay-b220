@@ -322,8 +322,14 @@ static Method *interface_target(Class *receiver, Method *m) {
 #define CHECK_VM() do { if (vm->status == JVM_ERROR) { SAVE(); return 0; } } while (0)
 /* jit.c: compiled code from pc on, until it hands back to the interpreter. */
 #define JIT_GO() do { pc = m->code+jit_run(vm, m, (u32)(pc-m->code), &sp, locals, &budget); } while (0)
-/* After a jump: backward jumps make a method hot. */
-#define BACKEDGE() do { if (pc <= start) { u32 j_ = m->jit;         if (j_ < JIT_THRESHOLD) m->jit = (u16)(j_+1);         else { if (j_ == JIT_THRESHOLD) jit_compile(vm, m); if (m->jit & JIT_COMPILED) JIT_GO(); } } } while (0)
+/* Methods get hot by backward jumps and by calls: past JIT_THRESHOLD of both
+   together they are compiled and run compiled from then on. */
+#define HOT() do { u32 j_ = m->jit; \
+        if (j_ & JIT_COMPILED) JIT_GO(); \
+        else if (j_ < JIT_THRESHOLD) m->jit = (u16)(j_+1); \
+        else if (j_ == JIT_THRESHOLD) { jit_compile(vm, m); if (m->jit & JIT_COMPILED) JIT_GO(); } } while (0)
+/* After a jump: backward jumps count. */
+#define BACKEDGE() do { if (pc <= start) HOT(); } while (0)
 
 static Array *check_array(Thread *t, u32 ref, i32 index, const char **error) {
     Array *a = (Array *)(uintptr_t)ref;
@@ -732,6 +738,7 @@ u32 execute(Jvm *vm, Thread *t, u32 limit) {
                     if (!push_frame(t, target, args)) goto exception_caller;
                     t->frames[t->depth-1].monitor = lock;
                     RELOAD();
+                    HOT();
                     break;
                 }
             }
@@ -771,6 +778,7 @@ u32 execute(Jvm *vm, Thread *t, u32 limit) {
             f->pc = pc; f->sp = args;
             if (!push_frame(t, target, args)) goto exception_caller;
             RELOAD();
+            HOT();
             break;
         }
         case GETFIELD_Q: L_d0: {
@@ -854,6 +862,7 @@ u32 execute(Jvm *vm, Thread *t, u32 limit) {
             f->pc = pc; f->sp = args;
             if (!push_frame(t, target, args)) goto exception_caller;
             RELOAD();
+            HOT();
             break;
         }
         case 0xba: L_ba: SAVE(); vm_fail(vm, "invokedynamic is not supported", 0); return initial-budget;

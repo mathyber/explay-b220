@@ -23,7 +23,7 @@
 #if defined(__arm__) && !defined(JVM_NO_JIT)
 
 #define JIT_CHUNK (16*1024)
-#define JIT_LIMIT (48*1024)    /* code and maps of all compiled methods */
+#define JIT_LIMIT (64*1024)    /* code and maps of all compiled methods */
 #define JIT_MAX_CODE 4096      /* longer methods stay interpreted */
 
 typedef struct Emit {
@@ -34,10 +34,12 @@ typedef struct Emit {
     u32 stub_base;     /* word index of the first exit (second pass) */
     u16 *map;          /* bytecode offset -> word index (0 = not an instruction) | LEADER */
     const Method *m;
+    u32 loc;           /* register holding the locals: r5, r8 in an inlined method */
+    int inlined;       /* translating an inlined method's body */
     int bad;
 } Emit;
 
-enum { R0, R1, R2, R3, RSP = 4, RLOC = 5, RCTX = 6, RBUD = 7, R12 = 12, PC = 15 };
+enum { R0, R1, R2, R3, RSP = 4, RLOC = 5, RCTX = 6, RBUD = 7, R8 = 8, R12 = 12, PC = 15 };
 enum { EQ, NE, HS, LO, MI, PL, VS, VC, HI, LS, GE, LT, GT, LE, AL };
 enum { AND = 0, EOR = 1, SUB = 2, RSB = 3, ADD = 4, CMP = 10, ORR = 12, MOV = 13, MVN = 15 };
 enum { LSL, LSR, ASR };
@@ -186,7 +188,134 @@ static void array_check(Emit *e, u32 at) {
     exit_if(e, HS, at);
 }
 
-/* One instruction; returns 0 when it is left to the interpreter. */
+static int translate(Emit *e, const u8 *code, u32 pc, u32 size);
+
+/* The last emitted instruction made conditional. */
+static void cond_last(Emit *e, u32 cond) {
+    if (e->out && e->n-1 < e->cap) e->out[e->n-1] = (e->out[e->n-1] & 0x0FFFFFFFu) | cond << 28;
+}
+
+/* Math.min/max/abs(int), natives in the library: two or three instructions here. */
+static int math(Emit *e, const Method *t) {
+    if (!utf8_equals(t->owner->name, "java/lang/Math")) return 0;
+    if ((utf8_equals(t->name, "min") || utf8_equals(t->name, "max")) && utf8_equals(t->desc, "(II)I")) {
+        ldm_db(e, 1u << R0 | 1u << R1, 1);
+        dp_reg(e, CMP, 1, 0, R0, R1, LSL, 0);
+        dp_reg(e, MOV, 0, R0, 0, R1, LSL, 0);
+        cond_last(e, utf8_equals(t->name, "min") ? GT : LT);
+        push(e, R0);
+        return 1;
+    }
+    if (utf8_equals(t->name, "abs") && utf8_equals(t->desc, "(I)I")) {
+        top(e, R0, 1);
+        dp_imm(e, CMP, 1, 0, R0, 0);
+        dp_imm(e, RSB, 0, R0, R0, 0);
+        cond_last(e, LT);
+        put(e, R0, 1);
+        return 1;
+    }
+    return 0;
+}
+
+#define INLINE_MAX 48  /* bytecode bytes of a method inlined at its calls */
+
+/* Bytecodes of a method that can take the place of its call: straight-line code
+   that cannot throw (no arrays, no division; fields only of its own receiver,
+   which the call checked), no locals beyond its arguments, and the return as its
+   last instruction. 0 when it cannot. */
+static u32 simple_callee(const Method *t) {
+    if (t->access & (ACC_NATIVE|ACC_SYNCHRONIZED|ACC_ABSTRACT)) return 0;
+    if (!t->code || !t->code_length || t->code_length > INLINE_MAX || t->handler_count) return 0;
+    if (t->max_locals > t->arg_slots || t->arg_slots > 16) return 0;
+    int self = !(t->access & ACC_STATIC);
+    u8 kind[16];  /* operand stack: 1 = the receiver */
+    u32 depth = 0, count = 0;
+    const u8 *c = t->code;
+    for (u32 pc = 0; pc < t->code_length;) {
+        u8 op = c[pc];
+        u32 n = length(c, pc, t->code_length), pops = 0, pushes = 0, pushed = 0;
+        if (!n) return 0;
+        if ((op >= 0x02 && op <= 0x08) || (op >= 0x0b && op <= 0x0d) || op == 0x10 || op == 0x11) pushes = 1;
+        else if (op == 0x12 || op == 0x13) {
+            const Constant *k = &t->owner->constants[op == 0x12 ? c[pc+1] : (u32)(c[pc+1] << 8 | c[pc+2])];
+            if (k->tag != 3 && k->tag != 4) return 0;
+            pushes = 1;
+        }
+        else if (op == 0x15 || op == 0x17 || op == 0x19) { pushes = 1; pushed = self && op == 0x19 && !c[pc+1]; }
+        else if ((op >= 0x1a && op <= 0x1d) || (op >= 0x22 && op <= 0x25) || (op >= 0x2a && op <= 0x2d)) {
+            pushes = 1;
+            pushed = self && op == 0x2a;
+        }
+        else if (op == 0x60 || op == 0x64 || op == 0x68 || op == 0x7e || op == 0x80 || op == 0x82 ||
+                 op == 0x78 || op == 0x7a || op == 0x7c) { pops = 2; pushes = 1; }
+        else if (op == 0x74 || (op >= 0x91 && op <= 0x93)) { pops = 1; pushes = 1; }
+        else if (op == 0x59) { if (!depth) return 0; pushes = 1; pushed = kind[depth-1]; }
+        else if (op == 0xd0) { if (!depth || kind[depth-1] != 1) return 0; pops = 1; pushes = 1; }
+        else if (op == 0xd2) { if (depth < 2 || kind[depth-2] != 1) return 0; pops = 2; }
+        else if (op == 0xd4) pushes = 1;
+        else if (op == 0xd6) pops = 1;
+        else if (op == 0xac || op == 0xae || op == 0xb0 || op == 0xb1) {
+            if (pc+n != t->code_length || (op != 0xb1 && !depth)) return 0;
+            return count+1;
+        }
+        else return 0;
+        if (depth < pops) return 0;
+        depth -= pops;
+        for (u32 i = 0; i < pushes; i++) { if (depth >= 16) return 0; kind[depth++] = (u8)pushed; }
+        count++;
+        pc += n;
+    }
+    return 0;
+}
+
+/* A call whose target is simple enough: its body in place of the call. The
+   arguments stay on the operand stack and are the inlined method's locals (r8);
+   the result replaces them. A virtual call checks that the receiver's class
+   still calls this method, a null receiver leaves the call to the interpreter. */
+static int inline_call(Emit *e, const u8 *code, u32 pc) {
+    u8 op = code[pc];
+    if (e->inlined) return 0;
+    const Method *t = e->m->owner->constants[code[pc+1] << 8 | code[pc+2]].u.method;
+    if (!t) return 0;
+    if (op == 0xd9 && (t->access & ACC_NATIVE)) return math(e, t);
+    u32 count = simple_callee(t);
+    if (!count || ((t->access & ACC_STATIC) != 0) != (op == 0xd9)) return 0;
+    u32 args = t->arg_slots;
+    if (op != 0xd9) {
+        top(e, R0, args);
+        dp_imm(e, CMP, 1, 0, R0, 0);
+        exit_if(e, EQ, pc);
+        if (op == 0xd8) {
+            if (t->vtable_index >= 1024) return 0;
+            LDR(R1, R0, (i32)offsetof(Object, cls));
+            LDR(R1, R1, (i32)offsetof(Class, vtable));
+            LDR(R1, R1, 4*(i32)t->vtable_index);
+            constant(e, R2, (u32)(uintptr_t)t);
+            dp_reg(e, CMP, 1, 0, R1, R2, LSL, 0);
+            exit_if(e, NE, pc);
+        }
+    }
+    dp_imm(e, SUB, 0, R8, RSP, 4*args);
+    const Method *caller = e->m;
+    u32 loc = e->loc;
+    e->m = t; e->loc = R8; e->inlined = 1;
+    int ok = 1;
+    u8 ret = 0xb1;
+    for (u32 p = 0; p < t->code_length;) {
+        u8 o = t->code[p];
+        if (o >= 0xac && o <= 0xb1) { ret = o; break; }
+        if (!translate(e, t->code, p, t->code_length)) { ok = 0; break; }
+        p += length(t->code, p, t->code_length);
+    }
+    e->m = caller; e->loc = loc; e->inlined = 0;
+    if (!ok) return 0;
+    if (ret == 0xb1) dp_reg(e, MOV, 0, RSP, 0, R8, LSL, 0);
+    else { top(e, R0, 1); STR(R0, R8, 0); dp_imm(e, ADD, 0, RSP, R8, 4); }
+    return (int)(1+count);
+}
+
+/* One instruction; returns the bytecodes it stands for (more than one with an
+   inlined call), 0 when it is left to the interpreter. */
 static int translate(Emit *e, const u8 *code, u32 pc, u32 size) {
     const Method *m = e->m;
     u8 op = code[pc];
@@ -220,13 +349,13 @@ static int translate(Emit *e, const u8 *code, u32 pc, u32 size) {
         else if (op >= 0x3b && op <= 0x4e) { slot = (op-0x3b) & 3; words = (op >= 0x3f && op <= 0x42) || (op >= 0x47 && op <= 0x4a) ? 2 : 1; store = 1; }
         if (slot >= 0) {
             if (words == 1) {
-                if (store) { pop(e, R0); STR(R0, RLOC, 4*slot); }
-                else { LDR(R0, RLOC, 4*slot); push(e, R0); }
+                if (store) { pop(e, R0); STR(R0, e->loc, 4*slot); }
+                else { LDR(R0, e->loc, 4*slot); push(e, R0); }
             } else if (store) {
                 ldm_db(e, 1u << R0 | 1u << R1, 1);
-                STR(R0, RLOC, 4*slot); STR(R1, RLOC, 4*slot+4);
+                STR(R0, e->loc, 4*slot); STR(R1, e->loc, 4*slot+4);
             } else {
-                LDR(R0, RLOC, 4*slot); LDR(R1, RLOC, 4*slot+4);
+                LDR(R0, e->loc, 4*slot); LDR(R1, e->loc, 4*slot+4);
                 stm_ia(e, 1u << R0 | 1u << R1);
             }
             return 1;
@@ -304,9 +433,9 @@ static int translate(Emit *e, const u8 *code, u32 pc, u32 size) {
         return 1;
     case 0x84: {
         i32 slot = code[pc+1], add = (int8_t)code[pc+2];
-        LDR(R0, RLOC, 4*slot);
+        LDR(R0, e->loc, 4*slot);
         if (add >= 0) dp_imm(e, ADD, 0, R0, R0, (u32)add); else dp_imm(e, SUB, 0, R0, R0, (u32)-add);
-        STR(R0, RLOC, 4*slot);
+        STR(R0, e->loc, 4*slot);
         return 1;
     }
     case 0x85:
@@ -391,8 +520,10 @@ static int translate(Emit *e, const u8 *code, u32 pc, u32 size) {
         u32 offset = (u32)(code[pc+1] << 8 | code[pc+2]);
         if (offset+4 >= 4096) return 0;
         top(e, R0, 1);
-        dp_imm(e, CMP, 1, 0, R0, 0);
-        exit_if(e, EQ, pc);
+        if (!e->inlined) {
+            dp_imm(e, CMP, 1, 0, R0, 0);
+            exit_if(e, EQ, pc);
+        }
         if (op == 0xd0) { LDR(R0, R0, (i32)offset); put(e, R0, 1); }
         else { LDR(R1, R0, (i32)offset); LDR(R2, R0, (i32)offset+4); put(e, R1, 1); push(e, R2); }
         return 1;
@@ -402,13 +533,17 @@ static int translate(Emit *e, const u8 *code, u32 pc, u32 size) {
         if (offset+4 >= 4096) return 0;
         if (op == 0xd2) ldm_db(e, 1u << R0 | 1u << R1, 0);
         else ldm_db(e, 1u << R0 | 1u << R1 | 1u << R2, 0);
-        dp_imm(e, CMP, 1, 0, R0, 0);
-        exit_if(e, EQ, pc);
+        if (!e->inlined) {
+            dp_imm(e, CMP, 1, 0, R0, 0);
+            exit_if(e, EQ, pc);
+        }
         STR(R1, R0, (i32)offset);
         if (op == 0xd3) STR(R2, R0, (i32)offset+4);
         sp_add(e, op == 0xd2 ? -8 : -12);
         return 1;
     }
+    case 0xd8: case 0xd9: case 0xda:  /* INVOKEVIRTUAL_Q, INVOKESTATIC_Q, INVOKESPECIAL_Q */
+        return inline_call(e, code, pc);
     case 0xd4: case 0xd5: case 0xd6: case 0xd7: {  /* GETSTATIC_Q.. PUTSTATIC_Q_WIDE: class initialized */
         const Field *fd = m->owner->constants[code[pc+1] << 8 | code[pc+2]].u.field;
         constant(e, R3, (u32)(uintptr_t)&fd->owner->statics[fd->offset]);
@@ -467,7 +602,8 @@ static u32 block_cost(Emit *e, u32 from) {
     for (u32 pc = from; pc < m->code_length;) {
         if (pc != from && (e->map[pc] & LEADER)) break;
         dry.n = 0; dry.stubs = 0;
-        if (translate(&dry, m->code, pc, m->code_length)) cost++;
+        dry.n = 0; dry.stubs = 0;
+        cost += (u32)translate(&dry, m->code, pc, m->code_length);
         pc += length(m->code, pc, m->code_length);
     }
     return cost;
@@ -563,7 +699,7 @@ void jit_compile(Jvm *vm, Method *m) {
     if (!map) return;
     jvm_memset(map, 0, map_bytes);
     Emit e = {0};
-    e.map = map; e.m = m;
+    e.map = map; e.m = m; e.loc = RLOC;
     mark_leaders(&e);
     if (e.bad) return;
     translate_method(&e);

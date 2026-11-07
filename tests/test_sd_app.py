@@ -421,7 +421,7 @@ class NativeVmTests(unittest.TestCase):
         from tools.build_java_phone import build_app,build_vm,zip_directory
         from tools.build_jvm import LIBRARY,build_library,build_host
         build_library();host=build_host();vm=build_vm()
-        for name in ('JitTest','JitTest2','JitTest3'):
+        for name in ('JitTest','JitTest2','JitTest3','JitTest4'):
             with TemporaryDirectory() as folder:
                 library=Path(folder)/'JAVALIB.JAR'
                 zip_directory(LIBRARY,library)
