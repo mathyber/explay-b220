@@ -63,6 +63,9 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(f'<p>cookie [{self.headers.get("Cookie", "")}]</p>'.encode())
         elif path == '/form':
             self.reply(FORM.encode())
+        elif path == '/cyr':
+            self.reply('<form action="/echo"><input name="q" value="ВК"><input type="submit" value="Найти"></form>'
+                       '<img alt="Картинка"> <a href="/путь?а=б">ссылка</a>'.encode())
         elif path.startswith('/echo'):
             self.reply(f'<p>GET {path}</p>'.encode())
         else:
@@ -159,6 +162,16 @@ class BrowserHostTests(unittest.TestCase):
         # # cycles abc -> ABC -> абв -> АБВ -> 123: mixed text; Ё is the capital of ё (3: д е ё)
         out = self.run_browser('load', self.base+'/form', 'ok', '1', 'keys', '^2#2#2#2#2#2###333', 'edit')
         self.assertEqual(out[3].strip(), 'aAаА2aЁ')
+
+
+    def test_attributes_keep_russian_letters(self):
+        out = self.run_browser('load', self.base+'/cyr', 'page', 'ok', '2', 'page', 'load', self.base+'/cyr', 'ok', '3',
+                               'request')
+        self.assertIn('{1:ВК}', out[1])
+        self.assertIn('[2][Найти]', out[1])
+        self.assertIn('[Картинка]', out[1])
+        self.assertIn('GET/echo?q=%D0%92%D0%9A', ''.join(out[3].split()))
+        self.assertIn('GET /%D0%BF%D1%83%D1%82%D1%8C?%D0%B0=%D0%B1 HTTP/1.1', out[6])
 
 
 if __name__ == '__main__':

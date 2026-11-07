@@ -361,8 +361,10 @@ static int parse_url(const char *s, Url *u) {
     if (*s != '/') u->path[n++] = '/';
     while (*s && *s != '#' && n+1 < sizeof(u->path)) {
         char c = *s++;
-        if (c == ' ') { if (n+4 < sizeof(u->path)) { u->path[n++] = '%'; u->path[n++] = '2'; u->path[n++] = '0'; } }
-        else u->path[n++] = c;
+        if (c == ' ' || (u8)c >= 0x80) {  /* spaces and UTF-8 bytes as %XX */
+            static const char hex[] = "0123456789ABCDEF";
+            if (n+4 < sizeof(u->path)) { u->path[n++] = '%'; u->path[n++] = hex[(u8)c >> 4]; u->path[n++] = hex[(u8)c & 15]; }
+        } else u->path[n++] = c;
     }
     u->path[n] = 0;
     return 1;
@@ -773,8 +775,10 @@ static void handle_tag(void) {
         if (attribute(tag, "alt", alt, sizeof(alt)) && alt[0]) {
             u32 saved = style_color;
             if (!style_link) style_color = 3;
+            u16 wide[80];
+            u32 n = widen_utf8(wide, alt, 80);
             emit_char('[');
-            for (const char *a = alt; *a; a++) emit_char((u8)*a);
+            for (u32 k = 0; k < n; k++) emit_char(wide[k]);
             emit_char(']');
             flush_word();
             style_color = saved;
@@ -840,7 +844,7 @@ static void html_char(u32 c) {
         else if (quote) { if (c == quote) quote = 0; }
         else if ((c == '"' || c == '\'') && after_equals()) quote = c;
         else if (c == '>') { if (tag[0] != '!' && tag[0] != '?') handle_tag(); if (html_state == H_TAG) html_state = H_TEXT; return; }
-        if (html_state == H_TAG && tag_len+1 < sizeof(tag)) tag[tag_len++] = (char)(c < 128 ? c : '?');
+        if (html_state == H_TAG) put_utf8(tag, &tag_len, sizeof(tag), c);  /* attribute values keep their letters (UTF-8) */
         return;
     case H_COMMENT:
         tag[tag_len%3] = (char)c;
