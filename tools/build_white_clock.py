@@ -1,4 +1,4 @@
-"""Recolor only the eleven clock ABMP palettes in a separate current-font PS."""
+"""Recolor only the clock ABMP palettes (digits, colon, AM, PM) in a separate current-font PS."""
 import argparse
 import hashlib
 import json
@@ -11,6 +11,9 @@ from .research_clock_digits import DIGITS, COLON, decode, extract
 DIRECTORY = ROOT/'analysis/firmware-patches/white-clock'
 DEFAULT_SOURCE = ROOT/'analysis/firmware-patches/main-font/b220-narrow.bin'   # Nokia font (Start B220 WHITE CLOCK.cmd)
 OLD, NEW = 0xff55, 0xffff
+AM, PM = 0x35a08, 0x35bac  # resources 322 and 323, right after the colon
+SIZES = {COLON: (4,16), AM: (17,14), PM: (17,14)}
+NAMES = {COLON: ':', AM: 'AM', PM: 'PM'}
 
 
 def sha(data):
@@ -21,9 +24,9 @@ def build(image):
     output = bytearray(image)
     allowed = set()
     records = []
-    for i, address in enumerate((*DIGITS, COLON)):
+    for i, address in enumerate((*DIGITS, COLON, AM, PM)):
         before, _, info = decode(image, address)
-        expected_size = (13,28) if address != COLON else (4,16)
+        expected_size = SIZES.get(address, (13,28))
         if before.size != expected_size or info['palette_rgb565'] != [hex(OLD)]:
             raise ValueError(f'Unexpected original clock palette or geometry at {address:#x}')
         start, end = int(info['palette_address'],0), int(info['alpha_address'],0)
@@ -37,7 +40,7 @@ def build(image):
                 checked['palette_rgb565'] != [hex(NEW)] or
                 image[end:int(info['end_exclusive'],0)] != output[end:int(info['end_exclusive'],0)]):
             raise ValueError('Clock transparency or indices changed')
-        records.append(dict(character=str(i) if i<10 else ':', address=hex(address),
+        records.append(dict(character=str(i) if i<10 else NAMES[address], address=hex(address),
                             palette_start=hex(start), palette_size=end-start,
                             palette_words=(end-start)//2, alpha_unchanged=True))
     if len(output) != len(image) or any(i not in allowed for i,(a,b) in enumerate(zip(image,output)) if a!=b):
