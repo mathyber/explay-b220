@@ -25,7 +25,7 @@
 | `####7900#` | 0x05 | 0x4a7ac5 | «Result: Send max power ON» — передатчик на максимальную мощность, тест радиотракта (проверено в эмуляторе). На телефоне без нужды не включать: радио может непрерывно излучать на пределе, греться и садить батарею |
 | `####2222#` | 0x06 | 0x18768b | экран «Product»: серийный номер (`<S/N>`, в эмуляторе пустой) и «Spreadtrum Communication» (проверено) |
 | `####1040#` | 0x07 | 0x1876fd | монитор сети (проверено в эмуляторе): обслуживающая сота `C0` и до шести соседних `N0`–`N5`; для каждой `BCH` — канал BCCH (ARFCN), `BRXL` — уровень приёма, `C1`/`C2` — критерии выбора и перевыбора соты GSM. В эмуляторе радио нет: каналы 0, уровень 110 (вероятно, −110 дБм — нет сигнала) |
-| `*998*33284#` | 0x08 | 0x4a729d | DEBUG — отладка (догадка) |
+| `*998*33284#` | 0x08 | 0x4a729d | **инженерное меню «Eng Mode»** (проверено): Help Info, Version Info, Third Party Version Info, Net Info, Phone Info, Adc Calibrate Info и дальше по списку (см. «Строки инженерного режима») |
 | `*998*837#` | 0x09 | 0x187637 | VER — версия ПО (догадка) |
 | `*998*388#` | 0x0a | 0x18cf81 | Bluetooth (проверено); 388 = EUT, тестовый режим Bluetooth |
 | `#*8378#5#` | 0x0c | 0x188395 | тестовый режим (догадка) |
@@ -34,6 +34,40 @@
 | `*998*1#` | 0x10 | 0x18764b | неизвестно |
 | `*998*2#` | 0x11 | 0x187661 | неизвестно |
 | `*998*998#` | 0x12 | 0x187677 | неизвестно |
+
+## Строки инженерного режима
+
+Строки меню лежат в PS одним блоком UTF-16 (около 0x153728). Порядок в блоке не
+обязательно совпадает с порядком пунктов на экране. По ним видно, что умеют
+сервисные экраны:
+
+* **Заводской тест** (`####1111#`, `*998*0#`): Mmi Ui-Test, «Any key continue»,
+  RTC, вибромотор, подсветка, камера, гарнитура, Loopback (микрофон в динамик),
+  мелодия, карта памяти, Product, итог «Test Result».
+* **Eng Mode** (`*998*33284#`):
+  - сведения: Help Info, Version Info, Third Party Version Info, CustName info,
+    UI information, cust id, Net Info, Phone Info, Adc Calibrate Info, Bluetooth Info,
+    Address info;
+  - параметры (Para Set): Power Key, Voice Param, Lcd Param, Debug Param, Rf Param,
+    Hw Param;
+  - звук: усиление трубки, громкой связи и гарнитуры (Dgt/Pga/Scl), самопрослушивание
+    (Sidetone), громкости MIC/Receiver/Ear/Speaker, наборы MP3/MP4;
+  - экран: контраст и яркость главного и внешнего LCD;
+  - сеть: выбор диапазона (GSM, DCS, PCS, двух- и трёхдиапазонный), Forbid Plmn,
+    Send Power, Net Lost, Tcv, Afc, Agc, Err Rate, Layer1 Monitor;
+  - отладка: Arm log, Dsp Log, USB Log, Card Log, режим и цель Assert, ручной
+    Assert, SMS Assert, Sleep Mode, Auto Poweron, режимы Data/AT/Mixed/Debug/Release;
+  - IQ-данные радио: IQ Mode, Ccch IQ, Search IQ, Powersweep Info, каналы, кадры,
+    лимиты, вывод в файл;
+  - WAP и MMS: User Agent, Ua Profile, WAP Log, MMS Response, MMS Max Size;
+  - разное: Enter Eut Mode (тест Bluetooth), Chip Test (ищет `Test.Mp3`/`Test.Mp4`
+    на карте), Gps Test, CMMB TV Test, PC Link (IP, маска, шлюз, DNS, Ping-тест),
+    размер и поворот экрана (176×220, 240×320, 240×400), Hidden Partition Visible,
+    Call Forward Query, Auto Answer Call, PrintScreen Control, Restore Eng.
+
+Часть пунктов — общие для платформы Spreadtrum (GPS, CMMB-ТВ, экраны 240×320 и
+240×400). У B220 соответствующего железа нет, и эти пункты, скорее всего, не
+работают или скрыты.
 
 ## Язык по коду страны
 
