@@ -24,7 +24,9 @@ typedef uint16_t u16;
 #define TICK_MS 20
 #define META_BASE (176*1024) /* MIDP library classes, threads, collector tables */
 #define HEAP_MIN (128*1024)
+#ifndef RESERVE
 #define RESERVE (64*1024)    /* App Heap left to the firmware */
+#endif
 #define LINES 9
 #define COLUMNS 28
 #define GAMES 48
@@ -90,6 +92,40 @@ static void put(char c) {
 }
 
 static void say(const char *text) { while (*text) put(*text++); }
+
+/* JVM_PHONE_LOG builds append lines to E:\JAVA.LOG, opened and closed per line
+   so that a reset loses nothing: "<ms> <event> <hex value> hf=<App Heap free>".
+   For the real phone, where the emulator's probes do not reach. */
+#ifdef JVM_PHONE_LOG
+static u32 log_decimal(char *out, u32 v) {
+    char digits[10];
+    u32 n = 0, k = 0;
+    do digits[n++] = (char)('0'+v%10); while ((v /= 10) != 0);
+    while (n) out[k++] = digits[--n];
+    return k;
+}
+static void plog(const char *text, u32 value) {
+    u16 path[16];
+    widen(path, "E:\\JAVA.LOG");
+    u32 h = api->open_append(path);
+    if (!h) h = api->create(path);
+    if (!h) return;
+    char line[96];
+    u32 n = log_decimal(line, api->ms());
+    line[n++] = ' ';
+    while (*text && n < 60) line[n++] = *text++;
+    line[n++] = ' ';
+    for (int shift = 28; shift >= 0; shift -= 4) line[n++] = "0123456789abcdef"[(value >> shift) & 15];
+    line[n++] = ' '; line[n++] = 'h'; line[n++] = 'f'; line[n++] = '=';
+    n += log_decimal(line+n, api->heap_free());
+    line[n++] = '\r'; line[n++] = '\n';
+    api->write(h, line, n);
+    api->close(h);
+}
+#define LOG(text, value) plog(text, (u32)(value))
+#else
+#define LOG(text, value) ((void)0)
+#endif
 
 static void draw(void) {
     api->fill(0, 0, 176, 176, 0);
@@ -505,6 +541,7 @@ static void *host_alloc_extra(void *context, uint32_t bytes) {
 }
 
 static void shutdown(void) {
+    LOG("shutdown", vm != 0);
     api->timer(0, 0);
     for (u32 i = 0; i < EXTRAS; i++) if (extras[i]) { api->free(extras[i]); extras[i] = 0; }
     if (library_file) { jar_close(&library); api->close(library_file); library_file = 0; }
@@ -609,6 +646,7 @@ static void start(const u16 *path) {
     char name[128];
     if (!jvm_main_class(&host, name, sizeof(name))) { say("No MIDlet-1 or Main-Class\n"); finished = 1; return; }
     midp = is_launcher(name);
+    LOG("main", midp);
     if (midp) say("Loading MIDlet...\n");
     /* Metadata grows with the application's classes (measured: about 1.4 bytes
        per class file byte plus the library); the heap gets the rest. */
@@ -625,11 +663,13 @@ static void start(const u16 *path) {
     if (available < meta+RESERVE+HEAP_MIN) { say("Not enough memory\n"); finished = 1; return; }
     u32 bytes = available-RESERVE;
     block = api->alloc(bytes);
+    LOG("heap", bytes);
     now_set = 0;  /* currentTimeMillis reads the RTC again for this VM */
     for (u32 i = 0; i < HELD_KEYS; i++) held[i].code = down[i] = 0;
     vm = block ? jvm_create(&host, block, bytes, meta) : 0;
-    if (!vm) { say("VM creation failed\n"); finished = 1; return; }
-    if (!jvm_start_main(vm, name)) { say("VM: "); say(jvm_error(vm)); put('\n'); finished = 1; return; }
+    if (!vm) { LOG("no vm", 0); say("VM creation failed\n"); finished = 1; return; }
+    if (!jvm_start_main(vm, name)) { LOG(jvm_error(vm), 0); say("VM: "); say(jvm_error(vm)); put('\n'); finished = 1; return; }
+    LOG("started", meta);
     api->timer(1, 0);  /* first tick; every tick arms the next one */
 }
 
@@ -692,6 +732,10 @@ static void next_tick(int status) {
     api->timer(delay, 0);
 }
 
+#ifdef JVM_PHONE_LOG
+static u32 log_at, log_ticks, log_longest;
+#endif
+
 static void tick(void) {
     if (!vm || finished) return;
     if (exit_deadline && (int32_t)(api->ms()-exit_deadline) >= 0) { done(); return; }
@@ -703,11 +747,19 @@ static void tick(void) {
     u32 rounds = 0;
     do status = jvm_run(vm, SLICE);
     while (status == JVM_RUNNING && api->ms()-start < RUN_MS && ++rounds < MAX_ROUNDS);
+#ifdef JVM_PHONE_LOG
+    log_ticks++;
+    if (api->ms()-start > log_longest) log_longest = api->ms()-start;
+    if (api->ms()-log_at >= 1000) {  /* ticks in the last second << 16 | longest tick ms */
+        LOG(status == JVM_RUNNING ? "run" : "wait", log_ticks << 16 | log_longest);
+        log_at = api->ms(); log_ticks = log_longest = 0;
+    }
+#endif
     /* An uncaught exception or VM error brings the console back over the MIDlet. */
-    if (midp && (status == JVM_ERROR || jvm_uncaught(vm))) { midp = 0; dirty = 1; }
+    if (midp && (status == JVM_ERROR || jvm_uncaught(vm))) { LOG("uncaught", status); midp = 0; dirty = 1; }
     if (status == JVM_DONE && midp) done();
     else if (status == JVM_DONE) { say("[finished]\n"); finished = 1; api->timer(0, 0); }
-    else if (status == JVM_ERROR) { say("VM: "); say(jvm_error(vm)); put('\n'); finished = 1; api->timer(0, 0); }
+    else if (status == JVM_ERROR) { LOG(jvm_error(vm), 0); say("VM: "); say(jvm_error(vm)); put('\n'); finished = 1; api->timer(0, 0); }
     else if (vm && !finished) next_tick(status);
 }
 
@@ -728,6 +780,7 @@ u32 go1_main(const Go1Api *program_api, u32 message, u32 parameter) {
         } else if (message == GO1_KEY_OK) api->exit();
         return 1;
     }
+    if (message != GO1_TIMER && message != GO1_PAINT && !GO1_IS_KEY(message)) LOG("message", message);
     if (message == GO1_CLOSE) { shutdown(); free_infos(); return 1; }
     if (message == GO1_OPEN) { open_list(); return 1; }
     if (choosing) {
