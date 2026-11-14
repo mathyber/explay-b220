@@ -22,6 +22,12 @@ typedef uint16_t u16;
                                 handles keys and repaints between runs. */
 #define MAX_ROUNDS 150       /* SLICE rounds per tick even if the clock stands still */
 #define TICK_MS 20
+#ifndef YIELD_MS
+/* Pause after a full tick. The real B220 has a watchdog fed by a low-priority
+   task: with 1 ms between 30 ms runs that task starved and the phone reset
+   (JAVA.LOG, 2026-11-14), the emulator has no watchdog. */
+#define YIELD_MS 1
+#endif
 #define META_BASE (176*1024) /* MIDP library classes, threads, collector tables */
 #define HEAP_MIN (128*1024)
 #ifndef RESERVE
@@ -724,7 +730,7 @@ static void choose(u32 message) {
    With every thread asleep it waits for the next wake-up, at most TICK_MS. */
 static void next_tick(int status) {
     u32 delay = TICK_MS;
-    if (status == JVM_RUNNING) delay = 1;
+    if (status == JVM_RUNNING) delay = YIELD_MS;
     else {
         u32 wake = jvm_next_wake(vm), now = api->ms();
         if (wake != 0xffffffffu) delay = (int32_t)(wake-now) <= 1 ? 1 : wake-now < TICK_MS ? wake-now : TICK_MS;
