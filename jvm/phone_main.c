@@ -116,7 +116,7 @@ static void plog(const char *text, u32 value) {
     u32 h = api->open_append(path);
     if (!h) h = api->create(path);
     if (!h) return;
-    char line[96];
+    char line[128];
     u32 n = log_decimal(line, api->ms());
     line[n++] = ' ';
     while (*text && n < 60) line[n++] = *text++;
@@ -124,6 +124,12 @@ static void plog(const char *text, u32 value) {
     for (int shift = 28; shift >= 0; shift -= 4) line[n++] = "0123456789abcdef"[(value >> shift) & 15];
     line[n++] = ' '; line[n++] = 'h'; line[n++] = 'f'; line[n++] = '=';
     n += log_decimal(line+n, api->heap_free());
+    /* Free bytes of the firmware byte pools (ThreadX TX_BYTE_POOL +8):
+       Static Byte Heap, Dynamic Base Heap (see b220 heap layout). */
+    line[n++] = ' '; line[n++] = 's'; line[n++] = '=';
+    n += log_decimal(line+n, *(volatile u32 *)0x042c4cc8u);
+    line[n++] = ' '; line[n++] = 'b'; line[n++] = '=';
+    n += log_decimal(line+n, *(volatile u32 *)0x042c4d10u);
     line[n++] = '\r'; line[n++] = '\n';
     api->write(h, line, n);
     api->close(h);
@@ -545,7 +551,9 @@ static void *host_alloc_extra(void *context, uint32_t bytes) {
     u32 i = 0;
     while (i < EXTRAS && extras[i]) i++;
     if (i == EXTRAS) return 0;
+#ifndef JVM_NO_STATIC
     if (api->size >= __builtin_offsetof(Go1Api, alloc_static)+sizeof(void *)) extras[i] = api->alloc_static(bytes);
+#endif
     if (!extras[i] && api->heap_free() >= bytes+RESERVE) extras[i] = api->alloc(bytes);
     return extras[i];
 }
@@ -663,7 +671,11 @@ static void start(const u16 *path) {
     u32 meta = META_BASE+jar_class_bytes(&application)/5*7;
     if (midp) {
         /* From the Static Byte Heap when the loader has it: the App Heap is the VM's. */
+#ifdef JVM_NO_STATIC
+        back = 0;
+#else
         back = api->size >= __builtin_offsetof(Go1Api, alloc_static)+sizeof(void *) ? api->alloc_static(JVM_SCREEN_WIDTH*JVM_SCREEN_HEIGHT*2) : 0;
+#endif
         if (!back) back = api->alloc(JVM_SCREEN_WIDTH*JVM_SCREEN_HEIGHT*2);
         if (!back) { say("Not enough memory\n"); finished = 1; return; }
         u16 *screen = api->screen();
