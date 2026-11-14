@@ -397,12 +397,18 @@ static Object *allocate_at(Jvm *vm, u32 bytes, int top) {
     if (g < MIN_GRANULES) g = MIN_GRANULES;
     Object *o = take(vm, g, top);
     if (!o) {
+        JLOG("gc", bytes);
         collect(vm);
+        JLOG("gc done", vm->used);
         if (jvm_compact_stress) compact(vm);
         o = take(vm, g, top);
     }
     if (!o && borrow_metadata(vm, g*GRANULE)) o = take(vm, g, top);
-    if (!o && compact(vm)) o = take(vm, g, top);
+    if (!o) {
+        JLOG("compact", bytes);
+        if (compact(vm)) o = take(vm, g, top);
+        JLOG("compact done", o != 0);
+    }
     return o;
 }
 

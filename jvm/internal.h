@@ -283,4 +283,12 @@ void *jvm_memcpy(void *d, const void *s, u32 n);
 int jvm_memcmp(const void *a, const void *b, u32 n);
 u32 jvm_strlen(const char *s);
 
+/* JVM_PHONE_LOG builds: a line in E:\JAVA.LOG (phone_main.c). */
+#ifdef JVM_PHONE_LOG
+void jvm_phone_log(const char *text, uint32_t value);
+#define JLOG(text, value) jvm_phone_log(text, (uint32_t)(value))
+#else
+#define JLOG(text, value) ((void)0)
+#endif
+
 #endif

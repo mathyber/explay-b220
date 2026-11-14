@@ -129,6 +129,7 @@ static void plog(const char *text, u32 value) {
     api->close(h);
 }
 #define LOG(text, value) plog(text, (u32)(value))
+void jvm_phone_log(const char *text, uint32_t value) { plog(text, value); }
 #else
 #define LOG(text, value) ((void)0)
 #endif
@@ -379,14 +380,17 @@ static void draw_list(void) {
 
 static uint8_t *host_read(void *context, const char *path, uint32_t *size) {
     (void)context;
+    LOG(path, 0);
     uint8_t *data = library_file ? jar_read(&library, path, size) : 0;
     if (!data && application_file) data = jar_read(&application, path, size);
+    LOG("read", data ? *size : 0xffffffffu);
     return data;
 }
 static void host_release(void *context, uint8_t *data) { archive_release(context, data); }
 
 static int host_stream(void *context, const char *path, JarStream *stream, uint32_t *size) {
     (void)context;
+    LOG(path, 1);
     return (library_file && jar_stream_open(&library, path, stream, size)) ||
            (application_file && jar_stream_open(&application, path, stream, size));
 }
@@ -756,6 +760,7 @@ static void tick(void) {
 #ifdef JVM_PHONE_LOG
     log_ticks++;
     if (api->ms()-start > log_longest) log_longest = api->ms()-start;
+    if (api->ms()-start > 300) LOG("long tick", api->ms()-start);
     if (api->ms()-log_at >= 1000) {  /* ticks in the last second << 16 | longest tick ms */
         LOG(status == JVM_RUNNING ? "run" : "wait", log_ticks << 16 | log_longest);
         log_at = api->ms(); log_ticks = log_longest = 0;

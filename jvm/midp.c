@@ -659,6 +659,7 @@ static u32 png_bpp(const Png *png) { u32 bits = png_channels(png->color)*png->de
 /* Whole image at once: raw holds every row (small images: list icons). */
 static int png_decode_core(const u8 *p, u32 size, const Png *png, u8 *packed, u8 *raw, u16 *out, u8 *out_alpha) {
     u32 row_bytes = png_row_bytes(png), bpp = png_bpp(png);
+    JLOG("png", png->width << 16 | png->height);
     u32 n = png_idat(p, size, packed);
     /* zlib: 2-byte header, deflate data, Adler-32 (not checked). */
     if (!(n > 6 && jar_inflate(packed+2, n-6, raw, png->height*(row_bytes+1)))) return 0;
