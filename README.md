@@ -2,6 +2,158 @@
 
 [План дальнейшей работы по этапам](ROADMAP_RU.md).
 
+## Прошивка для телефона (CUT)
+
+Главный результат проекта — изменённая прошивка **CUT** для настоящего Explay B220.
+Она собирается из оригинальной `S915D_B220_QCIF_N_TRI_M224V02.02B06`; меняется только
+PS (код и ресурсы), размер и раскладка те же. Что в ней:
+
+- **«Приложения»** — правый нижний пункт главного меню (и ярлык на рабочем столе):
+  запуск своих программ `*.GO1` с карты памяти, в том числе Java-машины и браузера;
+- шрифт Nokia Standard Multiscript со сглаживанием, белые цифры часов;
+- убраны встроенные обои, «Медиатека», «Социальные сети», «Мировое время»;
+  анимация включения — чёрный экран с точками; свои иконки.
+
+Подробно — [CUT_RU.md](CUT_RU.md), [SD_APPS_RU.md](SD_APPS_RU.md).
+
+**Проверено на телефоне** (2026-11-14): BROWSER.GO1 открывает страницы (и HTTPS),
+Opera Mini 4.2/4.4 работает (медленно, GPRS), «Газила» играется с малым числом
+кадров, Age of Empires III до игры не доходит. У телефона ядро ARMv4T — об этом
+и о найденных ошибках в [J2ME_RU.md](J2ME_RU.md#на-настоящем-телефоне-2026-11-14).
+
+### Сборка
+
+Прошивка и программы в git не хранятся (папка `analysis/`), их собирают:
+
+1. Окружение и анализ исходной прошивки — внизу этой страницы.
+2. Шрифт `NokiaStandardMultiscript.ttf` положить в `analysis\donor-fonts\font\` (в git не входит).
+3. Компилятор Zig и JDK скачиваются закреплённых версий:
+   ```powershell
+   .\.venv\Scripts\python.exe -m tools.setup_arm_toolchain
+   .\.venv\Scripts\python.exe -m tools.setup_reverse_tools
+   ```
+   Для браузера ещё BearSSL и `cacert.pem` — [BROWSER_GO1_RU.md](BROWSER_GO1_RU.md).
+4. **`Start B220 CUT.cmd`** собирает недостающие шаги и запускает прошивку в эмуляторе.
+   Без окна: `.\.venv\Scripts\python.exe -m tools.build_cut`.
+5. PAC для прошивальщика:
+   ```powershell
+   .\.venv\Scripts\python.exe -m tools.build_pac
+   ```
+
+Где лежит результат:
+
+| Файл | Что это |
+|---|---|
+| `analysis\firmware-patches\cut\b220-cut.bin` | образ PS (для эмулятора и сборки PAC) |
+| `analysis\firmware-patches\cut\B220_CUT.pac` | PAC для прошивки телефона |
+| `analysis\firmware-patches\cut\manifest.json` | что изменено, хеши, свободные области ROM |
+
+### Установка на телефон
+
+PAC — копия оригинального, в которой заменён только PS. Он пишет **только PS**:
+NV (калибровка, IMEI, настройки) не трогается. Полная схема (`--full`) на B220 не
+работает: резервное копирование NV останавливается ошибкой
+«Can not find nv id Calibration» ещё до записи.
+
+1. Прошивальщик — **Spreadtrum UpgradeDownload** (проверено R27.25.4601) и
+   драйвер Spreadtrum USB. SP Flash Tool не подходит: он для MediaTek.
+2. В UpgradeDownload загрузить `B220_CUT.pac` и нажать «Start».
+3. Выключенный телефон подключить USB-кабелем (с данными), **удерживая левую
+   экранную клавишу**, пока не начнётся загрузка.
+4. Таймаут на шаге `_POWEROFF_` в конце не страшен: прошивка уже записана,
+   телефон загружается с ней.
+
+### Карта памяти
+
+Все файлы для карты собирает одна команда:
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.build_phone_card --jar <игра.jar> [--jar …]
+```
+
+Содержимое `analysis\phone-card\` скопировать в **корень** карты (FAT, диск `E:`):
+
+| Файл | Что это |
+|---|---|
+| `APPS.LST` | список программ для «Приложений», по имени файла в строке (до 16) |
+| `JAVA.GO1` | Java-машина: список `.jar` из `E:\JAVA\`, запуск MIDlet |
+| `JAVALIB.JAR` | библиотека классов Java (CLDC/MIDP), нужна `JAVA.GO1` |
+| `JAVA\*.jar` | игры и приложения J2ME (сюда же кладите свои) |
+| `BROWSER.GO1` | браузер с HTTPS ([BROWSER_GO1_RU.md](BROWSER_GO1_RU.md)) |
+| `BENCH.GO1` | замер скорости, результат дописывается в `E:\BENCH.TXT` |
+
+С `--debug` добавляются `JAVALOG.GO1` (Java с журналом `E:\JAVA.LOG`),
+`MEMTEST.GO1` (тест памяти) и `FILES.GO1` (тест записи файлов). Свою программу
+положите рядом и допишите её имя в `APPS.LST`. Долгое нажатие правой экранной
+из любой программы возвращает к списку.
+
+### Своя программа GO1
+
+Программа GO1N — машинный код ARM/Thumb на C, без libc. Всё, что ей доступно,
+описано в [patches/go1.h](patches/go1.h): память, файлы (чтение и запись),
+экран 176×220 в RGB565 с текстом, клавиши, таймер, часы, GPRS и TCP. Пример —
+[apps/card_hello.c](apps/card_hello.c):
+
+```c
+#include "go1.h"
+/* go1-title: Привет    <- имя в списке «Приложений» */
+
+static const Go1Api *api;
+
+__attribute__((used, section(".entry")))
+go1_u32 go1_main(const Go1Api *program_api, go1_u32 message, go1_u32 parameter) {
+    api = program_api;
+    if (message == GO1_OPEN) api->timer(1000, 1);         /* GO1_TIMER раз в секунду */
+    else if (message == GO1_KEY_SOFT_RIGHT) { api->exit(); return 1; }
+    else if (message == GO1_CLOSE) return 1;              /* освободить память, закрыть файлы */
+    api->fill(0, 0, 176, 176, 0x0000);
+    api->text(10, "HELLO GO1", 0xffe0);
+    api->flush(0, 0, 176, 176);
+    return 1;
+}
+```
+
+Сборка и запуск:
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.build_native_app apps/card_hello.c --out HELLO.GO1
+.\.venv\Scripts\python.exe -m tools.install_sd_app apps/card_hello.c --card <образ карты>
+```
+
+`install_sd_app` собирает программу, кладёт на образ карты эмулятора и обновляет
+`APPS.LST`; эмулятор при этом должен быть закрыт. Карта прошивки CUT —
+`analysis\emulator\experiments\<SHA-256 файла b220-cut.bin>\sd-card.img`, без
+`--card` берётся карта варианта `Start B220 SD APP.cmd`.
+
+Для телефона скопируйте `HELLO.GO1` на карту и добавьте строку `HELLO.GO1` в
+`APPS.LST`. Иконка 16×16 — PNG с тем же именем, что исходник (`apps/card_hello.png`).
+
+Что нужно знать:
+
+- `go1_main` вызывается на каждое событие: `GO1_OPEN` после загрузки, клавиши
+  (`GO1_PRESS | код`, отпускание, повтор, долгое), `GO1_TIMER`, `GO1_PAINT`
+  (перерисовать) и `GO1_CLOSE` перед выгрузкой. Возвращайте быстро: пока
+  программа работает, телефон не обрабатывает ничего другого. Долгую работу
+  делите на куски по таймеру.
+- Память — `api->alloc`/`api->free` (App Heap, около 1,4 МБ); `alloc` даёт 0,
+  если не хватает. Всё выделенное освободите на `GO1_CLOSE`.
+- Ядро телефона — **ARMv4T**. Сборщик это учитывает (`-mcpu=arm7tdmi`, свои
+  функции деления из [patches/aeabi_v4t.S](patches/aeabi_v4t.S)); свой ассемблер
+  пишите без `blx`, `clz` и CP15 и возвращайтесь через `bx lr`.
+- Копирование структур компилятор превращает в `__aeabi_memcpy`, а в compiler-rt
+  на его месте заглушка-ловушка: копируйте поля или определите свой `memcpy`
+  (как в [apps/browser/browser.c](apps/browser/browser.c)).
+- Быстрая проверка без телефона — `tests.test_sd_app` (программа выполняется в
+  Unicorn на модели ARMv4T с подменёнными вызовами прошивки), полная — в
+  эмуляторе на прошивке CUT.
+
+Больше примеров: [apps/card_native.c](apps/card_native.c) (память, файлы),
+[apps/card_files.c](apps/card_files.c) (запись), [apps/card_nettest.c](apps/card_nettest.c)
+(HTTP), [apps/card_bench.c](apps/card_bench.c); устройство формата и загрузчика —
+[SD_APPS_RU.md](SD_APPS_RU.md#нативные-программы-go1n).
+
+## Эмулятор и исследование
+
 **Узкий шрифт:** `Start B220 FONT.cmd` запускает отдельный вариант с Arial Narrow,
 уменьшенными ширинами букв и высотами 14/12 вместо 16/14 пикселей.
 [Запуск, сравнение и параметры](FONT_PATCH_RU.md).
