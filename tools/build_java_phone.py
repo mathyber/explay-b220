@@ -32,9 +32,11 @@ FIRMWARE = ROOT/'analysis/firmware-patches/cut/b220-cut.bin'
 ARM_FILES = ('interp.c', 'midp.c', 'jar.c', 'heap.c', 'jit.c')  # drawing loops; inflate; heap.c: saves r4-r11 for compaction
 
 
-def build_vm():
+def build_vm(defines=(), title=None):
+    """defines: extra -D flags, e.g. JVM_NO_JIT for a build without the JIT."""
     return compile_native(SOURCES/'phone_main.c', [SOURCES/f for f in VM_FILES if f not in ARM_FILES],
-                          includes=[SOURCES], arm_sources=[SOURCES/f for f in ARM_FILES])
+                          includes=[SOURCES], arm_sources=[SOURCES/f for f in ARM_FILES],
+                          defines=defines, title=title)
 
 
 def zip_directory(directory, path, manifest=None):

@@ -132,16 +132,16 @@ def with_extras(program, title=None, icon=None):
     return bytes(result)
 
 
-def compile_native(source, sources=(), includes=(), icon=None, title=None, libraries=(), library_flags=(), arm_sources=()):
+def compile_native(source, sources=(), includes=(), icon=None, title=None, libraries=(), library_flags=(), arm_sources=(), defines=()):
     """GO1N program. Defaults: the title from a 'go1-title:' line in the source,
     the icon from a 16x16 PNG with the source's name; both are optional."""
     png = Path(source).with_suffix('.png')
     icon = icon or (png if png.exists() else None)
     title = title or source_title(source)
-    return with_extras(_compile(source, sources, includes, libraries, library_flags, arm_sources), title, icon)
+    return with_extras(_compile(source, sources, includes, libraries, library_flags, arm_sources, defines), title, icon)
 
 
-def _compile(source, sources=(), includes=(), libraries=(), library_flags=(), arm_sources=()):
+def _compile(source, sources=(), includes=(), libraries=(), library_flags=(), arm_sources=(), defines=()):
     """libraries: third-party C files, compiled without warnings and cached by content and flags.
     arm_sources: own C files compiled in ARM state (all warnings are errors), for hot code:
     Thumb on ARMv4T has 8 low registers and spills an interpreter's state to the stack."""
@@ -159,7 +159,7 @@ def _compile(source, sources=(), includes=(), libraries=(), library_flags=(), ar
     common = ['cc', '-c', '-target', 'thumbeb-freestanding-eabi', '-mcpu=arm7tdmi', '-mthumb', '-Oz',
               '-ffreestanding', '-fno-builtin', '-fno-stack-protector', '-fno-unwind-tables',
               '-fno-asynchronous-unwind-tables', '-ffunction-sections', '-fdata-sections',
-              '-Ipatches', *[f'-I{i}' for i in includes]]
+              '-Ipatches', *[f'-I{i}' for i in includes], *[f'-D{d}' for d in defines]]
     cache = ROOT/'analysis/toolchains/objects'
     cache.mkdir(parents=True, exist_ok=True)
 
