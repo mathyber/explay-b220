@@ -185,6 +185,9 @@ def _compile(source, sources=(), includes=(), libraries=(), library_flags=(), ar
         for index, item in enumerate(arm_sources):
             objects.append(str(Path(folder)/f'arm{index}.o'))
             execute([str(EXECUTABLE), *arm, '-Wall', '-Wextra', '-Werror', str(item), '-o', objects[-1]])
+        # ARMv4T-safe returns for compiler-rt's assembly division helpers (patches/aeabi_v4t.S).
+        objects.append(str(Path(folder)/'aeabi_v4t.o'))
+        execute([str(EXECUTABLE), *arm, str(ROOT/'patches/aeabi_v4t.S'), '-o', objects[-1]])
         with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
             objects += list(pool.map(library_object, libraries))
         script = (ROOT/LINKER).read_text(encoding='utf-8')

@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from unicorn import Uc,UC_ARCH_ARM,UC_MODE_ARM,UC_MODE_BIG_ENDIAN,UC_HOOK_CODE
-from unicorn.arm_const import UC_ARM_REG_PC,UC_ARM_REG_LR,UC_ARM_REG_SP,UC_ARM_REG_R0,UC_ARM_REG_CPSR,UC_CPU_ARM_926
+from unicorn.arm_const import UC_ARM_REG_PC,UC_ARM_REG_LR,UC_ARM_REG_SP,UC_ARM_REG_R0,UC_ARM_REG_CPSR,UC_CPU_ARM_926,UC_CPU_ARM_TI925T
 from emulator.board import ROOT
 from tools.go1asm import assemble
 from tools.build_catch_game import compile_game
@@ -110,7 +110,7 @@ class NativeVmTests(unittest.TestCase):
         # This deliberately substitutes SFS/graphics/allocator for fast CPU unit
         # tests. tools.prove_sd_app uses actual firmware APIs and SD/SPI instead.
         uc=Uc(UC_ARCH_ARM,UC_MODE_ARM|UC_MODE_BIG_ENDIAN)
-        uc.ctl_set_cpu_model(UC_CPU_ARM_926)
+        uc.ctl_set_cpu_model(UC_CPU_ARM_TI925T)
         uc.mem_map(0,0x800000);uc.mem_write(0,self.image)
         uc.mem_map(0x04000000,0x400000);uc.mem_map(0x40000000,0x10000)
         uc.mem_map(0x81003000,0x1000)  # system counter (api->ms)

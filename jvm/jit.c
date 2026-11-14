@@ -137,7 +137,9 @@ static void branch(Emit *e, u32 cond, u32 to) {
 }
 static void call(Emit *e, const void *function) {
     constant(e, R12, (u32)(uintptr_t)function);
-    emit(e, 0xE12FFF3Cu);  /* blx r12 */
+    /* ARMv4T has no BLX: lr = the instruction after the bx (pc reads +8). */
+    emit(e, 0xE1A0E00Fu);  /* mov lr, pc */
+    emit(e, 0xE12FFF1Cu);  /* bx r12 */
 }
 /* The last emitted instruction made conditional. */
 static void cond_last(Emit *e, u32 cond) {
@@ -947,8 +949,11 @@ static void translate_method(Emit *e) {
     e->n = e->stub_base+3*e->stubs;
 }
 
-/* Data cache to memory, instruction cache emptied: the core then fetches the new code. */
+/* The B220's core is ARMv4T without CP15 (the PS has no CP15 instruction), so
+   there is no cache to clean: an MCR p15 would be an undefined instruction.
+   The ARM926 cache maintenance used before is kept for other ARMv5 phones. */
 static int sync_code(const void *start, u32 bytes) {
+#ifdef JVM_ARM926_CACHE
     u32 cpsr;
     __asm__ volatile("mrs %0, cpsr" : "=r"(cpsr));
     if ((cpsr & 0x1f) == 0x10) return 0;  /* user mode: no cache maintenance */
@@ -956,6 +961,9 @@ static int sync_code(const void *start, u32 bytes) {
         __asm__ volatile("mcr p15, 0, %0, c7, c10, 1" : : "r"(p) : "memory");  /* clean D line */
     __asm__ volatile("mcr p15, 0, %0, c7, c10, 4" : : "r"(0) : "memory");      /* drain write buffer */
     __asm__ volatile("mcr p15, 0, %0, c7, c5, 0" : : "r"(0) : "memory");       /* invalidate I cache */
+#else
+    (void)start; (void)bytes;
+#endif
     return 1;
 }
 
